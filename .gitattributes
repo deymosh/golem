@@ -1,0 +1,8 @@
+# Normalize everything to LF — the shell scripts break with CRLF
+* text=auto eol=lf
+
+# Mark obvious binaries (in case models/artifacts ever get committed)
+*.gguf binary
+*.png binary
+*.jpg binary
+*.ico binary

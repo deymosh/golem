@@ -1,0 +1,18 @@
+# The build context is the repo root; keep it tiny.
+.git
+.local
+data
+logs
+docs
+*.md
+!docker/**/*.md
+
+# models / weights (also under data/, listed again for safety)
+*.gguf
+*.gguf.part
+*.safetensors
+*.bin
+
+.env
+.env.*
+!.env.example

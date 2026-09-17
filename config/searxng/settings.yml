@@ -1,0 +1,19 @@
+# SearXNG settings for Golem.
+#
+# The service is internal to the compose network (no published port) and
+# only serves the mcp-search container, so the limiter is off. JSON
+# output is required by mcp-searxng.
+
+use_default_settings: true
+
+server:
+  secret_key: "golem-searxng-internal"
+  limiter: false
+  image_proxy: false
+
+search:
+  safe_search: 0
+  autocomplete: "duckduckgo"
+  formats:
+    - html
+    - json

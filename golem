@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+#
+#   ▟█▙  Golem - local AI construct for Claude Code
+#   ▜█▛  one control script for the whole stack, native or Docker
+#
+# Usage:
+#   ./golem <command> [--native | --docker] [args...]
+#
+# Commands:
+#   setup             Inspect the machine, install build deps, scaffold dirs
+#   install           Build llama.cpp with CUDA          (native only)
+#   pull              Download the model from Hugging Face
+#   up                Start the stack (inference + web search MCP)
+#   down              Stop the stack
+#   restart           down + up
+#   status            Health of inference + MCP web search (+ docker ps in docker mode)
+#   logs [name]       Follow logs (name: inference|search; default: both)
+#   bench             Run the fixed benchmark prompt
+#   claude [args...]  Launch Claude Code pointed at the local model
+#   env               Print the env exports for Claude Code
+#   help              This message
+#
+# Mode:
+#   DEPLOY_MODE in .env (native|docker), overridden by --native / --docker.
+
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS="${ROOT_DIR}/scripts"
+COMPOSE_FILE="${ROOT_DIR}/compose.yml"
+
+# ------------------------------------------------------------
+# .env
+# ------------------------------------------------------------
+
+if [[ ! -f "${ROOT_DIR}/.env" ]]; then
+    if [[ -f "${ROOT_DIR}/.env.example" ]]; then
+        cp "${ROOT_DIR}/.env.example" "${ROOT_DIR}/.env"
+        echo "[INFO] Created .env from .env.example - review it, then re-run."
+        exit 1
+    fi
+    echo "[ERROR] No .env and no .env.example."
+    exit 1
+fi
+
+set -a
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/.env"
+set +a
+
+LOCAL_AI_HOST="${LOCAL_AI_HOST:-127.0.0.1}"
+LOCAL_AI_PORT="${LOCAL_AI_PORT:-8000}"
+LOCAL_AI_API_KEY="${LOCAL_AI_API_KEY:-local-ai-key}"
+MODEL_ALIAS="${MODEL_ALIAS:-local-model}"
+DEPLOY_MODE="${DEPLOY_MODE:-native}"
+
+# ------------------------------------------------------------
+# Args: pull out --native / --docker anywhere in the line
+# ------------------------------------------------------------
+
+CMD="${1:-help}"
+shift || true
+
+ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --native) DEPLOY_MODE="native" ;;
+        --docker) DEPLOY_MODE="docker" ;;
+        *) ARGS+=("$1") ;;
+    esac
+    shift
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
+die() { echo "[ERROR] $*" >&2; exit 1; }
+
+have_compose() {
+    command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1
+}
+
+dc() {
+    have_compose || die "docker compose not available"
+    docker compose -f "${COMPOSE_FILE}" --env-file "${ROOT_DIR}/.env" "$@"
+}
+
+banner() {
+    echo
+    echo "  golem :: ${1}  (mode: ${DEPLOY_MODE})"
+    echo "  --------------------------------------------"
+}
+
+# ------------------------------------------------------------
+# Commands
+# ------------------------------------------------------------
+
+cmd_setup() {
+    "${SCRIPTS}/setup-ai.sh"
+}
+
+cmd_install() {
+    [[ "${DEPLOY_MODE}" == "docker" ]] && die "install is native-only; in docker mode use: ./golem up --docker (builds the image)"
+    "${SCRIPTS}/install-llama-cpp.sh"
+}
+
+cmd_pull() {
+    # The model lives on the host in either mode (mounted into the container).
+    "${SCRIPTS}/download-model.sh"
+}
+
+cmd_up() {
+    banner "up"
+    if [[ "${DEPLOY_MODE}" == "docker" ]]; then
+        dc up -d --build
+    else
+        [[ -x "${ROOT_DIR}/.local/bin/llama-server" ]] || cmd_install
+        "${SCRIPTS}/start-local-ai.sh"
+        echo
+        echo "[INFO] Web search MCP is docker-only; start it with: ./golem up --docker"
+    fi
+    echo
+    cmd_env
+}
+
+cmd_down() {
+    banner "down"
+    if [[ "${DEPLOY_MODE}" == "docker" ]]; then
+        dc down
+    else
+        "${SCRIPTS}/stop-local-ai.sh" || true
+    fi
+}
+
+cmd_restart() {
+    cmd_down || true
+    cmd_up
+}
+
+cmd_status() {
+    banner "status"
+    "${SCRIPTS}/health-check-ai.sh" || true
+    if [[ "${DEPLOY_MODE}" == "docker" ]] && have_compose; then
+        echo
+        dc ps
+    fi
+}
+
+cmd_logs() {
+    local target="${1:-}"
+    if [[ "${DEPLOY_MODE}" == "docker" ]]; then
+        case "${target}" in
+            search) dc logs -f mcp-search ;;
+            "") dc logs -f ;;
+            *) dc logs -f "${target}" ;;
+        esac
+    else
+        case "${target}" in
+            inference|"") tail -f "${ROOT_DIR}/logs/local-ai.log" ;;
+            search) die "web search logs are docker-only" ;;
+            *) die "unknown log target: ${target}" ;;
+        esac
+    fi
+}
+
+cmd_bench() {
+    "${SCRIPTS}/benchmark-ai.sh"
+}
+
+cmd_env() {
+    # llama-server speaks the Anthropic Messages API natively, so Claude
+    # Code connects straight to it - no gateway in between.
+    cat <<EOF
+# Point Claude Code at Golem:
+export ANTHROPIC_BASE_URL="http://${LOCAL_AI_HOST}:${LOCAL_AI_PORT}"
+export ANTHROPIC_AUTH_TOKEN="${LOCAL_AI_API_KEY}"
+export ANTHROPIC_MODEL="${MODEL_ALIAS}"
+export ANTHROPIC_SMALL_FAST_MODEL="${MODEL_ALIAS}"
+EOF
+}
+
+cmd_claude() {
+    command -v claude >/dev/null 2>&1 || die "claude (Claude Code) is not installed"
+    exec env \
+        ANTHROPIC_BASE_URL="http://127.0.0.1:${LOCAL_AI_PORT}" \
+        ANTHROPIC_AUTH_TOKEN="${LOCAL_AI_API_KEY}" \
+        ANTHROPIC_MODEL="${MODEL_ALIAS}" \
+        ANTHROPIC_SMALL_FAST_MODEL="${MODEL_ALIAS}" \
+        claude "$@"
+}
+
+cmd_help() {
+    sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+case "${CMD}" in
+    setup)    cmd_setup ;;
+    install)  cmd_install ;;
+    pull)     cmd_pull ;;
+    up)       cmd_up ;;
+    down)     cmd_down ;;
+    restart)  cmd_restart ;;
+    status)   cmd_status ;;
+    logs)     cmd_logs "${1:-}" ;;
+    bench)    cmd_bench ;;
+    claude)   cmd_claude "$@" ;;
+    env)      cmd_env ;;
+    help|-h|--help) cmd_help ;;
+    *) echo "[ERROR] unknown command: ${CMD}"; echo; cmd_help; exit 1 ;;
+esac
