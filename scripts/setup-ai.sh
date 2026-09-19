@@ -141,7 +141,7 @@ if [[ "${EUID}" -eq 0 ]]; then
     echo
     echo "Run it as your normal Linux user:"
     echo
-    echo "  ./scripts/setup-linux-ai.sh"
+    echo "  ./scripts/setup-ai.sh"
     exit 1
 fi
 

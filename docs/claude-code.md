@@ -10,6 +10,8 @@ Prerequisite: `./golem up --docker` and `./golem status` green.
 
 ## Option B — environment variables (any machine on the LAN)
 
+Linux / macOS / WSL2:
+
 ```bash
 export ANTHROPIC_BASE_URL="http://<golem-host>:8000"   # llama-server, Anthropic-native
 export ANTHROPIC_AUTH_TOKEN="<LOCAL_AI_API_KEY from .env>"
@@ -18,15 +20,24 @@ export ANTHROPIC_SMALL_FAST_MODEL="local-model"
 claude
 ```
 
+Windows PowerShell:
+
+```powershell
+$env:ANTHROPIC_BASE_URL = "http://<golem-host>:8000"
+$env:ANTHROPIC_AUTH_TOKEN = "<LOCAL_AI_API_KEY from .env>"
+$env:ANTHROPIC_MODEL = "local-model"
+$env:ANTHROPIC_SMALL_FAST_MODEL = "local-model"
+claude
+```
+
 Notes:
 
 - Use **`ANTHROPIC_AUTH_TOKEN`**, not `ANTHROPIC_API_KEY`. With a custom base URL Claude Code
   sends it as a bearer token; `ANTHROPIC_API_KEY` is for real Anthropic auth.
 - Settings can also live in `~/.claude/settings.json` under `env`.
-- **No gateway is involved** — llama.cpp implements `/v1/messages` (including tools and
-  thinking blocks) natively. If you nonetheless route through a remote claude-code-router,
-  add Golem there as an OpenAI provider (`http://<golem-host>:8000/v1/chat/completions`)
-  and point `ANTHROPIC_BASE_URL` at that gateway instead.
+- No translation layer is involved — llama.cpp implements `/v1/messages` natively, including
+  streaming, `thinking` and `tool_use` blocks (verified against this stack; see
+  [architecture.md](architecture.md)).
 
 ## Web search for Claude Code
 

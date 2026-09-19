@@ -8,17 +8,23 @@
 | mcp-search | `golem-mcp-search` | `0.0.0.0:8811` | MCP over streamable HTTP (`/mcp`), Bearer auth | `MCP_*` env in compose |
 | search | `golem-search` | compose network only | SearXNG HTTP API (JSON) | `config/searxng/settings.yml` |
 
-There is **no gateway layer**: llama.cpp serves the Anthropic Messages API natively, so agents
-connect straight to `:8000`. A remote gateway (claude-code-router, LiteLLM, …) on another machine
-can still sit in front of it as a plain OpenAI-compatible upstream.
+There is **no translation layer**: llama.cpp serves the Anthropic Messages API natively, so
+agents connect straight to `:8000`. Both APIs are served by the same process, model and KV
+cache — a request through either protocol hits the same weights and the same prompt cache.
 
 ## Request flows
 
 **Inference** — Claude Code builds an Anthropic `POST /v1/messages` to `ANTHROPIC_BASE_URL`
-(`:8000`), auth `x-api-key` = `LOCAL_AI_API_KEY`. llama-server runs the GGUF (all layers on GPU,
-FlashAttention, q8_0 KV cache) and streams Anthropic events back. OpenAI clients hit
-`/v1/chat/completions` with `Authorization: Bearer` = the same key. Tool calling needs `--jinja`
-(enabled in compose).
+(`:8000`), auth `x-api-key` (or Bearer) = `LOCAL_AI_API_KEY`. llama-server runs the GGUF and
+streams Anthropic SSE events back (`message_start` → `content_block_delta` → `message_stop`),
+including `thinking` and `tool_use` blocks. OpenAI clients hit `/v1/chat/completions` with
+`Authorization: Bearer` = the same key. Tool calling needs `--jinja` (enabled in compose).
+
+Verified empirically against this stack (2026-09-20): non-streamed and streamed Anthropic
+responses, Bearer auth, and a tool-use round trip (`stop_reason: "tool_use"`) all behave as the
+Anthropic spec describes. Upstream llama.cpp documents the endpoint under
+"Anthropic-compatible API Endpoints" with the caveat that "no strong claims of compatibility
+with the Anthropic API spec are made" — it is a native implementation, not a certified one.
 
 **Web search** — the agent's MCP client POSTs JSON-RPC to `http://<host>:8811/mcp`
 (`initialize` → `tools/call`). `mcp-searxng` queries SearXNG at `http://search:8080` over the
@@ -40,8 +46,16 @@ Both bind `0.0.0.0` (LAN use). Anyone who can reach the ports can use your GPU /
 exit for searches — keep real secrets in `LOCAL_AI_API_KEY` / `MCP_SEARCH_API_KEY` and firewall
 if the LAN is not trusted.
 
-## VRAM timeline
+## Memory timeline
 
-Weights (5.24 GiB) are resident from boot; the KV cache is virtual and grows as the conversation
-fills: a full 32K slot costs ~2.3 GiB. Worst case ≈ 9.2 GiB + Windows/display (~1.5 GiB) — this
-is why `CONTEXT_SIZE=32768` is the ceiling on a 12 GB card, not the model's 262K native limit.
+Two regimes, chosen by `EXTRA_ARGS` in `.env` (details and measured numbers:
+[models.md](models.md)):
+
+- **Dense model, all weights in VRAM** — weights are resident from boot; the KV cache is
+  virtual and grows as the conversation fills (~2.3 GiB per 32K slot at q8_0). What fits is
+  `weights + KV + OS/display overhead` inside VRAM, which is why a 12 GB card with a ~9B Q4
+  model caps around 100K context.
+- **MoE model with `--cpu-moe`** — attention + dense parts + KV stay in VRAM; all expert FFN
+  weights live in system RAM. VRAM stays nearly flat as context grows (KV still grows), which
+  is how a 30B-class model serves a 262K window on a 12 GB card. System RAM needs headroom for
+  the experts — under WSL2 raise the VM limit via `%USERPROFILE%\.wslconfig` (`memory=…`).

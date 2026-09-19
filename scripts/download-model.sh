@@ -20,8 +20,8 @@ MODELS_DIR="${PROJECT_ROOT}/data/models"
 CACHE_DIR="${PROJECT_ROOT}/data/cache"
 LOG_DIR="${PROJECT_ROOT}/logs"
 
-HF_REPO="${HF_REPO:-backpack-run/Devstral-Small-2-24B-Instruct-2512-GGUF}"
-MODEL_FILE="${MODEL_FILE:-Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf}"
+HF_REPO="${HF_REPO:-unsloth/Qwen3.6-35B-A3B-GGUF}"
+MODEL_FILE="${MODEL_FILE:-Qwen3.6-35B-A3B-UD-Q3_K_M.gguf}"
 
 HF_VENV="${CACHE_DIR}/huggingface-venv"
 MODEL_PATH="${MODELS_DIR}/${MODEL_FILE}"
@@ -92,7 +92,7 @@ echo
 section "1. PLATFORM"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
-    error "This script requires Linux."
+    error "This script requires a Linux environment (native Linux or WSL2 on Windows)."
     exit 1
 fi
 
@@ -150,8 +150,7 @@ AVAILABLE_GB="$((AVAILABLE_KB / 1024 / 1024))"
 
 info "Available disk space: approximately ${AVAILABLE_GB} GB"
 
-# Devstral 24B Q4_K_M should be roughly ~14-16 GB.
-# Keep a generous safety margin.
+# Keep a generous safety margin for the model plus temp files.
 MIN_FREE_GB=25
 
 if (( AVAILABLE_GB < MIN_FREE_GB )); then
@@ -361,8 +360,9 @@ if [[ -f "${MODEL_PATH}" ]]; then
     info "Path : ${MODEL_PATH}"
     info "Size : ${MODEL_SIZE_GB} GB"
 
-    # A valid Devstral 24B Q4_K_M should be many GB.
-    if (( MODEL_SIZE_BYTES > 10000000000 )); then
+    # Any real GGUF is at least ~1 GB; a smaller file here means a
+    # truncated or partial download.
+    if (( MODEL_SIZE_BYTES > 1000000000 )); then
         ok "Existing model appears to be complete."
         echo
         echo "Model already downloaded."
@@ -450,7 +450,7 @@ MODEL_SIZE_GB="$(awk "BEGIN {printf \"%.2f\", ${MODEL_SIZE_BYTES}/1024/1024/1024
 
 info "Downloaded model size: ${MODEL_SIZE_GB} GB"
 
-if (( MODEL_SIZE_BYTES < 10000000000 )); then
+if (( MODEL_SIZE_BYTES < 1000000000 )); then
     error "Downloaded file is suspiciously small."
     error "Expected a multi-GB GGUF model."
     exit 1
@@ -500,7 +500,7 @@ echo "Log:"
 echo "  ${LOG_FILE}"
 echo
 
-ok "Devstral model download completed successfully."
+ok "Model download completed successfully."
 
 echo
 echo "Next step:"

@@ -1,9 +1,9 @@
 # Golem
 
 **A local AI construct for coding agents.**
-One RTX 3060 12GB, one llama.cpp container, zero tokens leaving the LAN. It speaks both the
-**Anthropic Messages API** and the **OpenAI API**, so Claude Code — or any OpenAI client, or a
-remote gateway — plugs straight in. A bundled MCP server gives agents **web search + URL
+One GPU, one llama.cpp container, zero tokens leaving your LAN. It speaks both the
+**Anthropic Messages API** and the **OpenAI API**, so Claude Code — or any OpenAI client —
+plugs straight in. A bundled MCP server gives agents **web search + URL
 reading** through a self-hosted SearXNG.
 
 ```
@@ -12,7 +12,7 @@ reading** through a self-hosted SearXNG.
 ```
 
 ```
-  Claude Code / OpenCode / Aider / remote gateway
+  Claude Code / OpenCode / Aider
         │                          │
         │ Anthropic :8000          │ MCP streamable HTTP :8811/mcp  (Bearer)
         │ OpenAI    :8000/v1       ▼
@@ -20,12 +20,14 @@ reading** through a self-hosted SearXNG.
         ▼                    │ mcp-search   │ ───▶ │ SearXNG  │ ──▶ web
   ┌───────────────────┐      └──────────────┘      └──────────┘
   │ llama-server :8000│       (docker, internal)
-  │ Qwen 3.5 9B GGUF  │
+  │ local GGUF model  │
   └───────────────────┘
 ```
 
-Current deployment: **Qwen 3.5 9B Q4_K_M** — 53 tok/s decode, 32K context, native tool calling,
-in Docker with `restart: unless-stopped` (built for 24/7).
+Default configuration: a **MoE model (35B total / 3B active)** served at **262K context** with
+expert weights offloaded to system RAM — quality of a 30B-class model on a 12 GB GPU, with
+context headroom for Claude Code's 200K window. Dense models that fit entirely in VRAM are a
+one-line swap. See [docs/models.md](docs/models.md) for measured numbers per setup.
 
 ---
 
@@ -33,9 +35,11 @@ in Docker with `restart: unless-stopped` (built for 24/7).
 
 | | |
 |---|---|
-| GPU | NVIDIA 12 GB VRAM (RTX 3060) — the model **must** fit fully in VRAM; 24B+ models do not |
-| Docker | Docker Desktop / Engine + Compose v2 + NVIDIA GPU passthrough |
-| Disk | ~6 GB model + ~4 GB image |
+| GPU | NVIDIA with 12 GB VRAM — dense models up to ~9B fit fully in VRAM; MoE models of the 30B class run with expert weights offloaded to system RAM |
+| RAM | 32 GB recommended for MoE offload (16 GB is enough for dense models) |
+| OS | Linux, or Windows with WSL2 (Docker Desktop + a WSL2 distro for the scripts) |
+| Docker | Docker Engine or Desktop + Compose v2 + NVIDIA GPU passthrough |
+| Disk | ~17 GB for the default model + ~4 GB image (less for smaller models) |
 
 ## Quickstart
 
@@ -49,6 +53,10 @@ cp .env.example .env && $EDITOR .env     # set keys; docker mode is the default 
 ./golem bench            # sanity-check generation
 ./golem down             # stop everything
 ```
+
+On Windows, run these from inside your WSL2 distro (Docker Desktop wires it to the same
+engine). The native mode (`./golem up --native`) builds llama.cpp on the host and is
+Linux/WSL2-only.
 
 ### `./golem` commands
 
@@ -68,7 +76,7 @@ cp .env.example .env && $EDITOR .env     # set keys; docker mode is the default 
 
 ## Connecting clients
 
-### Claude Code (direct — no gateway needed)
+### Claude Code (direct)
 
 `llama-server` exposes the **Anthropic Messages API natively** (`POST /v1/messages`), so Claude
 Code talks to it without any translation layer:
@@ -84,24 +92,12 @@ claude
 On the Golem machine itself: `./golem claude` does all of this. See
 [docs/claude-code.md](docs/claude-code.md).
 
-### A remote gateway (claude-code-router, LiteLLM, …)
-
-Add Golem as an **OpenAI-compatible provider** on the machine that runs the gateway:
-
-```json
-{
-  "name": "golem",
-  "api_base_url": "http://<golem-host>:8000/v1/chat/completions",
-  "api_key": "<LOCAL_AI_API_KEY from .env>",
-  "models": ["local-model"]
-}
-```
-
 ### Anything OpenAI (OpenCode, Aider, scripts)
 
 Base URL `http://<golem-host>:8000/v1`, model `local-model`, Bearer = `LOCAL_AI_API_KEY`.
 OpenCode and Aider have much smaller per-turn overheads than Claude Code (~6-10K tokens vs
-15-20K) — on a 32K window that doubles the usable working context. See [docs/models.md](docs/models.md).
+15-20K) — on a constrained context window that meaningfully increases the usable working
+context. See [docs/models.md](docs/models.md).
 
 ### Web search + web read for agents (MCP)
 
@@ -133,13 +129,13 @@ Notes:
 
 ## The model
 
-Current: **Qwen 3.5 9B Q4_K_M** (`lmstudio-community/Qwen3.5-9B-GGUF`) — chosen as the best
-12GB-VRAM agentic-coding fit (top of willitrunai.com's RTX 3060 tier list, native tool calling,
-hybrid reasoning). Served with FlashAttention + q8_0 KV cache at 32K context.
+Any GGUF that [llama.cpp](https://github.com/ggml-org/llama.cpp) can serve works. The default
+(`HF_REPO` / `MODEL_FILE` in `.env`) is a MoE 35B/3B-active quant at 262K context via
+`--cpu-moe`; dense alternatives that live fully in VRAM are listed in the same file.
 
 To swap: edit `HF_REPO` / `MODEL_FILE` in `.env`, `./golem pull`, `./golem restart --docker`.
-Keep `MODEL_ALIAS=local-model` so clients never change. VRAM math and candidates:
-[docs/models.md](docs/models.md).
+Keep `MODEL_ALIAS=local-model` so clients never change. VRAM math, memory regimes and measured
+benchmarks per setup: [docs/models.md](docs/models.md).
 
 ---
 
@@ -158,7 +154,7 @@ Keep `MODEL_ALIAS=local-model` so clients never change. VRAM math and candidates
 │   ├── architecture.md       Request flow, ports, auth
 │   ├── claude-code.md        Claude Code → Golem, in detail
 │   ├── backends.md           Swapping llama.cpp for Ollama/vLLM/…
-│   └── models.md             Model choice, VRAM math
+│   └── models.md             Model choice, memory regimes, benchmarks per setup
 ├── scripts/                  Building blocks the control script calls
 ├── data/models/              GGUF files (git-ignored)
 ├── data/cache/               Download / HF cache (git-ignored)
@@ -170,10 +166,11 @@ Keep `MODEL_ALIAS=local-model` so clients never change. VRAM math and candidates
 | Symptom | Fix |
 |---|---|
 | `llama-server` exits / OOM | Lower `CONTEXT_SIZE` (KV ≈ 75 KB/token at q8_0) or use a smaller quant |
+| MoE model slow or OOM under WSL2 | Give the WSL2 VM more RAM: `memory=24GB` in `%USERPROFILE%\.wslconfig` |
 | Claude Code still hits api.anthropic.com | Export the four `ANTHROPIC_*` vars (`./golem env`); use `ANTHROPIC_AUTH_TOKEN`, not `ANTHROPIC_API_KEY` |
 | MCP search tool returns 404 "Search endpoint" | `SEARXNG_URL` must be the SearXNG **root** (`http://search:8080`), without `/search` |
 | MCP `Invalid Host header` | Add your client's host to `MCP_HTTP_ALLOWED_HOSTS` in `compose.yml` |
-| Slow first answer | Prompt cache is cold; prefill runs ~200-500 tok/s on a 3060 and caches after |
+| Slow first answer | Prompt cache is cold; prefill runs ~200-500 tok/s on a 12 GB GPU and caches after |
 
 ## Credits
 

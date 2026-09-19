@@ -7,7 +7,7 @@
 #   search      SearXNG metasearch   -> internal only (no published port)
 #   mcp-search  MCP server (web search + url read) -> streamable HTTP :8811
 #
-# Any agent on the LAN (Claude Code, OpenCode, a remote gateway, ...) can
+# Any agent on the LAN (Claude Code, OpenCode, ...) can
 # use the model and the web tools; nothing depends on anything else.
 
 name: golem

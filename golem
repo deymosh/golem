@@ -167,7 +167,7 @@ cmd_bench() {
 
 cmd_env() {
     # llama-server speaks the Anthropic Messages API natively, so Claude
-    # Code connects straight to it - no gateway in between.
+    # Code connects straight to it.
     cat <<EOF
 # Point Claude Code at Golem:
 export ANTHROPIC_BASE_URL="http://${LOCAL_AI_HOST}:${LOCAL_AI_PORT}"
