@@ -46,3 +46,9 @@ Two regimes, chosen by `EXTRA_ARGS` in `.env` (details and measured numbers:
   weights live in system RAM. VRAM stays nearly flat as context grows (KV still grows), which
   is how a 30B-class model serves a 262K window on a 12 GB card. System RAM needs headroom for
   the experts — under WSL2 raise the VM limit via `%USERPROFILE%\.wslconfig` (`memory=…`).
+  `--n-cpu-moe N` is the tuned variant: only the first N layers' experts go to RAM and the
+  leftover VRAM holds the rest.
+- **Speculative decoding (MTP)** — Qwen3.5+ models ship a Multi-Token Prediction head that
+  drafts ~3 tokens per step; the main model verifies them in one pass, so output is identical
+  and decode roughly doubles. Enabled by `SPEC_TYPE=draft-mtp`, with `DRAFT_FILE` pointing at
+  a standalone MTP GGUF when the main file lacks the layers.

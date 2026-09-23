@@ -346,6 +346,35 @@ else
     info "Attempting download without authentication."
 fi
 
+# hf_download <repo> <file>: fetch one file into MODELS_DIR
+hf_download() {
+    local token_args=()
+    [[ -n "${HF_TOKEN:-}" ]] && token_args=(--token "${HF_TOKEN}")
+
+    if [[ "${HF_BIN}" == *" "* ]]; then
+        # Command stored as a string, e.g. python -m ...
+        eval "${HF_BIN} download \"\$1\" \"\$2\" --local-dir \"\${MODELS_DIR}\" \"\${token_args[@]}\""
+    else
+        "${HF_BIN}" download "$1" "$2" --local-dir "${MODELS_DIR}" "${token_args[@]}"
+    fi
+}
+
+# ============================================================
+# 6b. DRAFT MODEL (speculative decoding, optional)
+# ============================================================
+
+if [[ -n "${DRAFT_FILE:-}" ]]; then
+    section "6b. DRAFT MODEL"
+
+    if [[ -f "${MODELS_DIR}/${DRAFT_FILE}" ]]; then
+        ok "Draft model present: ${DRAFT_FILE}"
+    else
+        info "Downloading draft ${DRAFT_FILE} from ${DRAFT_HF_REPO:-${HF_REPO}}..."
+        hf_download "${DRAFT_HF_REPO:-${HF_REPO}}" "${DRAFT_FILE}"
+        ok "Draft model downloaded."
+    fi
+fi
+
 # ============================================================
 # 7. MODEL STATUS
 # ============================================================
@@ -400,38 +429,7 @@ rm -f "${TEMP_MODEL}"
 info "Downloading model..."
 echo
 
-# ------------------------------------------------------------
-# Hugging Face CLI
-# ------------------------------------------------------------
-
-if [[ "${HF_BIN}" == *" "* ]]; then
-    # Command stored as a string, e.g. python -m ...
-    if [[ -n "${HF_TOKEN:-}" ]]; then
-        eval "${HF_BIN} download \
-            \"${HF_REPO}\" \
-            \"${MODEL_FILE}\" \
-            --local-dir \"${MODELS_DIR}\" \
-            --token \"${HF_TOKEN}\""
-    else
-        eval "${HF_BIN} download \
-            \"${HF_REPO}\" \
-            \"${MODEL_FILE}\" \
-            --local-dir \"${MODELS_DIR}\""
-    fi
-else
-    if [[ -n "${HF_TOKEN:-}" ]]; then
-        "${HF_BIN}" download \
-            "${HF_REPO}" \
-            "${MODEL_FILE}" \
-            --local-dir "${MODELS_DIR}" \
-            --token "${HF_TOKEN}"
-    else
-        "${HF_BIN}" download \
-            "${HF_REPO}" \
-            "${MODEL_FILE}" \
-            --local-dir "${MODELS_DIR}"
-    fi
-fi
+hf_download "${HF_REPO}" "${MODEL_FILE}"
 
 # ============================================================
 # 9. VERIFY DOWNLOAD

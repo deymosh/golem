@@ -102,8 +102,9 @@ context. See [docs/models.md](docs/models.md).
 ## The model
 
 Any GGUF that [llama.cpp](https://github.com/ggml-org/llama.cpp) can serve works. The default
-(`HF_REPO` / `MODEL_FILE` in `.env`) is a MoE 35B/3B-active quant at 262K context via
-`--cpu-moe`; dense alternatives that live fully in VRAM are listed in the same file.
+(`HF_REPO` / `MODEL_FILE` in `.env`) is a MoE 35B/3B-active quant at 262K context with most
+experts in RAM (`--n-cpu-moe`) and MTP speculative decoding (`SPEC_TYPE` / `DRAFT_FILE`);
+dense alternatives are listed in the same file and in [docs/models.md](docs/models.md).
 
 To swap: edit `HF_REPO` / `MODEL_FILE` in `.env`, `./golem pull`, `./golem restart --docker`.
 Keep `MODEL_ALIAS=local-model` so clients never change. VRAM math, memory regimes and measured

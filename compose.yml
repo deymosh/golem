@@ -41,6 +41,8 @@ services:
     # $EXTRA_ARGS (from .env) can append optional llama-server flags:
     # MoE offload (--cpu-moe / --n-cpu-moe N), rope tweaks, template
     # kwargs, ... Set EXTRA_ARGS="" when not needed.
+    # SPEC_TYPE / DRAFT_FILE (from .env) enable speculative decoding;
+    # both expand to nothing when unset.
     entrypoint:
       - /bin/sh
       - -c
@@ -63,6 +65,8 @@ services:
           --cache-type-v "${CACHE_TYPE_V:-q8_0}" \
           --load-mode "${LOAD_MODE:-auto}" \
           --api-key ${LOCAL_AI_API_KEY:-local-key} \
+          $${SPEC_TYPE:+--spec-type $$SPEC_TYPE} \
+          $${DRAFT_FILE:+--spec-draft-model /models/$$DRAFT_FILE} \
           $${EXTRA_ARGS}
 
     healthcheck:

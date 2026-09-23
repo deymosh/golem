@@ -76,8 +76,13 @@ echo
 mkdir -p "${ROOT_DIR}/.local"
 
 # Keep these flags in sync with the docker entrypoint in compose.yml:
-# both must honor PARALLEL, LOAD_MODE, CACHE_TYPE_K/V and EXTRA_ARGS so
-# a model configured in .env behaves identically in either mode.
+# both must honor PARALLEL, LOAD_MODE, CACHE_TYPE_K/V, SPEC_TYPE,
+# DRAFT_FILE and EXTRA_ARGS so a model configured in .env behaves
+# identically in either mode.
+SPEC_ARGS=()
+[[ -n "${SPEC_TYPE:-}" ]] && SPEC_ARGS+=(--spec-type "${SPEC_TYPE}")
+[[ -n "${DRAFT_FILE:-}" ]] && SPEC_ARGS+=(--spec-draft-model "${MODEL_DIR}/${DRAFT_FILE}")
+
 # shellcheck disable=SC2086
 nohup "${SERVER}" \
     --host "${HOST}" \
@@ -90,10 +95,12 @@ nohup "${SERVER}" \
     --n-gpu-layers "${GPU_LAYERS}" \
     --jinja \
     --metrics \
+    -fa on \
     --load-mode "${LOAD_MODE:-auto}" \
     --cache-type-k "${CACHE_TYPE_K:-q8_0}" \
     --cache-type-v "${CACHE_TYPE_V:-q8_0}" \
     --api-key "${LOCAL_AI_API_KEY:-local-key}" \
+    "${SPEC_ARGS[@]}" \
     ${EXTRA_ARGS:-} \
     > "${LOG_FILE}" 2>&1 &
 
