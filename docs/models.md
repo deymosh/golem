@@ -2,13 +2,16 @@
 
 ## Default model
 
-**Qwen3.6-35B-A3B (UD-Q3_K_M)** — `unsloth/Qwen3.6-35B-A3B-GGUF`
+**Qwen3.6-35B-A3B (UD-Q4_K_M)** — `unsloth/Qwen3.6-35B-A3B-GGUF`
 **+ MTP draft head** — `bartowski/Qwen_Qwen3.6-35B-A3B-GGUF` / `mtp-Qwen_Qwen3.6-35B-A3B-Q4_0.gguf`
 
-Served at **262144 context**, `--n-cpu-moe 32` (experts of the first 32 of 40 layers in
+Served at **262144 context**, `--n-cpu-moe 34` (experts of the first 34 of 40 layers in
 system RAM, the rest + attention + KV on GPU), `--spec-type draft-mtp` with the standalone
 MTP head, `--load-mode mlock`, PARALLEL=1, KV q8_0. The unsloth GGUF has no MTP layers;
 bartowski's separate 1.2 GB head loads next to it via `DRAFT_FILE`.
+
+Why Q4_K_M: at ~5.1 bits/weight it is the best quant that fits a 12 GB card, and under MTP
+it decodes as fast as the Q3 quants — the only cost is long-prompt prefill (~35% slower).
 
 Why a MoE of this class is the sensible default on a 12 GB VRAM / 32 GB RAM box:
 
@@ -74,15 +77,29 @@ VRAM includes ~2 GB taken by the Windows desktop.
 
 | Config | VRAM total | decode | prefill |
 |---|---|---|---|
-| `--cpu-moe`, no MTP (previous default) | 6.5 GB | 23 t/s | — |
-| `--cpu-moe` + MTP | 8.3 GB | 35 t/s | — |
-| `--n-cpu-moe 34` + MTP | 10.5 GB | 35-39 t/s | — |
-| **`--n-cpu-moe 32` + MTP (default)** | 11.2 GB | **37-42 t/s** | ~530 t/s @200K |
-| `--n-cpu-moe 31` + MTP | 11.5 GB | 38-50 t/s | 660-720 t/s @31K |
+| `--cpu-moe`, no MTP (pre-MTP baseline) | 6.5 GB | 23 t/s | — |
+| Q3_K_M, `--cpu-moe` + MTP | 8.3 GB | 35 t/s | — |
+| Q3_K_M, `--n-cpu-moe 34` + MTP | 10.5 GB | 35-39 t/s | — |
+| Q3_K_M, `--n-cpu-moe 32` + MTP | 11.2 GB | 37-42 t/s | 522 t/s @211K |
+| Q3_K_M, `--n-cpu-moe 31` + MTP | 11.5 GB | 38-50 t/s | 660-720 t/s @31K |
 
-MTP draft acceptance ~70-80% (mean 3.1-3.4 tokens per step). Tool calls (OpenAI and
-Anthropic endpoints) and the 200K needle pass with MTP on. N=31 is the fastest measured
-but leaves ~0.8 GB VRAM; 32 keeps ~1 GB for desktop apps.
+MTP draft acceptance ~70-80% (mean 3.1-3.4 tokens per step), identical across quants.
+
+### Quant sweep at `--n-cpu-moe 34` + MTP (measured 2026-09-23, same day, quiet desktop)
+
+| Quant | bits/weight | VRAM | decode | prefill @211K |
+|---|---|---|---|---|
+| UD-Q3_K_M | ~3.8 | 11.5 GB | 37-42 t/s | 522 t/s |
+| UD-IQ4_XS | ~4.1 | 11.0 GB | 26-32 t/s | not measured |
+| **UD-Q4_K_M (default)** | ~5.1 | 11.5 GB | **37-47 t/s** | 336 t/s |
+
+Reading: under MTP, decode is step-overhead-bound, not CPU-bandwidth-bound, so Q4_K_M
+decodes as fast as Q3_K_M while carrying better weights — it wins on quality at equal
+speed. IQ4_XS is dominated: slower than both with barely more precision than Q3_K_M
+(its extra bits sit in experts that are mostly off-GPU). The Q4_K_M price is prefill:
+reading ~30% more bytes per prompt token costs ~35% throughput on full-context fills,
+paid once per session / auto-compact. Tool calls (OpenAI + Anthropic) and the 200K
+needle pass on both Q3_K_M and Q4_K_M with MTP on. WSL RAM at Q4_K_M n34: ~18 of 23 GB.
 
 ### Qwen3.8-27B (dense, 2026-08) — does not fit 262K on 12 GB
 
