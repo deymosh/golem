@@ -196,9 +196,10 @@ fi
 if [[ -z "${TOOL_OUT}" ]]; then
     echo "[FAIL] tool request returned no response"
 else
-    echo "${TOOL_OUT}" | python3 - <<'PYEOF' || true
-import json, sys
-d = json.load(sys.stdin)
+    # The heredoc is python's stdin, so the response travels via env.
+    TOOL_OUT="${TOOL_OUT}" python3 - <<'PYEOF' || true
+import json, os
+d = json.loads(os.environ["TOOL_OUT"])
 msg = d["choices"][0]["message"]
 tc = msg.get("tool_calls") or []
 if tc and tc[0]["function"]["name"] == "get_weather":
@@ -287,6 +288,8 @@ body = {
         "What is the passphrase in it? Reply with the number only.\n\n" + haystack}],
     "temperature": 0,
     "max_tokens": 16,
+    # hybrid-thinking models would spend the 16 tokens reasoning
+    "chat_template_kwargs": {"enable_thinking": False},
     "stream": False,
 }
 json.dump(body, sys.stdout)
