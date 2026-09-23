@@ -16,9 +16,7 @@ them keeps every OpenAI client working, but Claude Code will not connect to them
 | **vLLM** | `http://127.0.0.1:8000/v1` | OpenAI only; strong if you ever get a bigger GPU |
 | **LM Studio** | `http://127.0.0.1:1234/v1` | OpenAI only; GUI-driven |
 
-To swap: set `LOCAL_AI_BASE_URL` + `MODEL_ALIAS` in `.env` and start that backend yourself —
-`docker/mcp-search.Dockerfile`, the `search` service and the MCP tooling are backend-agnostic
-and keep working.
+To swap: set `LOCAL_AI_BASE_URL` + `MODEL_ALIAS` in `.env` and start that backend yourself.
 
 `health-check-ai.sh` and `benchmark-ai.sh` only use `LOCAL_AI_HOST/PORT` + `MODEL_ALIAS`, so they
 work against any OpenAI-compatible backend. `download-model.sh` / `install-llama-cpp.sh` /

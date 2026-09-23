@@ -39,20 +39,6 @@ Notes:
   streaming, `thinking` and `tool_use` blocks (verified against this stack; see
   [architecture.md](architecture.md)).
 
-## Web search for Claude Code
-
-Claude Code's built-in `WebFetch` works with the local model out of the box. Its built-in
-`WebSearch` does not (it executes server-side on Anthropic's API). With Golem's MCP:
-
-```bash
-claude mcp add --transport http golem-search http://<golem-host>:8811/mcp \
-  --header "Authorization: Bearer <MCP_SEARCH_API_KEY>"
-```
-
-or copy the repo's `.mcp.json.example` to `.mcp.json` in the project (fill in `<golem-host>`
-and the key). The model then gets `searxng_web_search`, `web_url_read` and suggestions as
-regular tools.
-
 ## Sanity check
 
 ```bash

@@ -10,11 +10,11 @@
 #   setup             Inspect the machine, install build deps, scaffold dirs
 #   install           Build llama.cpp with CUDA          (native only)
 #   pull              Download the model from Hugging Face
-#   up                Start the stack (inference + web search MCP)
+#   up                Start the stack
 #   down              Stop the stack
 #   restart           down + up
-#   status            Health of inference + MCP web search (+ docker ps in docker mode)
-#   logs [name]       Follow logs (name: inference|search; default: both)
+#   status            Health of inference (+ docker ps in docker mode)
+#   logs              Follow the inference logs
 #   bench             Run the fixed benchmark prompt
 #   claude [args...]  Launch Claude Code pointed at the local model
 #   env               Print the env exports for Claude Code
@@ -110,12 +110,10 @@ cmd_pull() {
 cmd_up() {
     banner "up"
     if [[ "${DEPLOY_MODE}" == "docker" ]]; then
-        dc up -d --build
+        dc up -d --remove-orphans
     else
         [[ -x "${ROOT_DIR}/.local/bin/llama-server" ]] || cmd_install
         "${SCRIPTS}/start-local-ai.sh"
-        echo
-        echo "[INFO] Web search MCP is docker-only; start it with: ./golem up --docker"
     fi
     echo
     cmd_env
@@ -145,19 +143,10 @@ cmd_status() {
 }
 
 cmd_logs() {
-    local target="${1:-}"
     if [[ "${DEPLOY_MODE}" == "docker" ]]; then
-        case "${target}" in
-            search) dc logs -f mcp-search ;;
-            "") dc logs -f ;;
-            *) dc logs -f "${target}" ;;
-        esac
+        dc logs -f
     else
-        case "${target}" in
-            inference|"") tail -f "${ROOT_DIR}/logs/local-ai.log" ;;
-            search) die "web search logs are docker-only" ;;
-            *) die "unknown log target: ${target}" ;;
-        esac
+        tail -f "${ROOT_DIR}/logs/local-ai.log"
     fi
 }
 

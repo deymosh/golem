@@ -3,8 +3,7 @@
 **A local AI construct for coding agents.**
 One GPU, one llama.cpp container, zero tokens leaving your LAN. It speaks both the
 **Anthropic Messages API** and the **OpenAI API**, so Claude Code — or any OpenAI client —
-plugs straight in. A bundled MCP server gives agents **web search + URL
-reading** through a self-hosted SearXNG.
+plugs straight in.
 
 ```
         ▟█▙   forge  ->  animate (load a model)  ->  it works
@@ -13,13 +12,12 @@ reading** through a self-hosted SearXNG.
 
 ```
   Claude Code / OpenCode / Aider
-        │                          │
-        │ Anthropic :8000          │ MCP streamable HTTP :8811/mcp  (Bearer)
-        │ OpenAI    :8000/v1       ▼
-        │                    ┌──────────────┐      ┌──────────┐
-        ▼                    │ mcp-search   │ ───▶ │ SearXNG  │ ──▶ web
-  ┌───────────────────┐      └──────────────┘      └──────────┘
-  │ llama-server :8000│       (docker, internal)
+        │
+        │ Anthropic :8000
+        │ OpenAI    :8000/v1
+        ▼
+  ┌───────────────────┐
+  │ llama-server :8000│
   │ local GGUF model  │
   └───────────────────┘
 ```
@@ -47,8 +45,8 @@ one-line swap. See [docs/models.md](docs/models.md) for measured numbers per set
 cp .env.example .env && $EDITOR .env     # set keys; docker mode is the default here
 
 ./golem pull             # download the model into data/models/
-./golem up --docker      # inference + SearXNG + MCP search
-./golem status           # health of everything
+./golem up --docker      # start inference
+./golem status           # health check
 ./golem claude           # launch Claude Code pointed at the local model
 ./golem bench            # sanity-check generation
 ./golem down             # stop everything
@@ -65,9 +63,9 @@ Linux/WSL2-only.
 | `setup` | machine report, build deps, directory scaffold (native mode) |
 | `install` | build `llama.cpp` with CUDA (native only) |
 | `pull` | download `MODEL_FILE` from `HF_REPO` into `data/models/` |
-| `up` / `down` / `restart` | start / stop / cycle the stack (docker default; `--native` skips the MCP services) |
-| `status` | health of inference + MCP search |
-| `logs [inference\|search]` | follow logs |
+| `up` / `down` / `restart` | start / stop / cycle the stack (docker default) |
+| `status` | health of inference |
+| `logs` | follow the inference logs |
 | `bench` | fixed code prompt against the OpenAI endpoint |
 | `claude [args…]` | `exec claude` with `ANTHROPIC_*` already set |
 | `env` | print those exports |
@@ -99,32 +97,6 @@ OpenCode and Aider have much smaller per-turn overheads than Claude Code (~6-10K
 15-20K) — on a constrained context window that meaningfully increases the usable working
 context. See [docs/models.md](docs/models.md).
 
-### Web search + web read for agents (MCP)
-
-`mcp-search` (docker) exposes [`mcp-searxng`](https://github.com/ihor-sokoliuk/mcp-searxng) over
-streamable HTTP — tools: `searxng_web_search`, `web_url_read`, `searxng_search_suggestions`.
-Point any MCP client at it (the repo ships a ready
-[.mcp.json.example](.mcp.json.example) — copy it to `.mcp.json` and fill in host + key):
-
-```json
-{
-  "mcpServers": {
-    "golem-search": {
-      "type": "http",
-      "url": "http://<golem-host>:8811/mcp",
-      "headers": { "Authorization": "Bearer <MCP_SEARCH_API_KEY from .env>" }
-    }
-  }
-}
-```
-
-Notes:
-
-- Claude Code's built-in `WebFetch` works out of the box with a local model; its built-in
-  `WebSearch` does **not** (it is a server-side Anthropic tool). Use this MCP instead — keyless,
-  self-hosted, no API quotas.
-- SearXNG itself is not published to the host; only `mcp-search` talks to it.
-
 ---
 
 ## The model
@@ -144,12 +116,8 @@ benchmarks per setup: [docs/models.md](docs/models.md).
 ```
 .
 ├── golem                     Control script — the front door
-├── compose.yml               inference + search + mcp-search
+├── compose.yml               inference
 ├── .env.example              Canonical config; copy to .env
-├── .mcp.json.example         Ready MCP config template (copy → .mcp.json)
-├── docker/
-│   └── mcp-search.Dockerfile node22 + mcp-searxng (streamable HTTP)
-├── config/searxng/           SearXNG settings (JSON format enabled)
 ├── docs/
 │   ├── architecture.md       Request flow, ports, auth
 │   ├── claude-code.md        Claude Code → Golem, in detail
@@ -168,12 +136,8 @@ benchmarks per setup: [docs/models.md](docs/models.md).
 | `llama-server` exits / OOM | Lower `CONTEXT_SIZE` (KV ≈ 75 KB/token at q8_0) or use a smaller quant |
 | MoE model slow or OOM under WSL2 | Give the WSL2 VM more RAM: `memory=24GB` in `%USERPROFILE%\.wslconfig` |
 | Claude Code still hits api.anthropic.com | Export the four `ANTHROPIC_*` vars (`./golem env`); use `ANTHROPIC_AUTH_TOKEN`, not `ANTHROPIC_API_KEY` |
-| MCP search tool returns 404 "Search endpoint" | `SEARXNG_URL` must be the SearXNG **root** (`http://search:8080`), without `/search` |
-| MCP `Invalid Host header` | Add your client's host to `MCP_HTTP_ALLOWED_HOSTS` in `compose.yml` |
 | Slow first answer | Prompt cache is cold; prefill runs ~200-500 tok/s on a 12 GB GPU and caches after |
 
 ## Credits
 
 - [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) — inference server (OpenAI + Anthropic native)
-- [ihor-sokoliuk/mcp-searxng](https://github.com/ihor-sokoliuk/mcp-searxng) — MCP web search
-- [searxng/searxng](https://github.com/searxng/searxng) — metasearch

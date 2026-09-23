@@ -5,8 +5,6 @@
 | Service | Container | Listens | Protocol | Config |
 |---|---|---|---|---|
 | inference | `golem-inference` | `0.0.0.0:8000` | **Anthropic** Messages API (`/v1/messages`) **and** OpenAI API (`/v1/chat/completions`, `/v1/models`) | `.env` runtime vars → compose `command` |
-| mcp-search | `golem-mcp-search` | `0.0.0.0:8811` | MCP over streamable HTTP (`/mcp`), Bearer auth | `MCP_*` env in compose |
-| search | `golem-search` | compose network only | SearXNG HTTP API (JSON) | `config/searxng/settings.yml` |
 
 There is **no translation layer**: llama.cpp serves the Anthropic Messages API natively, so
 agents connect straight to `:8000`. Both APIs are served by the same process, model and KV
@@ -26,25 +24,14 @@ Anthropic spec describes. Upstream llama.cpp documents the endpoint under
 "Anthropic-compatible API Endpoints" with the caveat that "no strong claims of compatibility
 with the Anthropic API spec are made" — it is a native implementation, not a certified one.
 
-**Web search** — the agent's MCP client POSTs JSON-RPC to `http://<host>:8811/mcp`
-(`initialize` → `tools/call`). `mcp-searxng` queries SearXNG at `http://search:8080` over the
-compose network and returns merged results from Google/Brave/DuckDuckGo/&c. `web_url_read`
-fetches and converts a URL to markdown.
-
-Hardening on `:8811`: bearer token (`MCP_HTTP_AUTH_TOKEN`), host allowlist
-(`MCP_HTTP_ALLOWED_HOSTS`) and CORS allowlist (`MCP_HTTP_ALLOWED_ORIGINS`). If a client gets
-`Invalid Host header`, add its host there.
-
 ## Ports
 
 | Port | Purpose | Override |
 |---|---|---|
 | 8000 | inference (Anthropic + OpenAI) | `LOCAL_AI_PORT` |
-| 8811 | MCP web search | `MCP_SEARCH_PORT` |
 
-Both bind `0.0.0.0` (LAN use). Anyone who can reach the ports can use your GPU / your network
-exit for searches — keep real secrets in `LOCAL_AI_API_KEY` / `MCP_SEARCH_API_KEY` and firewall
-if the LAN is not trusted.
+It binds `0.0.0.0` (LAN use). Anyone who can reach the port can use your GPU — keep the real
+secret in `LOCAL_AI_API_KEY` and firewall if the LAN is not trusted.
 
 ## Memory timeline
 

@@ -114,9 +114,6 @@ Desktop.ini
 .env.*
 !.env.example
 
-# Real MCP config carries the LAN bearer token; ship .mcp.json.example instead
-.mcp.json
-
 # Claude Code local session state
 .claude/
 

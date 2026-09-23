@@ -1,14 +1,11 @@
 # Golem - local AI stack in Docker.
 #
-#   docker compose up -d --build          # or: ./golem up --docker
+#   docker compose up -d --remove-orphans   # or: ./golem up --docker
 #
-# Services on one compose network:
+# Service on the compose network:
 #   inference   llama.cpp server     -> OpenAI AND Anthropic API on :8000
-#   search      SearXNG metasearch   -> internal only (no published port)
-#   mcp-search  MCP server (web search + url read) -> streamable HTTP :8811
 #
-# Any agent on the LAN (Claude Code, OpenCode, ...) can
-# use the model and the web tools; nothing depends on anything else.
+# Any agent on the LAN (Claude Code, OpenCode, ...) can use the model.
 
 name: golem
 
@@ -74,40 +71,3 @@ services:
       timeout: 3s
       retries: 40
       start_period: 180s
-
-  search:
-    # SearXNG metasearch. Not published to the host: only mcp-search talks
-    # to it over the compose network.
-    image: searxng/searxng:latest
-    container_name: golem-search
-    restart: unless-stopped
-
-    volumes:
-      - ./config/searxng:/etc/searxng:ro
-
-  mcp-search:
-    # mcp-searxng over streamable HTTP. Tools: searxng_web_search,
-    # web_url_read, searxng_search_suggestions, searxng_instance_info.
-    build:
-      context: ./docker
-      dockerfile: mcp-search.Dockerfile
-    image: golem-mcp-search:latest
-    container_name: golem-mcp-search
-    restart: unless-stopped
-
-    depends_on:
-      - search
-
-    ports:
-      - "${MCP_SEARCH_HOST:-0.0.0.0}:${MCP_SEARCH_PORT:-8811}:8811"
-
-    environment:
-      SEARXNG_URL: http://search:8080
-      MCP_HTTP_HOST: 0.0.0.0
-      MCP_HTTP_PORT: "8811"
-      MCP_HTTP_STATELESS: "true"
-      MCP_HTTP_HARDEN: "true"
-      MCP_HTTP_AUTH_TOKEN: ${MCP_SEARCH_API_KEY:-local-mcp-key}
-      MCP_HTTP_ALLOWED_ORIGINS: "*"
-      # Add "<lan-ip>:8811,<lan-ip>" via .env when connecting from other machines
-      MCP_HTTP_ALLOWED_HOSTS: ${MCP_HTTP_ALLOWED_HOSTS:-localhost:8811,127.0.0.1:8811,localhost,127.0.0.1}
