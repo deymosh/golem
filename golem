@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
 #   ▟█▙  Golem - local AI construct for Claude Code
-#   ▜█▛  one control script for the whole stack, native or Docker
+#   ▜█▛  one control script for the whole stack: Docker, native or Windows
 #
 # Usage:
-#   ./golem <command> [--native | --docker] [args...]
+#   ./golem <command> [--native | --docker | --windows] [args...]
 #
 # Commands:
 #   setup             Inspect the machine, install build deps, scaffold dirs
@@ -15,13 +15,16 @@
 #   restart           down + up
 #   status            Health of inference (+ docker ps in docker mode)
 #   logs              Follow the inference logs
-#   bench             Run the fixed benchmark prompt
+#   bench [args...]   Speed benchmark: decode + prefill tok/s
+#   eval [args...]    Quality gate: sanity, tool calls, needle (--long N)
 #   claude [args...]  Launch Claude Code pointed at the local model
 #   env               Print the env exports for Claude Code
 #   help              This message
 #
 # Mode:
-#   DEPLOY_MODE in .env (native|docker), overridden by --native / --docker.
+#   DEPLOY_MODE in .env (docker|native|windows), overridden by
+#   --docker / --native / --windows. windows = llama-server.exe run by
+#   scripts/start-windows.ps1 (from Git Bash).
 
 set -Eeuo pipefail
 
@@ -66,6 +69,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --native) DEPLOY_MODE="native" ;;
         --docker) DEPLOY_MODE="docker" ;;
+        --windows) DEPLOY_MODE="windows" ;;
         *) ARGS+=("$1") ;;
     esac
     shift
@@ -83,6 +87,12 @@ dc() {
     docker compose -f "${COMPOSE_FILE}" --env-file "${ROOT_DIR}/.env" "$@"
 }
 
+winps() {
+    # winps <script.ps1>: run a Windows-mode PowerShell script from Git Bash
+    command -v powershell.exe >/dev/null 2>&1 || die "windows mode needs powershell.exe (run from Git Bash on Windows)"
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "${SCRIPTS}/$1")"
+}
+
 banner() {
     echo
     echo "  golem :: ${1}  (mode: ${DEPLOY_MODE})"
@@ -98,7 +108,8 @@ cmd_setup() {
 }
 
 cmd_install() {
-    [[ "${DEPLOY_MODE}" == "docker" ]] && die "install is native-only; in docker mode use: ./golem up --docker (builds the image)"
+    [[ "${DEPLOY_MODE}" == "docker" ]] && die "install is native-only; in docker mode use: ./golem up --docker (pulls the image)"
+    [[ "${DEPLOY_MODE}" == "windows" ]] && die "windows mode installs the pinned llama.cpp build on first ./golem up"
     "${SCRIPTS}/install-llama-cpp.sh"
 }
 
@@ -111,6 +122,10 @@ cmd_up() {
     banner "up"
     if [[ "${DEPLOY_MODE}" == "docker" ]]; then
         dc up -d --remove-orphans
+    elif [[ "${DEPLOY_MODE}" == "windows" ]]; then
+        # prints its own (PowerShell-syntax) env block
+        winps start-windows.ps1
+        return
     else
         [[ -x "${ROOT_DIR}/.local/bin/llama-server" ]] || cmd_install
         "${SCRIPTS}/start-local-ai.sh"
@@ -123,6 +138,8 @@ cmd_down() {
     banner "down"
     if [[ "${DEPLOY_MODE}" == "docker" ]]; then
         dc down
+    elif [[ "${DEPLOY_MODE}" == "windows" ]]; then
+        winps stop-windows.ps1
     else
         "${SCRIPTS}/stop-local-ai.sh" || true
     fi
@@ -145,21 +162,38 @@ cmd_status() {
 cmd_logs() {
     if [[ "${DEPLOY_MODE}" == "docker" ]]; then
         dc logs -f
+    elif [[ "${DEPLOY_MODE}" == "windows" ]]; then
+        tail -f "${ROOT_DIR}/logs/llama-server-windows.log"
     else
         tail -f "${ROOT_DIR}/logs/local-ai.log"
     fi
 }
 
 cmd_bench() {
-    "${SCRIPTS}/benchmark-ai.sh"
+    "${SCRIPTS}/benchmark-ai.sh" "$@"
+}
+
+cmd_eval() {
+    # The eval harness needs python3; Git Bash on Windows usually has none,
+    # so hand it to WSL there (the script finds the Windows host itself).
+    if command -v python3 >/dev/null 2>&1 && python3 -c 'pass' 2>/dev/null; then
+        "${SCRIPTS}/eval-model.sh" "$@"
+    elif command -v wsl.exe >/dev/null 2>&1; then
+        wsl.exe --cd "$(cygpath -w "${ROOT_DIR}")" bash scripts/eval-model.sh "$@"
+    else
+        die "eval needs python3 (or WSL on Windows)"
+    fi
 }
 
 cmd_env() {
     # llama-server speaks the Anthropic Messages API natively, so Claude
-    # Code connects straight to it.
+    # Code connects straight to it. 0.0.0.0 is a bind address, not a
+    # destination: local clients use loopback.
+    local host="${LOCAL_AI_HOST}"
+    [[ "${host}" == "0.0.0.0" ]] && host="127.0.0.1"
     cat <<EOF
 # Point Claude Code at Golem:
-export ANTHROPIC_BASE_URL="http://${LOCAL_AI_HOST}:${LOCAL_AI_PORT}"
+export ANTHROPIC_BASE_URL="http://${host}:${LOCAL_AI_PORT}"
 export ANTHROPIC_AUTH_TOKEN="${LOCAL_AI_API_KEY}"
 export ANTHROPIC_MODEL="${MODEL_ALIAS}"
 export ANTHROPIC_SMALL_FAST_MODEL="${MODEL_ALIAS}"
@@ -177,7 +211,7 @@ cmd_claude() {
 }
 
 cmd_help() {
-    sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 case "${CMD}" in
@@ -189,7 +223,8 @@ case "${CMD}" in
     restart)  cmd_restart ;;
     status)   cmd_status ;;
     logs)     cmd_logs "${1:-}" ;;
-    bench)    cmd_bench ;;
+    bench)    cmd_bench "$@" ;;
+    eval)     cmd_eval "$@" ;;
     claude)   cmd_claude "$@" ;;
     env)      cmd_env ;;
     help|-h|--help) cmd_help ;;
