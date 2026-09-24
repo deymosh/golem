@@ -2,8 +2,10 @@
 #
 # Reads the same .env as every other script and mirrors the compose.yml
 # flags exactly, so a model configured for docker mode behaves identically
-# here. On first run it downloads the official llama.cpp CUDA build from
-# GitHub releases into .local\bin-windows.
+# here. On first run it downloads the pinned official llama.cpp CUDA build
+# (LLAMA_WIN_BUILD in .env, default below) from GitHub releases into
+# .local\bin-windows. Builds are gated like the docker image digest: adopt
+# a new one only after `eval-model.sh --long 200000` passes on it.
 #
 # Usage:  powershell -ExecutionPolicy Bypass -File scripts\start-windows.ps1
 # Stop:   powershell -ExecutionPolicy Bypass -File scripts\stop-windows.ps1
@@ -12,10 +14,10 @@
 #   New-NetFirewallRule -DisplayName "Golem inference" -Direction Inbound `
 #     -LocalPort 8000 -Protocol TCP -Action Allow
 #
-# Why native: no WSL vmmem monolith (page cache becomes trimmable standby),
-# no Docker Desktop overhead (~1 GB), no VM that can OOM-kill the stack, and
-# direct CUDA. Expect a few percent more speed; stability is the point.
-# See docs/windows-native.md.
+# Why native: direct CUDA instead of WSL's paravirtualized GPU (~+50%
+# batch-1 decode on the reference machine), no vmmem monolith (page cache
+# becomes trimmable standby), no Docker Desktop overhead, no VM that can
+# OOM-kill the stack. See docs/windows-native.md.
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
@@ -70,15 +72,30 @@ if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyCon
 
 $BinDir = Join-Path $Root ".local\bin-windows"
 $Server = Join-Path $BinDir "llama-server.exe"
+$BuildMarker = Join-Path $BinDir "BUILD"
+
+# Known-good build: passed the 200K needle + tool calls on this platform.
+$WinBuild = if ($Cfg["LLAMA_WIN_BUILD"]) { $Cfg["LLAMA_WIN_BUILD"] } else { "b11149" }
+
+$installed = if (Test-Path $BuildMarker) { (Get-Content $BuildMarker -Raw).Trim() } else { $null }
+if ((Test-Path $Server) -and $installed -and $installed -ne $WinBuild) {
+    Write-Host "[ .. ] installed llama.cpp $installed != pinned $WinBuild, reinstalling..."
+    Remove-Item -Recurse -Force $BinDir
+}
 
 if (-not (Test-Path $Server)) {
-    Write-Host "[ .. ] llama-server not found, downloading official CUDA build..."
+    Write-Host "[ .. ] llama-server not found, downloading official CUDA build $WinBuild..."
     New-Item -ItemType Directory -Force $BinDir | Out-Null
 
-    # Skip stub releases (e.g. v0.5.0, a nightly pointer with no assets):
-    # real builds are tagged b<number> and carry the win-cuda zips.
-    $rels = Invoke-RestMethod "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=15"
-    $rel = $rels | Where-Object { $_.tag_name -match "^b\d+$" -and @($_.assets).Count -gt 0 } | Select-Object -First 1
+    # "latest" follows upstream (ungated); any b<number> tag pins that build.
+    if ($WinBuild -eq "latest") {
+        # Skip stub releases (e.g. v0.5.0, a nightly pointer with no assets):
+        # real builds are tagged b<number> and carry the win-cuda zips.
+        $rels = Invoke-RestMethod "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=15"
+        $rel = $rels | Where-Object { $_.tag_name -match "^b\d+$" -and @($_.assets).Count -gt 0 } | Select-Object -First 1
+    } else {
+        $rel = Invoke-RestMethod "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/$WinBuild"
+    }
     if (-not $rel) { throw "No binary llama.cpp release found on GitHub" }
     $tag = $rel.tag_name
     $serverZip = $rel.assets | Where-Object { $_.name -match "^llama-.*bin-win-cuda-13\.\d+-x64\.zip$" } | Select-Object -First 1
@@ -93,6 +110,7 @@ if (-not (Test-Path $Server)) {
         Invoke-WebRequest $asset.browser_download_url -OutFile $zip
         Expand-Archive $zip $BinDir -Force
     }
+    Set-Content -Path $BuildMarker -Value $tag
     Write-Host "[ OK ] llama.cpp $tag installed to $BinDir"
 }
 
@@ -102,8 +120,7 @@ if (-not (Test-Path $Server)) {
 
 $LogDir = Join-Path $Root "logs"
 New-Item -ItemType Directory -Force $LogDir | Out-Null
-$OutLog = Join-Path $LogDir "llama-server-windows.out.log"
-$ErrLog = Join-Path $LogDir "llama-server-windows.err.log"
+$Log = Join-Path $LogDir "llama-server-windows.log"
 
 $ServerArgs = @(
     "--host", $BindHost,
@@ -120,19 +137,25 @@ $ServerArgs = @(
     "--cache-type-k", $CacheK,
     "--cache-type-v", $CacheV,
     "--load-mode", $LoadMode,
-    "--api-key", $ApiKey
+    "--api-key", $ApiKey,
+    "--log-file", $Log,
+    "--log-colors", "off"
 )
 if ($SpecType) { $ServerArgs += @("--spec-type", $SpecType) }
 if ($DraftFile) { $ServerArgs += @("--spec-draft-model", (Join-Path $Root "data\models\$DraftFile")) }
-if ($ExtraArgs) { $ServerArgs += ($ExtraArgs -split '\s+') }
+if ($ExtraArgs) { $ServerArgs += ($ExtraArgs -split '\s+' | Where-Object { $_ }) }
+# Start-Process joins arguments with bare spaces: quote paths that have them.
+$ServerArgs = $ServerArgs | ForEach-Object { if ("$_" -match '\s') { "`"$_`"" } else { "$_" } }
 
-$Proc = Start-Process -FilePath $Server -ArgumentList $ServerArgs `
-    -RedirectStandardOutput $OutLog -RedirectStandardError $ErrLog `
-    -WindowStyle Hidden -PassThru
+# The server writes its own log (--log-file) instead of -Redirect*: those
+# make Start-Process spawn with handle inheritance, so llama-server would
+# keep the caller's stdout pipe open and hang anything reading it until
+# EOF (e.g. `./golem up | tail`).
+$Proc = Start-Process -FilePath $Server -ArgumentList $ServerArgs -WindowStyle Hidden -PassThru
 New-Item -ItemType Directory -Force (Join-Path $Root ".local") | Out-Null
 Set-Content -Path (Join-Path $Root ".local\llama-server-windows.pid") -Value $Proc.Id
 Write-Host "[ OK ] llama-server started, PID $($Proc.Id)"
-Write-Host "       logs: $ErrLog"
+Write-Host "       logs: $Log"
 
 # ------------------------------------------------------------
 # Wait for health
@@ -143,17 +166,19 @@ $deadline = (Get-Date).AddMinutes(10)
 $healthy = $false
 while ((Get-Date) -lt $deadline) {
     if ($Proc.HasExited) {
-        Get-Content $ErrLog -Tail 15
+        if (Test-Path $Log) { Get-Content $Log -Tail 15 }
         throw "llama-server exited during startup (exit code $($Proc.ExitCode))"
     }
     # curl.exe, not Invoke-WebRequest: PS 5.1 honors the system proxy,
     # which breaks/loops requests to localhost on proxy-rigged machines.
-    if (curl.exe -fsS --noproxy '*' -m 2 "http://127.0.0.1:$Port/health" 2>$null) {
-        $healthy = $true; break
-    }
+    # -fs without -S: no stderr at all (503 while loading, refused before
+    # listening), since PS 5.1 turns redirected native stderr into a
+    # terminating error under ErrorActionPreference=Stop.
+    curl.exe -fs --noproxy '*' -m 2 -o NUL "http://127.0.0.1:$Port/health"
+    if ($LASTEXITCODE -eq 0) { $healthy = $true; break }
     Start-Sleep -Seconds 3
 }
-if (-not $healthy) { throw "Server did not become healthy within 10 minutes (logs: $ErrLog)" }
+if (-not $healthy) { throw "Server did not become healthy within 10 minutes (logs: $Log)" }
 
 Write-Host "[ OK ] healthy on http://$BindHost`:$Port (model: $ModelFile)"
 Write-Host ""
