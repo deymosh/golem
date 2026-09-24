@@ -22,10 +22,11 @@ plugs straight in.
   └───────────────────┘
 ```
 
-Default configuration: a **MoE model (35B total / 3B active)** served at **262K context** with
-expert weights offloaded to system RAM — quality of a 30B-class model on a 12 GB GPU, with
-context headroom for Claude Code's 200K window. Dense models that fit entirely in VRAM are a
-one-line swap. See [docs/models.md](docs/models.md) for measured numbers per setup.
+Default configuration: a **MoE model (35B total / 3B active)** served at **231K context** with
+most expert weights offloaded to system RAM and MTP speculative decoding — quality of a
+30B-class model on a 12 GB GPU at ~63 tok/s, with headroom for Claude Code's 200K window.
+Dense models that fit entirely in VRAM are a one-line swap. See
+[docs/models.md](docs/models.md) for measured numbers per setup.
 
 ---
 
@@ -35,26 +36,31 @@ one-line swap. See [docs/models.md](docs/models.md) for measured numbers per set
 |---|---|
 | GPU | NVIDIA with 12 GB VRAM — dense models up to ~9B fit fully in VRAM; MoE models of the 30B class run with expert weights offloaded to system RAM |
 | RAM | 32 GB recommended for MoE offload (16 GB is enough for dense models) |
-| OS | Linux, or Windows with WSL2 (Docker Desktop + a WSL2 distro for the scripts) |
-| Docker | Docker Engine or Desktop + Compose v2 + NVIDIA GPU passthrough |
+| OS | Linux, or Windows — natively (Git Bash, no Docker) or via Docker Desktop/WSL2 |
+| Docker | Docker Engine or Desktop + Compose v2 + NVIDIA GPU passthrough (docker mode only) |
 | Disk | ~17 GB for the default model + ~4 GB image (less for smaller models) |
 
 ## Quickstart
 
 ```bash
-cp .env.example .env && $EDITOR .env     # set keys; docker mode is the default here
+cp .env.example .env && $EDITOR .env     # set keys and DEPLOY_MODE
 
 ./golem pull             # download the model into data/models/
-./golem up --docker      # start inference
+./golem up               # start inference (mode from DEPLOY_MODE)
 ./golem status           # health check
 ./golem claude           # launch Claude Code pointed at the local model
-./golem bench            # sanity-check generation
+./golem bench            # speed: decode + prefill tok/s
+./golem eval --long 200000   # quality gate: tool calls + 200K needle
 ./golem down             # stop everything
 ```
 
-On Windows, run these from inside your WSL2 distro (Docker Desktop wires it to the same
-engine). The native mode (`./golem up --native`) builds llama.cpp on the host and is
-Linux/WSL2-only.
+Three deploy modes (`DEPLOY_MODE` in `.env`, or `--docker` / `--native` / `--windows`):
+
+| Mode | Runs | Where |
+|---|---|---|
+| `windows` | official `llama-server.exe`, no Docker/WSL — **~+50% decode vs docker, recommended on Windows** | Git Bash on Windows ([docs/windows-native.md](docs/windows-native.md)) |
+| `docker` | llama.cpp container pinned by digest | Linux, or Windows via Docker Desktop (run `./golem` inside WSL2) |
+| `native` | llama.cpp built on the host | Linux / WSL2 |
 
 ### `./golem` commands
 
@@ -63,16 +69,13 @@ Linux/WSL2-only.
 | `setup` | machine report, build deps, directory scaffold (native mode) |
 | `install` | build `llama.cpp` with CUDA (native only) |
 | `pull` | download `MODEL_FILE` from `HF_REPO` into `data/models/` |
-| `up` / `down` / `restart` | start / stop / cycle the stack (docker default) |
+| `up` / `down` / `restart` | start / stop / cycle the stack in the configured mode |
 | `status` | health of inference |
 | `logs` | follow the inference logs |
-| `bench` | fixed code prompt against the OpenAI endpoint |
+| `bench [--runs N] [--prefill TOKENS]` | speed: decode best/median + MTP acceptance, prefill on a ~30K prompt (curl + awk only) |
+| `eval [--long TOKENS]` | quality gate: arithmetic, tool calls, throughput, needle + decode at depth (python3; via WSL on Windows) |
 | `claude [args…]` | `exec claude` with `ANTHROPIC_*` already set |
 | `env` | print those exports |
-
-On Windows you can also skip Docker entirely:
-`scripts\start-windows.ps1` runs `llama-server.exe` natively with the same `.env` and flags —
-see [docs/windows-native.md](docs/windows-native.md) (no vmmem, no Docker Desktop, direct CUDA).
 
 ---
 
@@ -106,11 +109,13 @@ context. See [docs/models.md](docs/models.md).
 ## The model
 
 Any GGUF that [llama.cpp](https://github.com/ggml-org/llama.cpp) can serve works. The default
-(`HF_REPO` / `MODEL_FILE` in `.env`) is a MoE 35B/3B-active quant at 262K context with most
-experts in RAM (`--n-cpu-moe`) and MTP speculative decoding (`SPEC_TYPE` / `DRAFT_FILE`);
-dense alternatives are listed in the same file and in [docs/models.md](docs/models.md).
+(`HF_REPO` / `MODEL_FILE` in `.env`) is a MoE 35B/3B-active quant at 231K context with most
+experts in RAM (`--n-cpu-moe`), 2048-token ubatches for fast prefill and MTP speculative
+decoding (`SPEC_TYPE` / `DRAFT_FILE`); dense alternatives are listed in the same file and in
+[docs/models.md](docs/models.md).
 
-To swap: edit `HF_REPO` / `MODEL_FILE` in `.env`, `./golem pull`, `./golem restart --docker`.
+To swap: edit `HF_REPO` / `MODEL_FILE` in `.env`, `./golem pull`, `./golem restart`, then
+`./golem eval --long 200000` before trusting it.
 Keep `MODEL_ALIAS=local-model` so clients never change. VRAM math, memory regimes and measured
 benchmarks per setup: [docs/models.md](docs/models.md).
 
@@ -127,7 +132,8 @@ benchmarks per setup: [docs/models.md](docs/models.md).
 │   ├── architecture.md       Request flow, ports, auth
 │   ├── claude-code.md        Claude Code → Golem, in detail
 │   ├── backends.md           Swapping llama.cpp for Ollama/vLLM/…
-│   └── models.md             Model choice, memory regimes, benchmarks per setup
+│   ├── models.md             Model choice, memory regimes, benchmarks per setup
+│   └── windows-native.md     Windows mode: llama-server.exe without Docker
 ├── scripts/                  Building blocks the control script calls
 ├── data/models/              GGUF files (git-ignored)
 ├── data/cache/               Download / HF cache (git-ignored)
@@ -141,7 +147,8 @@ benchmarks per setup: [docs/models.md](docs/models.md).
 | `llama-server` exits / OOM | Lower `CONTEXT_SIZE` (KV ≈ 75 KB/token at q8_0) or use a smaller quant |
 | MoE model slow or OOM under WSL2 | Give the WSL2 VM more RAM: `memory=24GB` in `%USERPROFILE%\.wslconfig` |
 | Claude Code still hits api.anthropic.com | Export the four `ANTHROPIC_*` vars (`./golem env`); use `ANTHROPIC_AUTH_TOKEN`, not `ANTHROPIC_API_KEY` |
-| Slow first answer | Prompt cache is cold; prefill runs ~200-500 tok/s on a 12 GB GPU and caches after |
+| Slow first answer | Prompt cache is cold; prefill runs ~800 tok/s on a 12 GB GPU (Claude Code's ~27K first prompt ≈ 35 s) and caches after |
+| Prefill suddenly 40% slower, VRAM ~full | Windows spills VRAM to shared system memory silently: raise `--n-cpu-moe` by 1-2 or close GPU-heavy apps (see [docs/windows-native.md](docs/windows-native.md)) |
 
 ## Credits
 

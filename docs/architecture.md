@@ -4,7 +4,7 @@
 
 | Service | Container | Listens | Protocol | Config |
 |---|---|---|---|---|
-| inference | `golem-inference` | `0.0.0.0:8000` | **Anthropic** Messages API (`/v1/messages`) **and** OpenAI API (`/v1/chat/completions`, `/v1/models`) | `.env` runtime vars → compose `command` |
+| inference | `golem-inference` (docker) or `llama-server.exe` (windows mode) | `0.0.0.0:8000` | **Anthropic** Messages API (`/v1/messages`) **and** OpenAI API (`/v1/chat/completions`, `/v1/models`) | `.env` runtime vars → compose `command` / `scripts/start-windows.ps1` (same flags) |
 
 There is **no translation layer**: llama.cpp serves the Anthropic Messages API natively, so
 agents connect straight to `:8000`. Both APIs are served by the same process, model and KV
@@ -44,10 +44,12 @@ Two regimes, chosen by `EXTRA_ARGS` in `.env` (details and measured numbers:
   model caps around 100K context.
 - **MoE model with `--cpu-moe`** — attention + dense parts + KV stay in VRAM; all expert FFN
   weights live in system RAM. VRAM stays nearly flat as context grows (KV still grows), which
-  is how a 30B-class model serves a 262K window on a 12 GB card. System RAM needs headroom for
+  is how a 30B-class model serves a 231K window on a 12 GB card. System RAM needs headroom for
   the experts — under WSL2 raise the VM limit via `%USERPROFILE%\.wslconfig` (`memory=…`).
   `--n-cpu-moe N` is the tuned variant: only the first N layers' experts go to RAM and the
-  leftover VRAM holds the rest.
+  leftover VRAM holds the rest. Decode computes the RAM experts on the CPU; prefill instead
+  streams them to the GPU once per ubatch, so `-ub 2048` (vs the default 512) cuts that PCIe
+  traffic 4x and more than doubles prompt throughput, at a few hundred MB of compute buffer.
 - **Speculative decoding (MTP)** — Qwen3.5+ models ship a Multi-Token Prediction head that
   drafts ~3 tokens per step; the main model verifies them in one pass, so output is identical
   and decode roughly doubles. Enabled by `SPEC_TYPE=draft-mtp`, with `DRAFT_FILE` pointing at

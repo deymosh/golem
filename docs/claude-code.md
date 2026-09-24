@@ -1,6 +1,10 @@
 # Pointing Claude Code at Golem
 
-Prerequisite: `./golem up --docker` and `./golem status` green.
+Prerequisite: `./golem up` and `./golem status` green.
+
+Context: the server runs 236544 tokens (231K). Claude Code assumes a 200K window and
+auto-compacts before it; the extra ~31K absorbs tokenizer differences (the server counts
+with Qwen's tokenizer) and the final turn's output, so requests never overflow.
 
 ## Option A — `./golem claude` (on the Golem machine)
 

@@ -5,17 +5,19 @@
 **Qwen3.6-35B-A3B (UD-Q4_K_M)** — `unsloth/Qwen3.6-35B-A3B-GGUF`
 **+ MTP draft head** — `bartowski/Qwen_Qwen3.6-35B-A3B-GGUF` / `mtp-Qwen_Qwen3.6-35B-A3B-Q4_0.gguf`
 
-Served at **262144 context**, `--n-cpu-moe 34` (experts of the first 34 of 40 layers in
-system RAM, the rest + attention + KV on GPU), `--spec-type draft-mtp` with the standalone
-MTP head, `--load-mode mlock`, PARALLEL=1, KV q8_0. The unsloth GGUF has no MTP layers;
-bartowski's separate 1.2 GB head loads next to it via `DRAFT_FILE`.
+Served at **236544 context** (231K: Claude Code's 200K + slack), `--n-cpu-moe 36` (experts
+of the first 36 of 40 layers in system RAM, the rest + attention + KV on GPU), `-b/-ub 2048`
+(prefill batching), `--spec-type draft-mtp` with the standalone MTP head, 16 CPU threads,
+`--load-mode mlock`, PARALLEL=1, KV q8_0. The unsloth GGUF has no MTP layers; bartowski's
+separate 1.2 GB head loads next to it via `DRAFT_FILE`.
 
 Why Q4_K_M: at ~5.1 bits/weight it is the best quant that fits a 12 GB card, and under MTP
 it decodes as fast as the Q3 quants — the only cost is long-prompt prefill (~35% slower).
 
 Why a MoE of this class is the sensible default on a 12 GB VRAM / 32 GB RAM box:
 
-- 256K native context — Claude Code (assumes 200K) never overflows and auto-compacts.
+- 256K native context — served at 231K, Claude Code (assumes 200K) never overflows and
+  auto-compacts.
 - MoE 35B total / 3B active: quality of a 30B-class model at offloaded speeds.
 - Valid OpenAI tool-calls through `--jinja` (verified: name, args, finish_reason).
 - VRAM stays nearly flat as the context grows → headroom for compute buffers.
@@ -28,7 +30,7 @@ Measured numbers: [Benchmarks by setup](#benchmarks-by-setup) below.
 
 ```bash
 HF_REPO="unsloth/Qwen3.6-35B-A3B-GGUF"
-MODEL_FILE="Qwen3.6-35B-A3B-UD-Q3_K_M.gguf"
+MODEL_FILE="Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
 ```
 
 The compose `command` serves `/models/$MODEL_FILE` and advertises it under `MODEL_ALIAS`.
@@ -45,6 +47,7 @@ via the `sh -c` entrypoint (e.g. `--cpu-moe`, `--n-cpu-moe N`, `--mmproj ...`).
    separate file (empty `DRAFT_FILE` when the model GGUF embeds it); `SPEC_TYPE=""` disables.
 3. `./golem pull`
 4. `./golem restart`
+5. `./golem eval --long 200000` (quality gate) and `./golem bench` (speed)
 
 ## Memory math, two regimes
 
@@ -65,10 +68,68 @@ locked RAM at boot (best over bind mounts, notably Docker Desktop/WSL2 on Window
 # Benchmarks by setup
 
 One section per machine. To add yours: configure the candidate in `.env`, then run
-`./scripts/eval-model.sh` (and `./scripts/eval-model.sh --long 200000` for long-context
-tests), and record decode/prefill/needle results in a new subsection.
+`./golem bench` (decode best/median + MTP acceptance, prefill on a ~30K prompt) and
+`./golem eval --long 200000` (tool calls, 200K needle, decode at 200K depth), and record the
+`RESULT` lines in a new subsection. Measure best-of-3 on a quiet desktop.
 
-## Setup A — 12 GB VRAM GPU + 32 GB RAM, Windows host, Docker (WSL2)
+## Setup A — 12 GB VRAM GPU + 32 GB RAM, Windows host, native (`DEPLOY_MODE=windows`)
+
+RTX 3060 12 GB, i7-12700KF (8P+4E, 20 threads), 32 GB DDR. llama.cpp b11149 Windows/CUDA 13.
+Qwen3.6-35B-A3B UD-Q4_K_M + MTP, ctx 236544. Decode = 600-token code generation, best-of-3;
+prefill = 35K-token code prompt, prompt cache off. Measured 2026-09-24.
+
+### Tuning sweep (current default in bold)
+
+| Config | VRAM total | decode | prefill |
+|---|---|---|---|
+| n-cpu-moe 34, 20 threads, ub 512 (previous default) | 11.8 GB | 60.6 t/s | 340 t/s |
+| n-cpu-moe 34, 8 threads | 11.8 GB | 62.4 t/s | — |
+| n-cpu-moe 34, 12 threads | 11.8 GB | 64.6 t/s | — |
+| n-cpu-moe 34, 16 threads | 11.8 GB | 65.7 t/s | — |
+| n-cpu-moe 34, 16 threads, ub 1024 | 11.8 GB | 64.6 t/s | 563 t/s |
+| n-cpu-moe 34, 16 threads, ub 2048 | 11.8-11.9 GB | 63-65 t/s | 839 / 505 t/s ⚠ |
+| n-cpu-moe 34, 16 threads, ub 4096 | 11.9 GB | 63.3 t/s | 506 t/s ⚠ |
+| n-cpu-moe 33, 16 threads, ub 2048 | 11.9 GB | 66.2 t/s | 489 t/s ⚠ |
+| n-cpu-moe 35, 16 threads, ub 2048 | 11.8 GB | 64.9 t/s | 800 t/s |
+| n-cpu-moe 35, 16 threads, ub 3072 | 11.9 GB | 65.1 t/s | 920 t/s |
+| **n-cpu-moe 36, 16 threads, ub 2048** | **11.6 GB** | **63.5 t/s** | **823 t/s** |
+| n-cpu-moe 36, 16 threads, ub 3072 | 11.8 GB | 63.2 t/s | 966 t/s |
+| MTP draft max 2 / 3 (default) / 4 | — | 67.3 / 65.7 / 65.4 t/s | — |
+
+Reading:
+
+- **ubatch is the prefill lever.** Prefill streams the RAM-resident experts to the GPU once
+  per ubatch; 512 → 2048 cuts that traffic 4x: 340 → ~820 t/s, decode unchanged. Claude
+  Code's ~27K-token first request drops from ~80 s to ~35 s.
+- **⚠ = the VRAM cliff.** Above ~11.8 GB total the Windows driver silently spills into shared
+  system memory, and prefill falls ~40% (505 t/s). The same config (n34 + ub2048) landed on
+  either side of it across runs because the desktop's own VRAM use drifts (0.5-1.6 GB idle
+  measured the same day). n36 + ub2048 keeps ~0.7 GB headroom at ~1 decode t/s cost.
+  ub 3072 prefills faster still but sits back at the edge.
+- **Threads:** 16 of 20 beats all 20 (~+8%) and 8 P-cores only (~+5%). Likely the RAM-expert
+  decode is memory-bound, so the last SMT/E-core threads add sync overhead, not bandwidth.
+- **MTP draft length** is within noise at 2-4 (acceptance ~73% at 3, ~83% at 2); the default
+  3 stays.
+- **Context 231K vs 262K**: Qwen3.6's hybrid attention (10 of 40 layers carry a KV cache)
+  makes the KV small, so the cut is about not over-allocating, not speed.
+
+### Current default, end to end
+
+| Test | Result |
+|---|---|
+| `./golem bench` | decode 63.4 t/s best / 63.2 median, MTP acceptance 73%, prefill 842 t/s (28.6K tokens), VRAM 11.8 GB |
+| `./golem eval --long 200000` | arithmetic + tool calls PASS; needle 212K **PASS**, prefill 642 t/s over the full 212K; decode at 212K depth 31.4 t/s |
+| Real Claude Code session | 27,251-token first prompt at 747 t/s; follow-up turns reprocess only the new tokens (56) |
+
+Cache reuse note: Qwen3.6 is a hybrid recurrent model, so the server rolls back through
+context checkpoints taken per ubatch. An agent turn that *appends* reuses everything; a
+request that *replaces* the tail (as the eval's depth probe does) re-processes up to one
+ubatch (~2K tokens).
+
+## Setup A (docker) — 12 GB VRAM GPU + 32 GB RAM, Windows host, Docker (WSL2)
+
+Superseded on this machine by the native Windows mode above (~+50% decode: the WSL
+paravirtualized GPU costs batch-1 decode dearly). Kept for Linux/docker reference.
 
 ### Speculative decoding + expert placement (measured 2026-09-23)
 
@@ -141,7 +202,9 @@ give generous `max_tokens` (reasoning eats the budget first) or send
 CUDA 13.4 runtime) answered the 200K needle wrong *twice, identically* (tool calls,
 100K needle, throughput and prefill all fine), while b10991 passes. `compose.yml`
 pins the known-good image **by digest**; to upgrade, pull the new build, point the
-digest at it, and adopt only if `./scripts/eval-model.sh --long 200000` passes.
+digest at it, and adopt only if `./golem eval --long 200000` passes. Windows mode pins
+its release the same way (`LLAMA_WIN_BUILD`, default b11149 — the Windows build of
+b11149 passes the needle; the regression is Linux-build-specific).
 
 ## Client pairing
 
