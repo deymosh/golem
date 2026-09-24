@@ -12,9 +12,11 @@ set -Eeuo pipefail
 #   1. health + model identity
 #   2. arithmetic sanity (detects quant damage / CUDA gibberish)
 #   3. tool calling (OpenAI tools API round-trip)
-#   4. throughput: 3 timed runs, prompt tok/s + decode tok/s via /metrics
-#   5. optional needle-in-haystack: --long TOKENS
+#   4. throughput: 3 runs, prompt + decode tok/s from server timings
+#   5. optional needle-in-haystack at --long TOKENS, then decode speed
+#      at that depth (follow-up request reusing the cached haystack)
 #
+# Needs python3; on Windows `./golem eval` runs it through WSL.
 # Usage: ./scripts/eval-model.sh [--long tokens]
 # ============================================================
 
@@ -34,7 +36,17 @@ MODEL_ALIAS="${MODEL_ALIAS:-local-model}"
 TEMPERATURE="${TEMPERATURE:-0.15}"
 TOP_P="${TOP_P:-0.95}"
 
-BASE_URL="http://127.0.0.1:${PORT}"
+# EVAL_HOST: reach a server on another host. Inside WSL (default NAT
+# networking) the Windows loopback is invisible, so a server running
+# natively on Windows is tried at WSL's default gateway = the Windows
+# host; that needs the server bound to 0.0.0.0 (LOCAL_AI_HOST).
+EVAL_HOST="${EVAL_HOST:-127.0.0.1}"
+if ! curl --silent --fail --max-time 3 "http://${EVAL_HOST}:${PORT}/health" >/dev/null 2>&1 \
+    && grep -qi microsoft /proc/version 2>/dev/null; then
+    WIN_HOST="$(ip route show default 2>/dev/null | awk '{print $3; exit}')"
+    [[ -n "${WIN_HOST}" ]] && EVAL_HOST="${WIN_HOST}"
+fi
+BASE_URL="http://${EVAL_HOST}:${PORT}"
 
 LONG_TOKENS=""
 while [[ $# -gt 0 ]]; do
@@ -48,17 +60,6 @@ if ! command -v python3 >/dev/null 2>&1; then
     echo "[ERROR] python3 is required" >&2
     exit 1
 fi
-
-METRICS_URL="${BASE_URL}/metrics"
-
-metric() {
-    # metric <name> -> value from the Prometheus endpoint (exact field match)
-    # /metrics is protected by the API key like every other endpoint.
-    curl --silent --max-time 5 \
-        -H "Authorization: Bearer ${API_KEY}" \
-        "${METRICS_URL}" \
-        | awk -v n="$1" '$1 == n {v=$2} END {print v+0}'
-}
 
 section() {
     echo
@@ -219,105 +220,108 @@ fi
 # 4. THROUGHPUT (3 timed runs)
 # ============================================================
 
-section "4. THROUGHPUT (3 runs, ~600-token prompt, 192 gen tokens)"
+section "4. THROUGHPUT (3 runs, code-review prompt, 192 gen tokens)"
 
-RUNS=3
-TOTAL_P=0; TOTAL_G=0; WALL=0
+# Per-request server timings (llama.cpp `timings`): decode and prompt
+# tok/s exclude HTTP and each other. Prompt caching is off so every run
+# pays its prefill. ./golem bench is the fuller speed benchmark.
+timings() {
+    python3 -c '
+import json, sys
+t = json.load(sys.stdin).get("timings", {})
+acc = " draft_accept=%.0f%%" % (100.0 * t["draft_n_accepted"] / t["draft_n"]) if t.get("draft_n") else ""
+print("prompt=%d tok @ %.0f t/s, gen=%d tok @ %.1f t/s%s" % (
+    t.get("prompt_n", 0), t.get("prompt_per_second", 0),
+    t.get("predicted_n", 0), t.get("predicted_per_second", 0), acc))'
+}
 
-for i in $(seq 1 "${RUNS}"); do
-    P0=$(metric 'llamacpp:prompt_tokens_total')
-    G0=$(metric 'llamacpp:tokens_predicted_total')
-    T0=$(date +%s.%N)
-
-    curl --silent --show-error --fail --max-time 900 \
+GEN_SPEEDS=()
+for i in $(seq 1 3); do
+    OUT="$(curl --silent --show-error --fail --max-time 900 \
         "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${API_KEY}" \
-        -d @- <<EOF > /dev/null
+        -d @- <<EOF
 {
   "model": "${MODEL_ALIAS}",
   "messages": [{"role": "user", "content": "Review this Go snippet for correctness and idiomatic issues. Be concise but complete.\n\nfunc LoadConfig(paths []string) (*Config, error) {\n\tdata, _ := os.ReadFile(paths[0])\n\tvar cfg Config\n\tjson.Unmarshal(data, &cfg)\n\tif cfg.Timeout == 0 { cfg.Timeout = 30 }\n\treturn &cfg, nil\n}\n\nExplain each problem, rank by severity, then show the fixed version."}],
+  "chat_template_kwargs": {"enable_thinking": false},
+  "cache_prompt": false,
   "temperature": ${TEMPERATURE},
   "top_p": ${TOP_P},
   "max_tokens": 192,
   "stream": false
 }
 EOF
-
-    T1=$(date +%s.%N)
-    P1=$(metric 'llamacpp:prompt_tokens_total')
-    G1=$(metric 'llamacpp:tokens_predicted_total')
-
-    DP=$((P1 - P0)); DG=$((G1 - G0))
-    DT=$(python3 -c "print(f'{$T1 - $T0:.2f}')")
-
-    echo "run $i: prompt=${DP} tok, gen=${DG} tok, wall=${DT}s"
-    TOTAL_P=$((TOTAL_P + DP)); TOTAL_G=$((TOTAL_G + DG)); WALL=$(python3 -c "print($WALL + $DT)")
+)"
+    LINE="$(timings <<<"${OUT}")"
+    echo "run $i: ${LINE}"
+    GEN_SPEEDS+=("$(sed -n 's/.*gen=[0-9]* tok @ \([0-9.]*\) t\/s.*/\1/p' <<<"${LINE}")")
 done
-
-python3 - "$TOTAL_P" "$TOTAL_G" "$WALL" <<'PYEOF'
-import sys
-p, g, w = int(sys.argv[1]), int(sys.argv[2]), float(sys.argv[3])
-if w > 0:
-    print(f"RESULT prompt_tok_s={p/w:.0f} gen_tok_s={g/w:.1f} (avg of 3 runs, incl. HTTP)")
-PYEOF
+echo "RESULT gen_tok_s_best=$(printf '%s\n' "${GEN_SPEEDS[@]}" | sort -g | tail -n1)"
 
 # ============================================================
 # 5. LONG CONTEXT NEEDLE (optional)
 # ============================================================
 
 if [[ -n "${LONG_TOKENS}" ]]; then
-    section "5. NEEDLE-IN-HAYSTACK (~${LONG_TOKENS} tokens)"
+    section "5. NEEDLE-IN-HAYSTACK (~${LONG_TOKENS} tokens) + DECODE AT DEPTH"
 
-    P0=$(metric 'llamacpp:prompt_tokens_total')
-    G0=$(metric 'llamacpp:tokens_predicted_total')
-    T0=$(date +%s.%N)
-
-    python3 - "$LONG_TOKENS" <<'PYEOF' > /tmp/golem_needle_body.json
+    # Haystack first, question last: the follow-up request below shares
+    # the whole haystack as a cached prefix, which is how an agent turn
+    # looks (long history, short new tail).
+    python3 - "$LONG_TOKENS" "${MODEL_ALIAS}" <<'PYEOF'
 import json, sys
-n = int(sys.argv[1])
+n, model = int(sys.argv[1]), sys.argv[2]
 line = "The warehouse holds crates of silicon wafers and the manifests are filed by quarter.\n"
 filler = line * (n * 5 // len(line))          # ~4 chars/token for this text
 needle = "IMPORTANT: the release code for Q3 is stored under the passphrase 8127.\n"
 half = len(filler) // 2
-haystack = filler[:half] + needle + filler[half:]
-body = {
-    "model": "local-model",
-    "messages": [{"role": "user", "content":
-        "Below is a pile of warehouse log lines. Somewhere inside there is one IMPORTANT line. "
-        "What is the passphrase in it? Reply with the number only.\n\n" + haystack}],
-    "temperature": 0,
-    "max_tokens": 16,
-    # hybrid-thinking models would spend the 16 tokens reasoning
-    "chat_template_kwargs": {"enable_thinking": False},
-    "stream": False,
-}
-json.dump(body, sys.stdout)
+haystack = ("Below is a pile of warehouse log lines. Somewhere inside there is one IMPORTANT line.\n\n"
+            + filler[:half] + needle + filler[half:])
+def body(question, max_tokens, cache):
+    return {
+        "model": model,
+        "messages": [{"role": "user", "content": haystack + "\n" + question}],
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        # hybrid-thinking models would spend the budget reasoning
+        "chat_template_kwargs": {"enable_thinking": False},
+        "cache_prompt": cache,
+        "stream": False,
+    }
+json.dump(body("What is the passphrase in the IMPORTANT line? Reply with the number only.", 16, False),
+          open("/tmp/golem_needle_body.json", "w"))
+json.dump(body("Now write a Python function that parses one of these log lines into a dict, with a docstring.", 256, True),
+          open("/tmp/golem_depth_body.json", "w"))
 PYEOF
 
-    NEEDLE_OUT="$(curl --silent --show-error --fail --max-time 3600 \
+    NEEDLE_RAW="$(curl --silent --show-error --fail --max-time 3600 \
         "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${API_KEY}" \
-        --data-binary @/tmp/golem_needle_body.json \
-        | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])')"
+        --data-binary @/tmp/golem_needle_body.json || true)"
+    NEEDLE_OUT="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])' <<<"${NEEDLE_RAW}" 2>/dev/null || echo "(request failed)")"
+    PROMPT_TPS="$(python3 -c 'import json,sys; print("%.0f" % json.load(sys.stdin)["timings"]["prompt_per_second"])' <<<"${NEEDLE_RAW}" 2>/dev/null || echo 0)"
+    echo "needle : $(timings <<<"${NEEDLE_RAW}" 2>/dev/null); answer: ${NEEDLE_OUT}"
 
-    T1=$(date +%s.%N)
-    P1=$(metric 'llamacpp:prompt_tokens_total')
-    G1=$(metric 'llamacpp:tokens_predicted_total')
+    DEPTH_RAW="$(curl --silent --show-error --fail --max-time 3600 \
+        "${BASE_URL}/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${API_KEY}" \
+        --data-binary @/tmp/golem_depth_body.json || true)"
+    DEPTH_TPS="$(python3 -c 'import json,sys; print("%.1f" % json.load(sys.stdin)["timings"]["predicted_per_second"])' <<<"${DEPTH_RAW}" 2>/dev/null || echo 0)"
+    echo "depth  : $(timings <<<"${DEPTH_RAW}" 2>/dev/null) (prefix from cache)"
+    rm -f /tmp/golem_needle_body.json /tmp/golem_depth_body.json
 
-    DP=$((P1 - P0)); DG=$((G1 - G0))
-    DT=$(python3 -c "print(f'{$T1 - $T0:.2f}')")
-
-    echo "prompt=${DP} tok in ${DT}s -> $(python3 -c "print(f'{$DP/$DT:.0f}')") prompt tok/s; answer: ${NEEDLE_OUT}"
     if echo "${NEEDLE_OUT}" | grep -q "8127"; then
         echo "[ OK ] needle found"
-        echo "RESULT long_ctx_${LONG_TOKENS}=PASS prompt_tok_s=$(python3 -c "print(f'{$DP/$DT:.0f}')")"
+        VERDICT=PASS
     else
         echo "[FAIL] needle missed"
-        echo "RESULT long_ctx_${LONG_TOKENS}=FAIL prompt_tok_s=$(python3 -c "print(f'{$DP/$DT:.0f}')")"
+        VERDICT=FAIL
     fi
-    rm -f /tmp/golem_needle_body.json
+    echo "RESULT long_ctx_${LONG_TOKENS}=${VERDICT} prompt_tok_s=${PROMPT_TPS} gen_tok_s_at_depth=${DEPTH_TPS}"
 fi
 
 # ============================================================
