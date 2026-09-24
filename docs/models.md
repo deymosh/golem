@@ -137,6 +137,12 @@ best-of-3 in quiet; the first request after boot includes CUDA warmup (>120 s);
 give generous `max_tokens` (reasoning eats the budget first) or send
 `"chat_template_kwargs": {"enable_thinking": false}` (Qwen).
 
+**llama.cpp build gate:** builds are not interchangeable — b11149 (2026-09-24,
+CUDA 13.4 runtime) answered the 200K needle wrong *twice, identically* (tool calls,
+100K needle, throughput and prefill all fine), while b10991 passes. `compose.yml`
+pins the known-good image **by digest**; to upgrade, pull the new build, point the
+digest at it, and adopt only if `./scripts/eval-model.sh --long 200000` passes.
+
 ## Client pairing
 
 - **Claude Code** (200K assumed): needs a server ctx ≥ 200K — the default Qwen3.6 config.

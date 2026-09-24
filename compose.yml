@@ -11,7 +11,14 @@ name: golem
 
 services:
   inference:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda13
+    # Pinned by digest to a known-good build, NOT the floating upstream tag:
+    # build b11149 (2026-09-24, digest 24d44a98…) failed the 200K needle test
+    # twice with a deterministic wrong answer; this build (b10991) passes it.
+    # Upgrading is a manual, eval-gated step:
+    #   docker pull ghcr.io/ggml-org/llama.cpp:server-cuda13   # note new digest
+    #   # put the new digest on the line below, ./golem restart, then
+    #   # ./scripts/eval-model.sh --long 200000 — adopt only on PASS
+    image: ghcr.io/ggml-org/llama.cpp@sha256:3663a64b1074515e4aea53042f07848e8960e3540d8c15a7c38975be309b32f9
     container_name: golem-inference
     restart: unless-stopped
 
