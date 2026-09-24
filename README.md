@@ -70,6 +70,10 @@ Linux/WSL2-only.
 | `claude [args…]` | `exec claude` with `ANTHROPIC_*` already set |
 | `env` | print those exports |
 
+On Windows you can also skip Docker entirely:
+`scripts\start-windows.ps1` runs `llama-server.exe` natively with the same `.env` and flags —
+see [docs/windows-native.md](docs/windows-native.md) (no vmmem, no Docker Desktop, direct CUDA).
+
 ---
 
 ## Connecting clients
