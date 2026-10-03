@@ -113,12 +113,47 @@ Reading:
 - **Context 231K vs 262K**: Qwen3.6's hybrid attention (10 of 40 layers carry a KV cache)
   makes the KV small, so the cut is about not over-allocating, not speed.
 
+### Second sweep (2026-10-03): the quant ceiling is RAM, not VRAM
+
+Same machine, paired same-hour runs (ambient day swings decode ±3 t/s — always
+compare configs measured back-to-back, never across days).
+
+| Config (all mlock unless noted, n-cpu-moe 36, ub 2048) | VRAM | decode | prefill |
+|---|---|---|---|
+| Q4_K_M + MTP draft 3 (default) — b11149 | 11.8 GB | 60.2 / 59.8 t/s | 816 t/s |
+| Q4_K_M + `--spec-draft-n-max 2` | 11.8 GB | 60.6 / 58.0 t/s | 829 t/s |
+| Q4_K_M — **b11379** | 11.8 GB | 60.6 / 60.4 t/s | 822 t/s |
+| Q4_K_XL (22.36 GB) | 11.8 GB | 57.0 / 56.9 t/s | 768 t/s |
+| Q5_K_S (24.94 GB), n-cpu-moe 37, `--load-mode auto`, warm | 11.5 GB | 53.1 / 50.9 t/s | 728 t/s |
+
+Reading:
+
+- **Q5_K_S is the 64 GB-day model, not a today model.** Its ~21 GB of warm
+  expert pages plus a live desktop do not fit 32 GB: available RAM sits at
+  ~0.5 GB with the OS compressing continuously, decode loses ~15%, and the
+  first pass after load page-faults at 13.8 t/s until the experts fault in.
+  The Q4→Q5 "decode is step-overhead-bound, quality is free" logic holds only
+  while the weights stay resident — RAM capacity breaks that assumption before
+  VRAM does. The file stays on disk ready for a RAM upgrade.
+- **Q4_K_XL is dominated**: −6% decode, −7% prefill vs Q4_K_M for +0.23 GB of
+  importance-matrix polish on tensors that are mostly GPU-side anyway.
+- **draft-max 2 vs 3 is a wash** (confirmed paired, as the first sweep hinted):
+  60.6/58.0 vs 60.2/59.8. Acceptance 80% vs 73% doesn't convert to speed here.
+  Default 3 stays.
+- **b11379 adopted**: identical speed to b11149, and it passes the full gate —
+  needle found at 211.8K (629 t/s prefill), decode at depth 30.4 t/s, tools OK.
+  Staying current is cheap while the eval keeps refereeing.
+- Measurement hygiene: a 25 GB model download or a background disk scan
+  starves RAM (mlock + file cache) and costs 5-10 t/s of decode — never adopt
+  or reject a config from a bench taken while one runs.
+
 ### Current default, end to end
 
 | Test | Result |
 |---|---|
-| `./golem bench` | decode 63.4 t/s best / 63.2 median, MTP acceptance 73%, prefill 842 t/s (28.6K tokens), VRAM 11.8 GB |
-| `./golem eval --long 200000` | arithmetic + tool calls PASS; needle 212K **PASS**, prefill 642 t/s over the full 212K; decode at 212K depth 31.4 t/s |
+| `./golem bench` (2026-09-24, b11149) | decode 63.4 t/s best / 63.2 median, MTP acceptance 73%, prefill 842 t/s (28.6K tokens), VRAM 11.8 GB |
+| `./golem bench` (2026-10-03, b11379) | decode 60.6 t/s best / 60.4 median, acceptance 73%, prefill 822 t/s, VRAM 11.8 GB (busier desktop day) |
+| `./golem eval --long 200000` (2026-10-03, b11379) | arithmetic + tool calls PASS; needle 211.8K **PASS**, prefill 629 t/s over the full 211.8K; decode at depth 30.4 t/s |
 | Real Claude Code session | 27,251-token first prompt at 747 t/s; follow-up turns reprocess only the new tokens (56) |
 
 Cache reuse note: Qwen3.6 is a hybrid recurrent model, so the server rolls back through
@@ -200,11 +235,14 @@ give generous `max_tokens` (reasoning eats the budget first) or send
 
 **llama.cpp build gate:** builds are not interchangeable — b11149 (2026-09-24,
 CUDA 13.4 runtime) answered the 200K needle wrong *twice, identically* (tool calls,
-100K needle, throughput and prefill all fine), while b10991 passes. `compose.yml`
-pins the known-good image **by digest**; to upgrade, pull the new build, point the
-digest at it, and adopt only if `./golem eval --long 200000` passes. Windows mode pins
-its release the same way (`LLAMA_WIN_BUILD`, default b11149 — the Windows build of
-b11149 passes the needle; the regression is Linux-build-specific).
+100K needle, throughput and prefill all fine) on Linux, while b10991 passes.
+`compose.yml` pins the known-good image **by digest**; to upgrade, pull the new
+build, point the digest at it, and adopt only if `./golem eval --long 200000`
+passes. Windows mode pins its release the same way (`LLAMA_WIN_BUILD`, default
+b11379 — adopted 2026-10-03 after the full gate passed; the Windows build of
+b11149 also passes; the b11149 regression is Linux-build-specific). On Git Bash,
+`./golem eval` routes through WSL even when a Windows python3 is visible —
+MSYS path conversion otherwise breaks the needle/depth requests.
 
 ## Client pairing
 
