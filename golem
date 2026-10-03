@@ -176,7 +176,11 @@ cmd_bench() {
 cmd_eval() {
     # The eval harness needs python3; Git Bash on Windows usually has none,
     # so hand it to WSL there (the script finds the Windows host itself).
-    if command -v python3 >/dev/null 2>&1 && python3 -c 'pass' 2>/dev/null; then
+    # A Windows python3 on Git Bash is not enough either: the script writes
+    # request bodies to /tmp and pipes them to curl --data-binary, and MSYS
+    # path conversion breaks that pair (needle/depth requests never send),
+    # so on Git Bash always prefer WSL, where the script's Linux semantics hold.
+    if [[ "${MSYSTEM:-}" != MINGW* ]] && command -v python3 >/dev/null 2>&1 && python3 -c 'pass' 2>/dev/null; then
         "${SCRIPTS}/eval-model.sh" "$@"
     elif command -v wsl.exe >/dev/null 2>&1; then
         wsl.exe --cd "$(cygpath -w "${ROOT_DIR}")" bash scripts/eval-model.sh "$@"
