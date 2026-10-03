@@ -75,7 +75,7 @@ $Server = Join-Path $BinDir "llama-server.exe"
 $BuildMarker = Join-Path $BinDir "BUILD"
 
 # Known-good build: passed the 200K needle + tool calls on this platform.
-$WinBuild = if ($Cfg["LLAMA_WIN_BUILD"]) { $Cfg["LLAMA_WIN_BUILD"] } else { "b11149" }
+$WinBuild = if ($Cfg["LLAMA_WIN_BUILD"]) { $Cfg["LLAMA_WIN_BUILD"] } else { "b11379" }
 
 $installed = if (Test-Path $BuildMarker) { (Get-Content $BuildMarker -Raw).Trim() } else { $null }
 if ((Test-Path $Server) -and $installed -and $installed -ne $WinBuild) {
