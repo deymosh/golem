@@ -77,8 +77,10 @@ $BuildMarker = Join-Path $BinDir "BUILD"
 # Known-good build: passed the 200K needle + tool calls on this platform.
 $WinBuild = if ($Cfg["LLAMA_WIN_BUILD"]) { $Cfg["LLAMA_WIN_BUILD"] } else { "b11379" }
 
-$installed = if (Test-Path $BuildMarker) { (Get-Content $BuildMarker -Raw).Trim() } else { $null }
-if ((Test-Path $Server) -and $installed -and $installed -ne $WinBuild) {
+$installed = if (Test-Path $BuildMarker) { (Get-Content $BuildMarker -Raw).Trim() } else { "<no build marker>" }
+# A missing marker counts as a mismatch: a killed install can leave the exe
+# extracted without the marker, and that half-state must reinstall, not run.
+if ((Test-Path $Server) -and $installed -ne $WinBuild) {
     Write-Host "[ .. ] installed llama.cpp $installed != pinned $WinBuild, reinstalling..."
     Remove-Item -Recurse -Force $BinDir
 }
