@@ -124,17 +124,20 @@ compare configs measured back-to-back, never across days).
 | Q4_K_M + `--spec-draft-n-max 2` | 11.8 GB | 60.6 / 58.0 t/s | 829 t/s |
 | Q4_K_M — **b11379** | 11.8 GB | 60.6 / 60.4 t/s | 822 t/s |
 | Q4_K_XL (22.36 GB) | 11.8 GB | 57.0 / 56.9 t/s | 768 t/s |
-| Q5_K_S (24.94 GB), n-cpu-moe 37, `--load-mode auto`, warm | 11.5 GB | 53.1 / 50.9 t/s | 728 t/s |
+| Q5_K_S (24.94 GB), n-cpu-moe 37, `--load-mode auto`, warm | 11.5 GB | 54.5 / 54.0 t/s | 773 t/s |
+| Q5_K_S (24.94 GB), n-cpu-moe 37, `--load-mode mlock` | 11.6 GB | 56.0 / 54.9 t/s | — |
 
 Reading:
 
-- **Q5_K_S is the 64 GB-day model, not a today model.** Its ~21 GB of warm
-  expert pages plus a live desktop do not fit 32 GB: available RAM sits at
-  ~0.5 GB with the OS compressing continuously, decode loses ~15%, and the
-  first pass after load page-faults at 13.8 t/s until the experts fault in.
-  The Q4→Q5 "decode is step-overhead-bound, quality is free" logic holds only
-  while the weights stay resident — RAM capacity breaks that assumption before
-  VRAM does. The file stays on disk ready for a RAM upgrade.
+- **Q5_K_S is the 64 GB-day model, not a today model.** Confirmed in a clean
+  retest (quiet desktop, fully warmed) in *both* load modes: `auto` leaves
+  0.8 GB available with decode −10%, `mlock` locks 21.1 GB and leaves 1.5 GB —
+  either way there is no headroom left for the client, a browser, or a build,
+  and decode sits ~10% under Q4_K_M. The first pass after an `auto` load also
+  page-faults at 13.8 t/s until the experts fault in. The Q4→Q5 "decode is
+  step-overhead-bound, quality is free" logic holds only while the weights
+  stay resident — RAM capacity breaks that assumption before VRAM does. The
+  file stays on disk ready for a RAM upgrade.
 - **Q4_K_XL is dominated**: −6% decode, −7% prefill vs Q4_K_M for +0.23 GB of
   importance-matrix polish on tensors that are mostly GPU-side anyway.
 - **draft-max 2 vs 3 is a wash** (confirmed paired, as the first sweep hinted):
