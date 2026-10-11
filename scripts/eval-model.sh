@@ -78,7 +78,7 @@ curl --silent --show-error --fail --max-time 5 "${BASE_URL}/health" >/dev/null \
     || { echo "[FAIL] server not responding"; exit 1; }
 echo "[ OK ] /health"
 
-curl --silent -H "Authorization: Bearer ${API_KEY}" "${BASE_URL}/props" \
+curl --silent -H "Authorization: Bearer ${API_KEY}" "${BASE_URL}/props?model=${MODEL_ALIAS}" \
     | python3 -c '
 import json,sys
 try:

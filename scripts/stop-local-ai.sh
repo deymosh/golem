@@ -22,6 +22,8 @@ PID="$(cat "${PID_FILE}")"
 
 if kill -0 "${PID}" 2>/dev/null; then
     echo "[INFO] Stopping llama-server (${PID})..."
+    # Router mode runs each model in a child llama-server: stop those too.
+    pkill -TERM -P "${PID}" 2>/dev/null || true
     kill "${PID}"
 
     for _ in $(seq 1 20); do

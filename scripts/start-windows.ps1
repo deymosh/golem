@@ -53,9 +53,18 @@ $LoadMode  = if ($Cfg["LOAD_MODE"])         { $Cfg["LOAD_MODE"] }         else {
 $SpecType  = $Cfg["SPEC_TYPE"]
 $DraftFile = $Cfg["DRAFT_FILE"]
 $ExtraArgs = $Cfg["EXTRA_ARGS"]
+$SleepIdle = $Cfg["SLEEP_IDLE_SECONDS"]
+$Preset    = $Cfg["MODELS_PRESET"]
 
-$ModelPath = Join-Path $Root "data\models\$ModelFile"
-if (-not (Test-Path $ModelPath)) { throw "Model not found: $ModelPath (./golem pull downloads it)" }
+$ModelDir = Join-Path $Root "data\models"
+if ($Preset) {
+    # Router mode: models and their flags come from the preset file.
+    $PresetPath = Join-Path $Root $Preset
+    if (-not (Test-Path $PresetPath)) { throw "Preset not found: $PresetPath (MODELS_PRESET in .env)" }
+} else {
+    $ModelPath = Join-Path $ModelDir $ModelFile
+    if (-not (Test-Path $ModelPath)) { throw "Model not found: $ModelPath (./golem pull downloads it)" }
+}
 
 # ------------------------------------------------------------
 # Port conflict check (docker inference or a previous instance)
@@ -127,25 +136,34 @@ $Log = Join-Path $LogDir "llama-server-windows.log"
 $ServerArgs = @(
     "--host", $BindHost,
     "--port", $Port,
-    "--model", $ModelPath,
-    "--alias", $Alias,
-    "--ctx-size", $Ctx,
-    "--n-gpu-layers", $GpuLayers,
     "--threads", $Threads,
     "--parallel", $Parallel,
-    "--jinja",
     "--metrics",
-    "-fa", "on",
-    "--cache-type-k", $CacheK,
-    "--cache-type-v", $CacheV,
-    "--load-mode", $LoadMode,
     "--api-key", $ApiKey,
     "--log-file", $Log,
     "--log-colors", "off"
 )
-if ($SpecType) { $ServerArgs += @("--spec-type", $SpecType) }
-if ($DraftFile) { $ServerArgs += @("--spec-draft-model", (Join-Path $Root "data\models\$DraftFile")) }
-if ($ExtraArgs) { $ServerArgs += ($ExtraArgs -split '\s+' | Where-Object { $_ }) }
+if ($SleepIdle) { $ServerArgs += @("--sleep-idle-seconds", $SleepIdle) }
+if ($Preset) {
+    # Router: command-line flags override every preset, so only the shared
+    # ones above go here; one model resident at a time (12 GB card).
+    $ServerArgs += @("--models-preset", $PresetPath, "--models-max", "1")
+} else {
+    $ServerArgs += @(
+        "--model", $ModelPath,
+        "--alias", $Alias,
+        "--ctx-size", $Ctx,
+        "--n-gpu-layers", $GpuLayers,
+        "--jinja",
+        "-fa", "on",
+        "--cache-type-k", $CacheK,
+        "--cache-type-v", $CacheV,
+        "--load-mode", $LoadMode
+    )
+    if ($SpecType) { $ServerArgs += @("--spec-type", $SpecType) }
+    if ($DraftFile) { $ServerArgs += @("--spec-draft-model", (Join-Path $ModelDir $DraftFile)) }
+    if ($ExtraArgs) { $ServerArgs += ($ExtraArgs -split '\s+' | Where-Object { $_ }) }
+}
 # Start-Process joins arguments with bare spaces: quote paths that have them.
 $ServerArgs = $ServerArgs | ForEach-Object { if ("$_" -match '\s') { "`"$_`"" } else { "$_" } }
 
@@ -153,7 +171,8 @@ $ServerArgs = $ServerArgs | ForEach-Object { if ("$_" -match '\s') { "`"$_`"" } 
 # make Start-Process spawn with handle inheritance, so llama-server would
 # keep the caller's stdout pipe open and hang anything reading it until
 # EOF (e.g. `./golem up | tail`).
-$Proc = Start-Process -FilePath $Server -ArgumentList $ServerArgs -WindowStyle Hidden -PassThru
+# Started from data\models so preset model paths resolve as bare filenames.
+$Proc = Start-Process -FilePath $Server -ArgumentList $ServerArgs -WorkingDirectory $ModelDir -WindowStyle Hidden -PassThru
 New-Item -ItemType Directory -Force (Join-Path $Root ".local") | Out-Null
 Set-Content -Path (Join-Path $Root ".local\llama-server-windows.pid") -Value $Proc.Id
 Write-Host "[ OK ] llama-server started, PID $($Proc.Id)"
@@ -182,7 +201,11 @@ while ((Get-Date) -lt $deadline) {
 }
 if (-not $healthy) { throw "Server did not become healthy within 10 minutes (logs: $Log)" }
 
-Write-Host "[ OK ] healthy on http://$BindHost`:$Port (model: $ModelFile)"
+if ($Preset) {
+    Write-Host "[ OK ] router healthy on http://$BindHost`:$Port (presets: $Preset; models load on first request)"
+} else {
+    Write-Host "[ OK ] healthy on http://$BindHost`:$Port (model: $ModelFile)"
+}
 Write-Host ""
 Write-Host "Point Claude Code at Golem:"
 Write-Host "`$env:ANTHROPIC_BASE_URL = `"http://127.0.0.1:$Port`""

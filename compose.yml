@@ -31,6 +31,10 @@ services:
     volumes:
       - ./data/models:/models:ro
       - ./data/cache:/cache
+      - ./config:/golem/config:ro
+
+    # Preset model paths (router mode) are bare filenames under /models.
+    working_dir: /models
 
     environment:
       NVIDIA_VISIBLE_DEVICES: all
@@ -49,32 +53,41 @@ services:
     # MoE offload (--cpu-moe / --n-cpu-moe N), rope tweaks, template
     # kwargs, ... Set EXTRA_ARGS="" when not needed.
     # SPEC_TYPE / DRAFT_FILE (from .env) enable speculative decoding;
-    # both expand to nothing when unset.
+    # both expand to nothing when unset. MODELS_PRESET switches to router
+    # mode: models and their flags come from the preset file instead, and
+    # only the shared flags stay on the command line (they override presets).
     entrypoint:
       - /bin/sh
       - -c
 
     command:
       - |
+        if [ -n "$${MODELS_PRESET}" ]; then
+          set -- --models-preset "/golem/$${MODELS_PRESET}" --models-max 1
+        else
+          set -- \
+            --model "/models/$${MODEL_FILE:?set MODEL_FILE in .env}" \
+            --alias "$${MODEL_ALIAS:-local-model}" \
+            --ctx-size "$${CONTEXT_SIZE:-32768}" \
+            --n-gpu-layers "$${GPU_LAYERS:-99}" \
+            --jinja \
+            -fa on \
+            --cache-type-k "$${CACHE_TYPE_K:-q8_0}" \
+            --cache-type-v "$${CACHE_TYPE_V:-q8_0}" \
+            --load-mode "$${LOAD_MODE:-auto}" \
+            $${SPEC_TYPE:+--spec-type $$SPEC_TYPE} \
+            $${DRAFT_FILE:+--spec-draft-model /models/$$DRAFT_FILE} \
+            $${EXTRA_ARGS}
+        fi
         exec /app/llama-server \
           --host 0.0.0.0 \
           --port 8000 \
-          --model /models/${MODEL_FILE:?set MODEL_FILE in .env} \
-          --alias ${MODEL_ALIAS:-local-model} \
-          --ctx-size "${CONTEXT_SIZE:-32768}" \
-          --n-gpu-layers "${GPU_LAYERS:-99}" \
-          --threads "${CPU_THREADS:-20}" \
-          --parallel "${PARALLEL:-1}" \
-          --jinja \
+          --threads "$${CPU_THREADS:-20}" \
+          --parallel "$${PARALLEL:-1}" \
           --metrics \
-          -fa on \
-          --cache-type-k "${CACHE_TYPE_K:-q8_0}" \
-          --cache-type-v "${CACHE_TYPE_V:-q8_0}" \
-          --load-mode "${LOAD_MODE:-auto}" \
-          --api-key ${LOCAL_AI_API_KEY:-local-key} \
-          $${SPEC_TYPE:+--spec-type $$SPEC_TYPE} \
-          $${DRAFT_FILE:+--spec-draft-model /models/$$DRAFT_FILE} \
-          $${EXTRA_ARGS}
+          --api-key "$${LOCAL_AI_API_KEY:-local-key}" \
+          $${SLEEP_IDLE_SECONDS:+--sleep-idle-seconds $$SLEEP_IDLE_SECONDS} \
+          "$$@"
 
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]

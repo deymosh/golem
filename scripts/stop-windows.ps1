@@ -19,6 +19,8 @@ if (-not $proc) {
     exit 0
 }
 
-Stop-Process -Id $procId -Force -Confirm:$false
+# /T: in router mode each model runs in a child llama-server that
+# Stop-Process would orphan (still holding VRAM and the model in RAM).
+taskkill.exe /T /F /PID $procId | Out-Null
 Remove-Item $PidFile -Force
 Write-Host "[ OK ] llama-server (PID $procId) stopped."

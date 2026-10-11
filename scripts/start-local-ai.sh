@@ -36,7 +36,12 @@ if [[ ! -x "${SERVER}" ]]; then
     exit 1
 fi
 
-if [[ ! -f "${MODEL}" ]]; then
+if [[ -n "${MODELS_PRESET:-}" ]]; then
+    if [[ ! -f "${ROOT_DIR}/${MODELS_PRESET}" ]]; then
+        echo "[ERROR] Preset not found: ${ROOT_DIR}/${MODELS_PRESET} (MODELS_PRESET in .env)"
+        exit 1
+    fi
+elif [[ ! -f "${MODEL}" ]]; then
     echo "[ERROR] Model not found:"
     echo "  ${MODEL}"
     echo
@@ -56,8 +61,12 @@ echo "============================================================"
 echo
 
 echo "Model:"
-echo "  ${MODEL_FILE}"
-echo "  (served as: ${MODEL_ALIAS})"
+if [[ -n "${MODELS_PRESET:-}" ]]; then
+    echo "  router, presets from ${MODELS_PRESET} (default: ${MODEL_ALIAS})"
+else
+    echo "  ${MODEL_FILE}"
+    echo "  (served as: ${MODEL_ALIAS})"
+fi
 
 echo
 echo "Endpoint:"
@@ -79,29 +88,40 @@ mkdir -p "${ROOT_DIR}/.local"
 # both must honor PARALLEL, LOAD_MODE, CACHE_TYPE_K/V, SPEC_TYPE,
 # DRAFT_FILE and EXTRA_ARGS so a model configured in .env behaves
 # identically in either mode.
-SPEC_ARGS=()
-[[ -n "${SPEC_TYPE:-}" ]] && SPEC_ARGS+=(--spec-type "${SPEC_TYPE}")
-[[ -n "${DRAFT_FILE:-}" ]] && SPEC_ARGS+=(--spec-draft-model "${MODEL_DIR}/${DRAFT_FILE}")
+MODEL_ARGS=()
+if [[ -n "${MODELS_PRESET:-}" ]]; then
+    # Router: command-line flags override every preset, so only the shared
+    # ones go on the command line; one model resident at a time.
+    MODEL_ARGS+=(--models-preset "${ROOT_DIR}/${MODELS_PRESET}" --models-max 1)
+else
+    MODEL_ARGS+=(
+        --model "${MODEL}"
+        --alias "${MODEL_ALIAS}"
+        --ctx-size "${CONTEXT_SIZE}"
+        --n-gpu-layers "${GPU_LAYERS}"
+        --jinja
+        -fa on
+        --load-mode "${LOAD_MODE:-auto}"
+        --cache-type-k "${CACHE_TYPE_K:-q8_0}"
+        --cache-type-v "${CACHE_TYPE_V:-q8_0}"
+    )
+    [[ -n "${SPEC_TYPE:-}" ]] && MODEL_ARGS+=(--spec-type "${SPEC_TYPE}")
+    [[ -n "${DRAFT_FILE:-}" ]] && MODEL_ARGS+=(--spec-draft-model "${MODEL_DIR}/${DRAFT_FILE}")
+    # shellcheck disable=SC2206
+    MODEL_ARGS+=(${EXTRA_ARGS:-})
+fi
+[[ -n "${SLEEP_IDLE_SECONDS:-}" ]] && MODEL_ARGS+=(--sleep-idle-seconds "${SLEEP_IDLE_SECONDS}")
 
-# shellcheck disable=SC2086
+# Started from data/models so preset model paths resolve as bare filenames.
+cd "${MODEL_DIR}"
 nohup "${SERVER}" \
     --host "${HOST}" \
     --port "${PORT}" \
-    --model "${MODEL}" \
-    --alias "${MODEL_ALIAS}" \
-    --ctx-size "${CONTEXT_SIZE}" \
     --threads "${CPU_THREADS}" \
     --parallel "${PARALLEL:-1}" \
-    --n-gpu-layers "${GPU_LAYERS}" \
-    --jinja \
     --metrics \
-    -fa on \
-    --load-mode "${LOAD_MODE:-auto}" \
-    --cache-type-k "${CACHE_TYPE_K:-q8_0}" \
-    --cache-type-v "${CACHE_TYPE_V:-q8_0}" \
     --api-key "${LOCAL_AI_API_KEY:-local-key}" \
-    "${SPEC_ARGS[@]}" \
-    ${EXTRA_ARGS:-} \
+    "${MODEL_ARGS[@]}" \
     > "${LOG_FILE}" 2>&1 &
 
 PID=$!
