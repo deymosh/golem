@@ -54,6 +54,10 @@ cp .env.example .env && $EDITOR .env     # set keys and DEPLOY_MODE
 ./golem down             # stop everything
 ```
 
+On Windows (`windows` mode) `golem.cmd` does the same without Git Bash: double-click it (or a
+desktop shortcut to it) for a start / stop / restart / status / logs menu, or run
+`golem.cmd start|stop|restart|status|logs`.
+
 Three deploy modes (`DEPLOY_MODE` in `.env`, or `--docker` / `--native` / `--windows`):
 
 | Mode | Runs | Where |

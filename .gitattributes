@@ -6,3 +6,7 @@
 *.png binary
 *.jpg binary
 *.ico binary
+
+# cmd.exe needs CRLF: with LF, labels and goto misfire
+*.cmd text eol=crlf
+*.bat text eol=crlf
