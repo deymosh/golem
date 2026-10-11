@@ -119,6 +119,24 @@ To swap: edit `HF_REPO` / `MODEL_FILE` in `.env`, `./golem pull`, `./golem resta
 Keep `MODEL_ALIAS=local-model` so clients never change. VRAM math, memory regimes and measured
 benchmarks per setup: [docs/models.md](docs/models.md).
 
+### Several models, loaded on demand
+
+Set `MODELS_PRESET="config/models.ini"` and llama-server runs as a **router**: one endpoint,
+several models, each loaded on its first request and swapped out when a client asks for another
+(one resident at a time). The request's `model` field picks the
+[config/models.ini](config/models.ini) section, which carries that model's own flags:
+
+| `model` | Use | Footprint (RTX 3060 12 GB) |
+|---|---|---|
+| `qwen3.6-35b-a3b` | Coding (Claude Code, OpenCode) — the default above | 11.8 GB VRAM + ~20 GB RAM, 231K ctx, ~62 tok/s |
+| `qwen3.5-9b` | Everyday: summaries, curl/shell one-liners, quick questions, tool calls | ~6.6 GB VRAM, 64K ctx, ~49 tok/s, thinking off |
+
+Set `MODEL_ALIAS` to the section clients should use by default. Add `SLEEP_IDLE_SECONDS` to
+unload the model after that long without requests, so the GPU and RAM are free between
+sessions; the next request reloads it (~27 s for the coder, a few seconds for the 9B once its
+file is cached). Router and sleep both work in all three deploy modes. Speed is unchanged
+from single-model serving (measured: 62.6 tok/s decode, 840 tok/s prefill on the coder).
+
 ---
 
 ## Repository layout
@@ -128,6 +146,7 @@ benchmarks per setup: [docs/models.md](docs/models.md).
 ├── golem                     Control script — the front door
 ├── compose.yml               inference
 ├── .env.example              Canonical config; copy to .env
+├── config/models.ini         Model presets for router mode (MODELS_PRESET)
 ├── docs/
 │   ├── architecture.md       Request flow, ports, auth
 │   ├── claude-code.md        Claude Code → Golem, in detail
@@ -148,6 +167,8 @@ benchmarks per setup: [docs/models.md](docs/models.md).
 | MoE model slow or OOM under WSL2 | Give the WSL2 VM more RAM: `memory=24GB` in `%USERPROFILE%\.wslconfig` |
 | Claude Code still hits api.anthropic.com | Export the four `ANTHROPIC_*` vars (`./golem env`); use `ANTHROPIC_AUTH_TOKEN`, not `ANTHROPIC_API_KEY` |
 | Slow first answer | Prompt cache is cold; prefill runs ~800 tok/s on a 12 GB GPU (Claude Code's ~27K first prompt ≈ 35 s) and caches after |
+| First answer after a pause takes ~30 s | `SLEEP_IDLE_SECONDS` unloaded the idle model; raise it or leave it empty to stay loaded |
+| Router mode: `model not found` | The client's model name must match a section in `config/models.ini` (`./golem env` shows `MODEL_ALIAS`) |
 | Prefill suddenly 40% slower, VRAM ~full | Windows spills VRAM to shared system memory silently: raise `--n-cpu-moe` by 1-2 or close GPU-heavy apps (see [docs/windows-native.md](docs/windows-native.md)) |
 
 ## Credits
