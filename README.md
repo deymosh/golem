@@ -34,7 +34,7 @@ Dense models that fit entirely in VRAM are a one-line swap. See
 
 | | |
 |---|---|
-| GPU | NVIDIA with 12 GB VRAM — dense models up to ~9B fit fully in VRAM; MoE models of the 30B class run with expert weights offloaded to system RAM |
+| GPU | NVIDIA (CUDA) or AMD (ROCm) with 12 GB VRAM — detected automatically; dense models up to ~9B fit fully in VRAM; MoE models of the 30B class run with expert weights offloaded to system RAM |
 | RAM | 32 GB recommended for MoE offload (16 GB is enough for dense models) |
 | OS | Linux, or Windows — natively (Git Bash, no Docker) or via Docker Desktop/WSL2 |
 | Docker | Docker Engine or Desktop + Compose v2 + NVIDIA GPU passthrough (docker mode only) |
@@ -43,10 +43,8 @@ Dense models that fit entirely in VRAM are a one-line swap. See
 ## Quickstart
 
 ```bash
-cp .env.example .env && $EDITOR .env     # set keys and DEPLOY_MODE
-
-./golem pull             # download the model into data/models/
-./golem up               # start inference (mode from DEPLOY_MODE)
+./golem up               # bootstrap: creates .env from .env.example if absent,
+                         # downloads any missing model files, starts inference
 ./golem status           # health check
 ./golem claude           # launch Claude Code pointed at the local model
 ./golem bench            # speed: decode + prefill tok/s
@@ -54,9 +52,15 @@ cp .env.example .env && $EDITOR .env     # set keys and DEPLOY_MODE
 ./golem down             # stop everything
 ```
 
+`cp .env.example .env && $EDITOR .env` before the first `up` if you want to tune anything
+(model, keys, `DEPLOY_MODE`) — the defaults work as-is. `./golem pull` re-downloads /
+pre-fetches `MODEL_FILE` explicitly; `up` does it automatically when a file is missing.
+
 On Windows (`windows` mode) `golem.cmd` does the same without Git Bash: double-click it (or a
 desktop shortcut to it) for a start / stop / restart / status / logs menu, or run
-`golem.cmd start|stop|restart|status|logs`.
+`golem.cmd start|stop|restart|status|logs`. A fresh clone bootstraps itself from the menu's
+Start: `.env` is created, the pinned llama.cpp build and every missing model download before
+the server starts — no Git Bash, no Docker, no manual steps.
 
 Three deploy modes (`DEPLOY_MODE` in `.env`, or `--docker` / `--native` / `--windows`):
 
@@ -71,8 +75,8 @@ Three deploy modes (`DEPLOY_MODE` in `.env`, or `--docker` / `--native` / `--win
 | Command | Does |
 |---|---|
 | `setup` | machine report, build deps, directory scaffold (native mode) |
-| `install` | build `llama.cpp` with CUDA (native only) |
-| `pull` | download `MODEL_FILE` from `HF_REPO` into `data/models/` |
+| `install` | build `llama.cpp` with CUDA/ROCm (native only) |
+| `pull` | download `MODEL_FILE` from `HF_REPO` into `data/models/` (`up` does this automatically for anything missing) |
 | `up` / `down` / `restart` | start / stop / cycle the stack in the configured mode |
 | `status` | health of inference |
 | `logs` | follow the inference logs |
@@ -156,6 +160,7 @@ from single-model serving (measured: 62.6 tok/s decode, 840 tok/s prefill on the
 │   ├── claude-code.md        Claude Code → Golem, in detail
 │   ├── backends.md           Swapping llama.cpp for Ollama/vLLM/…
 │   ├── models.md             Model choice, memory regimes, benchmarks per setup
+│   ├── amd-rocm.md           AMD GPUs: ROCm in all three deploy modes
 │   └── windows-native.md     Windows mode: llama-server.exe without Docker
 ├── scripts/                  Building blocks the control script calls
 ├── data/models/              GGUF files (git-ignored)

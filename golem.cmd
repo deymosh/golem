@@ -5,10 +5,27 @@ rem   golem.cmd                 interactive menu (double-click / desktop shortcu
 rem   golem.cmd start|stop|restart|status|logs
 rem
 rem Wraps scripts\start-windows.ps1 / stop-windows.ps1 and reads the same .env.
+rem First run bootstraps itself: .env from .env.example, the llama.cpp
+rem binary and any missing models download automatically.
 
 setlocal EnableExtensions
 set "ROOT=%~dp0"
 set "PS=powershell.exe -NoProfile -ExecutionPolicy Bypass"
+
+rem Zero-touch first run: no .env yet -> make one from the example,
+rem flipped to windows mode (this launcher IS windows mode). The start
+rem script below then downloads llama.cpp and any missing models, so a
+rem fresh clone goes from double-click to running server on its own.
+if not exist "%ROOT%.env" (
+    if not exist "%ROOT%.env.example" (
+        echo   [ERROR] no .env and no .env.example found & exit /b 1
+    )
+    copy /y "%ROOT%.env.example" "%ROOT%.env" >nul
+    rem [char]34 = ": the powershell.exe CLI eats literal quotes inside
+    rem a quoted -Command argument, so build them in PowerShell instead.
+    %PS% -Command "$q=[char]34; (Get-Content -Raw '%ROOT%.env') -replace ('DEPLOY_MODE='+$q+'docker'), ('DEPLOY_MODE='+$q+'windows') | Set-Content -NoNewline '%ROOT%.env'"
+    echo   [ OK ] created .env for windows mode - edit it to change the model
+)
 
 set "PORT=8000"
 set "KEY="
