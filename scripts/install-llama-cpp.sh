@@ -19,6 +19,24 @@ fail() {
     exit 1
 }
 
+# cuda|rocm, auto-detected from the installed toolchain (nvcc/hipcc) when
+# unset. GPU_BACKEND in .env overrides; AMDGPU_TARGETS (e.g. gfx1100) pins
+# the ROCm target — empty lets the toolkit build for the detected GPU.
+GPU_BACKEND="${GPU_BACKEND:-auto}"
+case "${GPU_BACKEND}" in
+    auto)
+        if command -v nvcc >/dev/null 2>&1; then
+            GPU_BACKEND="cuda"
+        elif command -v hipcc >/dev/null 2>&1; then
+            GPU_BACKEND="rocm"
+        else
+            fail "no CUDA (nvcc) or ROCm (hipcc) toolchain found; install one or set GPU_BACKEND in .env"
+        fi
+        ;;
+    cuda|rocm) ;;
+    *) fail "GPU_BACKEND must be auto, cuda or rocm (got: ${GPU_BACKEND})" ;;
+esac
+
 echo
 echo "============================================================"
 echo " LOCAL AI - LLAMA.CPP INSTALLATION"
@@ -40,7 +58,7 @@ if ! command -v gcc >/dev/null 2>&1; then
     fail "gcc is required. Run setup-ai.sh first."
 fi
 
-if ! command -v nvcc >/dev/null 2>&1; then
+if [[ "${GPU_BACKEND}" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1; then
     log "nvcc is not installed."
     log "This is acceptable if the CUDA toolkit is exposed through the build environment."
 fi
@@ -60,14 +78,20 @@ cd "${BUILD_DIR}"
 
 rm -rf build
 
-log "Configuring CUDA build..."
+log "Configuring ${GPU_BACKEND} build..."
+
+GGML_FLAG="-DGGML_CUDA=ON"
+if [[ "${GPU_BACKEND}" == "rocm" ]]; then
+    GGML_FLAG="-DGGML_HIP=ON"
+    [[ -n "${AMDGPU_TARGETS:-}" ]] && GGML_FLAG="${GGML_FLAG} -DAMDGPU_TARGETS=${AMDGPU_TARGETS}"
+fi
 
 cmake -S . -B build \
-    -DGGML_CUDA=ON \
+    ${GGML_FLAG} \
     -DCMAKE_BUILD_TYPE=Release \
     -DLLAMA_CURL=ON
 
-log "Building llama.cpp..."
+log "Building llama.cpp (${GPU_BACKEND})..."
 
 cmake --build build \
     --config Release \
@@ -96,13 +120,16 @@ echo
 "${BIN_DIR}/llama-server" --version || true
 echo
 
-log "Checking CUDA support..."
+log "Checking ${GPU_BACKEND} support..."
 
-if "${BIN_DIR}/llama-server" --help 2>&1 | grep -qi cuda; then
-    ok "CUDA-related support detected in llama-server"
+# CUDA builds mention CUDA in --help; HIP builds say HIP, not ROCm.
+backend_grep="cuda"
+[[ "${GPU_BACKEND}" == "rocm" ]] && backend_grep="hip"
+if "${BIN_DIR}/llama-server" --help 2>&1 | grep -qi "${backend_grep}"; then
+    ok "${GPU_BACKEND}-related support detected in llama-server"
 else
-    log "Could not verify CUDA support from --help."
-    log "The binary was built with GGML_CUDA=ON; runtime validation comes next."
+    log "Could not verify ${GPU_BACKEND} support from --help."
+    log "The binary was built with the ${GPU_BACKEND} backend; runtime validation comes next."
 fi
 
 echo

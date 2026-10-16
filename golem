@@ -8,7 +8,7 @@
 #
 # Commands:
 #   setup             Inspect the machine, install build deps, scaffold dirs
-#   install           Build llama.cpp with CUDA          (native only)
+#   install           Build llama.cpp with CUDA/ROCm     (native only)
 #   pull              Download the model from Hugging Face
 #   up                Start the stack
 #   down              Stop the stack
@@ -25,6 +25,10 @@
 #   DEPLOY_MODE in .env (docker|native|windows), overridden by
 #   --docker / --native / --windows. windows = llama-server.exe run by
 #   scripts/start-windows.ps1 (from Git Bash).
+#
+# GPU:
+#   GPU_BACKEND in .env: auto (default; detects NVIDIA vs AMD), cuda, rocm.
+#   Picks the docker image / Windows build / native build flavor in every mode.
 
 set -Eeuo pipefail
 
@@ -56,6 +60,7 @@ LOCAL_AI_PORT="${LOCAL_AI_PORT:-8000}"
 LOCAL_AI_API_KEY="${LOCAL_AI_API_KEY:-local-ai-key}"
 MODEL_ALIAS="${MODEL_ALIAS:-local-model}"
 DEPLOY_MODE="${DEPLOY_MODE:-native}"
+GPU_BACKEND="${GPU_BACKEND:-auto}"
 
 # ------------------------------------------------------------
 # Args: pull out --native / --docker anywhere in the line
@@ -78,13 +83,48 @@ set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 die() { echo "[ERROR] $*" >&2; exit 1; }
 
+# ------------------------------------------------------------
+# GPU vendor: auto-detect unless GPU_BACKEND pins it (cuda|rocm)
+# ------------------------------------------------------------
+
+detect_gpu() {
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+        echo cuda
+        return 0
+    fi
+    # AMD: ROCm node/tooling on Linux, adapter name on Windows hosts.
+    if [[ -e /dev/kfd ]] || command -v rocm-smi >/dev/null 2>&1 || command -v rocminfo >/dev/null 2>&1 || command -v hipcc >/dev/null 2>&1; then
+        echo rocm
+        return 0
+    fi
+    if command -v powershell.exe >/dev/null 2>&1; then
+        local gpus
+        gpus="$(powershell.exe -NoProfile -Command "(Get-CimInstance Win32_VideoController).AdapterCompatibility" 2>/dev/null | tr -d '\r')" || true
+        if [[ "${gpus}" == *AMD* || "${gpus}" == *ATI* ]]; then
+            echo rocm
+            return 0
+        fi
+    fi
+    return 1
+}
+
+if [[ "${GPU_BACKEND}" == "auto" ]]; then
+    GPU_BACKEND="$(detect_gpu)" || die "could not detect the GPU vendor; set GPU_BACKEND=cuda or GPU_BACKEND=rocm in .env (see docs/amd-rocm.md)"
+fi
+case "${GPU_BACKEND}" in
+    cuda|rocm) ;;
+    *) die "GPU_BACKEND must be auto, cuda or rocm (got: ${GPU_BACKEND})" ;;
+esac
+
 have_compose() {
     command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1
 }
 
 dc() {
     have_compose || die "docker compose not available"
-    docker compose -f "${COMPOSE_FILE}" --env-file "${ROOT_DIR}/.env" "$@"
+    # The inference service is split cuda/rocm by compose profile; the
+    # vendor is already resolved above (auto-detect or .env override).
+    COMPOSE_PROFILES="${GPU_BACKEND}" docker compose -f "${COMPOSE_FILE}" --env-file "${ROOT_DIR}/.env" "$@"
 }
 
 winps() {

@@ -2,10 +2,11 @@
 #
 # Reads the same .env as every other script and mirrors the compose.yml
 # flags exactly, so a model configured for docker mode behaves identically
-# here. On first run it downloads the pinned official llama.cpp CUDA build
-# (LLAMA_WIN_BUILD in .env, default below) from GitHub releases into
-# .local\bin-windows. Builds are gated like the docker image digest: adopt
-# a new one only after `eval-model.sh --long 200000` passes on it.
+# here. On first run it downloads the pinned official llama.cpp CUDA or
+# ROCm build (GPU_BACKEND in .env; auto = detect the adapter, LLAMA_WIN_BUILD
+# in .env, default below) from GitHub releases into .local\bin-windows.
+# Builds are gated like the docker image digest: adopt a new one only after
+# `eval-model.sh --long 200000` passes on it.
 #
 # Usage:  powershell -ExecutionPolicy Bypass -File scripts\start-windows.ps1
 # Stop:   powershell -ExecutionPolicy Bypass -File scripts\stop-windows.ps1
@@ -14,7 +15,7 @@
 #   New-NetFirewallRule -DisplayName "Golem inference" -Direction Inbound `
 #     -LocalPort 8000 -Protocol TCP -Action Allow
 #
-# Why native: direct CUDA instead of WSL's paravirtualized GPU (~+50%
+# Why native: direct CUDA/ROCm instead of WSL's paravirtualized GPU (~+50%
 # batch-1 decode on the reference machine), no vmmem monolith (page cache
 # becomes trimmable standby), no Docker Desktop overhead, no VM that can
 # OOM-kill the stack. See docs/windows-native.md.
@@ -56,6 +57,20 @@ $ExtraArgs = $Cfg["EXTRA_ARGS"]
 $SleepIdle = $Cfg["SLEEP_IDLE_SECONDS"]
 $Preset    = $Cfg["MODELS_PRESET"]
 
+# GPU vendor: auto = read it off the display adapters; GPU_BACKEND in .env
+# overrides for headless/remote/wrong-guess boxes.
+$Backend = if ($Cfg["GPU_BACKEND"]) { $Cfg["GPU_BACKEND"] } else { "auto" }
+if ($Backend -eq "auto") {
+    # CIM first (PS 5.1+ has it); AdapterCompatibility is the vendor string.
+    $adapters = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue)
+    if (-not $adapters) { $adapters = @(Get-WmiObject Win32_VideoController -ErrorAction SilentlyContinue) }
+    $vendors = ($adapters | ForEach-Object { "$($_.AdapterCompatibility) $($_.Name)" }) -join ";"
+    if     ($vendors -match "NVIDIA")          { $Backend = "cuda" }
+    elseif ($vendors -match "AMD|ATI")         { $Backend = "rocm" }
+    else { throw "Could not detect the GPU vendor (adapters: '$vendors'). Set GPU_BACKEND=cuda or rocm in .env (see docs/amd-rocm.md)" }
+}
+if ($Backend -ne "cuda" -and $Backend -ne "rocm") { throw "GPU_BACKEND must be auto, cuda or rocm (got: $Backend)" }
+
 $ModelDir = Join-Path $Root "data\models"
 if ($Preset) {
     # Router mode: models and their flags come from the preset file.
@@ -76,7 +91,7 @@ if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyCon
 }
 
 # ------------------------------------------------------------
-# llama-server (official CUDA build, downloaded once)
+# llama-server (official CUDA/ROCm build, downloaded once)
 # ------------------------------------------------------------
 
 $BinDir = Join-Path $Root ".local\bin-windows"
@@ -86,22 +101,26 @@ $BuildMarker = Join-Path $BinDir "BUILD"
 # Known-good build: passed the 200K needle + tool calls on this platform.
 $WinBuild = if ($Cfg["LLAMA_WIN_BUILD"]) { $Cfg["LLAMA_WIN_BUILD"] } else { "b11379" }
 
+# The marker stores "<tag> <backend>": switching GPU_BACKEND must not reuse
+# the other vendor's exe, so a backend mismatch wipes like a build mismatch.
+# Pre-backend markers ("<tag>") mismatch too — a one-time reinstall that
+# upgrades the marker, never a silent wrong-vendor run.
 $installed = if (Test-Path $BuildMarker) { (Get-Content $BuildMarker -Raw).Trim() } else { "<no build marker>" }
 # A missing marker counts as a mismatch: a killed install can leave the exe
 # extracted without the marker, and that half-state must reinstall, not run.
-if ((Test-Path $Server) -and $installed -ne $WinBuild) {
-    Write-Host "[ .. ] installed llama.cpp $installed != pinned $WinBuild, reinstalling..."
+if ((Test-Path $Server) -and $installed -ne "$WinBuild $Backend") {
+    Write-Host "[ .. ] installed llama.cpp $installed != pinned $WinBuild ($Backend), reinstalling..."
     Remove-Item -Recurse -Force $BinDir
 }
 
 if (-not (Test-Path $Server)) {
-    Write-Host "[ .. ] llama-server not found, downloading official CUDA build $WinBuild..."
+    Write-Host "[ .. ] llama-server not found, downloading official $Backend build $WinBuild..."
     New-Item -ItemType Directory -Force $BinDir | Out-Null
 
     # "latest" follows upstream (ungated); any b<number> tag pins that build.
     if ($WinBuild -eq "latest") {
         # Skip stub releases (e.g. v0.5.0, a nightly pointer with no assets):
-        # real builds are tagged b<number> and carry the win-cuda zips.
+        # real builds are tagged b<number> and carry the win-cuda/rocm zips.
         $rels = Invoke-RestMethod "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=15"
         $rel = $rels | Where-Object { $_.tag_name -match "^b\d+$" -and @($_.assets).Count -gt 0 } | Select-Object -First 1
     } else {
@@ -109,20 +128,30 @@ if (-not (Test-Path $Server)) {
     }
     if (-not $rel) { throw "No binary llama.cpp release found on GitHub" }
     $tag = $rel.tag_name
-    $serverZip = $rel.assets | Where-Object { $_.name -match "^llama-.*bin-win-cuda-13\.\d+-x64\.zip$" } | Select-Object -First 1
-    $cudartZip = $rel.assets | Where-Object { $_.name -match "^cudart-llama-bin-win-cuda-13\.\d+-x64\.zip$" } | Select-Object -First 1
-    if (-not $serverZip) { throw "No win-cuda x64 asset found in release $tag" }
+
+    # CUDA ships a separate cudart zip (runtime DLLs); the rocm build bundles
+    # its HIP runtime in the main zip.
+    if ($Backend -eq "cuda") {
+        $serverZip = $rel.assets | Where-Object { $_.name -match "^llama-.*bin-win-cuda-13\.\d+-x64\.zip$" } | Select-Object -First 1
+        $cudartZip = $rel.assets | Where-Object { $_.name -match "^cudart-llama-bin-win-cuda-13\.\d+-x64\.zip$" } | Select-Object -First 1
+        if (-not $serverZip) { throw "No win-cuda x64 asset found in release $tag" }
+        $assets = @($serverZip) + @($cudartZip | Where-Object { $_ })
+    } else {
+        $serverZip = $rel.assets | Where-Object { $_.name -match "^llama-.*bin-win-rocm-\d+\.\d+-x64\.zip$" } | Select-Object -First 1
+        if (-not $serverZip) { throw "No win-rocm x64 asset found in release $tag" }
+        $assets = @($serverZip)
+    }
 
     $tmp = Join-Path $env:TEMP "llama-cpp-$tag"
-    foreach ($asset in @($serverZip) + @($cudartZip | Where-Object { $_ })) {
+    foreach ($asset in $assets) {
         Write-Host "[ .. ] $($asset.name) ($([math]::Round($asset.size/1MB)) MB)"
         $zip = Join-Path $tmp $asset.name
         New-Item -ItemType Directory -Force $tmp | Out-Null
         Invoke-WebRequest $asset.browser_download_url -OutFile $zip
         Expand-Archive $zip $BinDir -Force
     }
-    Set-Content -Path $BuildMarker -Value $tag
-    Write-Host "[ OK ] llama.cpp $tag installed to $BinDir"
+    Set-Content -Path $BuildMarker -Value "$tag $Backend"
+    Write-Host "[ OK ] llama.cpp $tag ($Backend) installed to $BinDir"
 }
 
 # ------------------------------------------------------------
@@ -182,7 +211,7 @@ Write-Host "       logs: $Log"
 # Wait for health
 # ------------------------------------------------------------
 
-Write-Host "[ .. ] Waiting for the model to load (first boot includes CUDA warmup)..."
+Write-Host "[ .. ] Waiting for the model to load (first boot includes GPU warmup)..."
 $deadline = (Get-Date).AddMinutes(10)
 $healthy = $false
 while ((Get-Date) -lt $deadline) {
