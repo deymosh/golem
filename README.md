@@ -34,7 +34,7 @@ Dense models that fit entirely in VRAM are a one-line swap. See
 
 | | |
 |---|---|
-| GPU | NVIDIA with 12 GB VRAM — dense models up to ~9B fit fully in VRAM; MoE models of the 30B class run with expert weights offloaded to system RAM |
+| GPU | NVIDIA (CUDA) or AMD (ROCm) with 12 GB VRAM — detected automatically; dense models up to ~9B fit fully in VRAM; MoE models of the 30B class run with expert weights offloaded to system RAM |
 | RAM | 32 GB recommended for MoE offload (16 GB is enough for dense models) |
 | OS | Linux, or Windows — natively (Git Bash, no Docker) or via Docker Desktop/WSL2 |
 | Docker | Docker Engine or Desktop + Compose v2 + NVIDIA GPU passthrough (docker mode only) |
@@ -71,7 +71,7 @@ Three deploy modes (`DEPLOY_MODE` in `.env`, or `--docker` / `--native` / `--win
 | Command | Does |
 |---|---|
 | `setup` | machine report, build deps, directory scaffold (native mode) |
-| `install` | build `llama.cpp` with CUDA (native only) |
+| `install` | build `llama.cpp` with CUDA/ROCm (native only) |
 | `pull` | download `MODEL_FILE` from `HF_REPO` into `data/models/` |
 | `up` / `down` / `restart` | start / stop / cycle the stack in the configured mode |
 | `status` | health of inference |
@@ -156,6 +156,7 @@ from single-model serving (measured: 62.6 tok/s decode, 840 tok/s prefill on the
 │   ├── claude-code.md        Claude Code → Golem, in detail
 │   ├── backends.md           Swapping llama.cpp for Ollama/vLLM/…
 │   ├── models.md             Model choice, memory regimes, benchmarks per setup
+│   ├── amd-rocm.md           AMD GPUs: ROCm in all three deploy modes
 │   └── windows-native.md     Windows mode: llama-server.exe without Docker
 ├── scripts/                  Building blocks the control script calls
 ├── data/models/              GGUF files (git-ignored)

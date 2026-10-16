@@ -1,16 +1,100 @@
 # Golem - local AI stack in Docker.
 #
-#   docker compose up -d --remove-orphans   # or: ./golem up --docker
+#   ./golem up --docker   # resolves GPU_BACKEND (auto|cuda|rocm) itself
+#
+# One inference service, two variants picked by compose profile (the
+# golem script maps GPU_BACKEND to COMPOSE_PROFILES; `auto` — the
+# default — detects the vendor, so plain users never set anything):
+#   inference-cuda   NVIDIA
+#   inference-rocm   AMD
+# A bare `docker compose up` selects no profile and starts nothing —
+# use ./golem, or pass --profile cuda / --profile rocm yourself.
 #
 # Service on the compose network:
-#   inference   llama.cpp server     -> OpenAI AND Anthropic API on :8000
+#   golem-inference  llama.cpp server  -> OpenAI AND Anthropic API on :8000
 #
 # Any agent on the LAN (Claude Code, OpenCode, ...) can use the model.
 
 name: golem
 
+# Everything common to both GPU vendors. Only the image and the GPU
+# wiring differ, so those live in the per-backend services below.
+x-inference: &inference
+  container_name: golem-inference
+  restart: unless-stopped
+
+  env_file:
+    - .env
+
+  ports:
+    - "${LOCAL_AI_HOST:-0.0.0.0}:${LOCAL_AI_PORT:-8000}:8000"
+
+  volumes:
+    - ./data/models:/models:ro
+    - ./data/cache:/cache
+    - ./config:/golem/config:ro
+
+  # Preset model paths (router mode) are bare filenames under /models.
+  working_dir: /models
+
+  # --load-mode mlock needs RLIMIT_MEMLOCK; Docker Desktop gives
+  # unlimited by default but a systemd-hosted daemon may cap it
+  # (8-64MB), which would silently unlock the model weights.
+  ulimits:
+    memlock: -1
+
+  # The args are expanded by a shell inside the container so that
+  # $EXTRA_ARGS (from .env) can append optional llama-server flags:
+  # MoE offload (--cpu-moe / --n-cpu-moe N), rope tweaks, template
+  # kwargs, ... Set EXTRA_ARGS="" when not needed.
+  # SPEC_TYPE / DRAFT_FILE (from .env) enable speculative decoding;
+  # both expand to nothing when unset. MODELS_PRESET switches to router
+  # mode: models and their flags come from the preset file instead, and
+  # only the shared flags stay on the command line (they override presets).
+  entrypoint:
+    - /bin/sh
+    - -c
+
+  command:
+    - |
+      if [ -n "$${MODELS_PRESET}" ]; then
+        set -- --models-preset "/golem/$${MODELS_PRESET}" --models-max 1
+      else
+        set -- \
+          --model "/models/$${MODEL_FILE:?set MODEL_FILE in .env}" \
+          --alias "$${MODEL_ALIAS:-local-model}" \
+          --ctx-size "$${CONTEXT_SIZE:-32768}" \
+          --n-gpu-layers "$${GPU_LAYERS:-99}" \
+          --jinja \
+          -fa on \
+          --cache-type-k "$${CACHE_TYPE_K:-q8_0}" \
+          --cache-type-v "$${CACHE_TYPE_V:-q8_0}" \
+          --load-mode "$${LOAD_MODE:-auto}" \
+          $${SPEC_TYPE:+--spec-type $$SPEC_TYPE} \
+          $${DRAFT_FILE:+--spec-draft-model /models/$$DRAFT_FILE} \
+          $${EXTRA_ARGS}
+      fi
+      exec /app/llama-server \
+        --host 0.0.0.0 \
+        --port 8000 \
+        --threads "$${CPU_THREADS:-20}" \
+        --parallel "$${PARALLEL:-1}" \
+        --metrics \
+        --api-key "$${LOCAL_AI_API_KEY:-local-key}" \
+        $${SLEEP_IDLE_SECONDS:+--sleep-idle-seconds $$SLEEP_IDLE_SECONDS} \
+        "$$@"
+
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+    interval: 10s
+    timeout: 3s
+    retries: 40
+    start_period: 180s
+
 services:
-  inference:
+  inference-cuda:
+    <<: *inference
+    profiles: ["cuda"]
     # Pinned by digest to a known-good build, NOT the floating upstream tag:
     # build b11149 (2026-09-24, digest 24d44a98…) failed the 200K needle test
     # twice with a deterministic wrong answer; this build (b10991) passes it.
@@ -19,79 +103,23 @@ services:
     #   # put the new digest on the line below, ./golem restart, then
     #   # ./scripts/eval-model.sh --long 200000 — adopt only on PASS
     image: ghcr.io/ggml-org/llama.cpp@sha256:3663a64b1074515e4aea53042f07848e8960e3540d8c15a7c38975be309b32f9
-    container_name: golem-inference
-    restart: unless-stopped
-
-    env_file:
-      - .env
-
-    ports:
-      - "${LOCAL_AI_HOST:-0.0.0.0}:${LOCAL_AI_PORT:-8000}:8000"
-
-    volumes:
-      - ./data/models:/models:ro
-      - ./data/cache:/cache
-      - ./config:/golem/config:ro
-
-    # Preset model paths (router mode) are bare filenames under /models.
-    working_dir: /models
-
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
-
-    # --load-mode mlock needs RLIMIT_MEMLOCK; Docker Desktop gives
-    # unlimited by default but a systemd-hosted daemon may cap it
-    # (8-64MB), which would silently unlock the model weights.
-    ulimits:
-      memlock: -1
-
     gpus: all
 
-    # The args are expanded by a shell inside the container so that
-    # $EXTRA_ARGS (from .env) can append optional llama-server flags:
-    # MoE offload (--cpu-moe / --n-cpu-moe N), rope tweaks, template
-    # kwargs, ... Set EXTRA_ARGS="" when not needed.
-    # SPEC_TYPE / DRAFT_FILE (from .env) enable speculative decoding;
-    # both expand to nothing when unset. MODELS_PRESET switches to router
-    # mode: models and their flags come from the preset file instead, and
-    # only the shared flags stay on the command line (they override presets).
-    entrypoint:
-      - /bin/sh
-      - -c
-
-    command:
-      - |
-        if [ -n "$${MODELS_PRESET}" ]; then
-          set -- --models-preset "/golem/$${MODELS_PRESET}" --models-max 1
-        else
-          set -- \
-            --model "/models/$${MODEL_FILE:?set MODEL_FILE in .env}" \
-            --alias "$${MODEL_ALIAS:-local-model}" \
-            --ctx-size "$${CONTEXT_SIZE:-32768}" \
-            --n-gpu-layers "$${GPU_LAYERS:-99}" \
-            --jinja \
-            -fa on \
-            --cache-type-k "$${CACHE_TYPE_K:-q8_0}" \
-            --cache-type-v "$${CACHE_TYPE_V:-q8_0}" \
-            --load-mode "$${LOAD_MODE:-auto}" \
-            $${SPEC_TYPE:+--spec-type $$SPEC_TYPE} \
-            $${DRAFT_FILE:+--spec-draft-model /models/$$DRAFT_FILE} \
-            $${EXTRA_ARGS}
-        fi
-        exec /app/llama-server \
-          --host 0.0.0.0 \
-          --port 8000 \
-          --threads "$${CPU_THREADS:-20}" \
-          --parallel "$${PARALLEL:-1}" \
-          --metrics \
-          --api-key "$${LOCAL_AI_API_KEY:-local-key}" \
-          $${SLEEP_IDLE_SECONDS:+--sleep-idle-seconds $$SLEEP_IDLE_SECONDS} \
-          "$$@"
-
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 40
-      start_period: 180s
+  inference-rocm:
+    <<: *inference
+    profiles: ["rocm"]
+    # Active when GPU_BACKEND resolves to rocm (auto-detect, or set
+    # GPU_BACKEND="rocm" in .env; ./golem maps it to COMPOSE_PROFILES).
+    # /dev/kfd (compute) + /dev/dri (display) grant GPU access on Linux;
+    # no --gpus and no NVIDIA_* env here. The digest is pinned by the same
+    # eval-gated rule as the CUDA one: upgrade = pull a new server-rocm
+    # digest + ./scripts/eval-model.sh --long 200000 must pass.
+    image: ghcr.io/ggml-org/llama.cpp:server-rocm@sha256:b720bf1544bc7f5775b9a482cc7c9e52eb236d4475a487dc883bf30fe3cf862b
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    security_opt:
+      - seccomp:unconfined
