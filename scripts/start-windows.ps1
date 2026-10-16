@@ -104,8 +104,6 @@ $WinBuild = if ($Cfg["LLAMA_WIN_BUILD"]) { $Cfg["LLAMA_WIN_BUILD"] } else { "b11
 
 # The marker stores "<tag> <backend>": switching GPU_BACKEND must not reuse
 # the other vendor's exe, so a backend mismatch wipes like a build mismatch.
-# Pre-backend markers ("<tag>") mismatch too — a one-time reinstall that
-# upgrades the marker, never a silent wrong-vendor run.
 $installed = if (Test-Path $BuildMarker) { (Get-Content $BuildMarker -Raw).Trim() } else { "<no build marker>" }
 # A missing marker counts as a mismatch: a killed install can leave the exe
 # extracted without the marker, and that half-state must reinstall, not run.
@@ -156,7 +154,7 @@ if (-not (Test-Path $Server)) {
 }
 
 # ------------------------------------------------------------
-# Models (downloaded on first run — a fresh clone must just work)
+# Models (downloaded on first run - a fresh clone must just work)
 # ------------------------------------------------------------
 
 # curl.exe against HF's resolve endpoint, mirroring download-model.sh:
@@ -188,7 +186,7 @@ function Ensure-Model([string]$Repo, [string]$File) {
     & curl.exe -sSfL -C - --retry 5 --retry-delay 3 @auth -o $part "https://huggingface.co/$Repo/resolve/main/$File"
     if ($LASTEXITCODE -ne 0) { throw "download of $File failed (curl exit $LASTEXITCODE)" }
     if (-not (Test-Path $part) -or (Get-Item $part).Length -lt 1GB) {
-        throw "$File came back smaller than 1 GB — not a real model; delete data\models\$File.part and retry"
+        throw "$File came back smaller than 1 GB - not a real model; delete data\models\$File.part and retry"
     }
     Move-Item $part $path -Force
     Write-Host "[ OK ] $File downloaded"
@@ -208,7 +206,7 @@ if ($Preset) {
 }
 
 # A preset section without a "; Download:" comment would only fail at
-# request time (file not found) — catch it now, with the section named.
+# request time (file not found) - catch it now, with the section named.
 if ($Preset) {
     $missing = Get-Content $PresetPath | ForEach-Object {
         if ($_ -match '^\s*(model|spec-draft-model)\s*=\s*(\S+)') { $Matches[2] }

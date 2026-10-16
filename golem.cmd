@@ -21,9 +21,10 @@ if not exist "%ROOT%.env" (
         echo   [ERROR] no .env and no .env.example found & exit /b 1
     )
     copy /y "%ROOT%.env.example" "%ROOT%.env" >nul
-    rem "" inside a quoted arg passes one literal " to powershell
-    %PS% -Command "(Get-Content -Raw '%ROOT%.env') -replace 'DEPLOY_MODE=""docker""', 'DEPLOY_MODE=""windows""' | Set-Content -NoNewline '%ROOT%.env'"
-    echo   [ OK ] created .env \(windows mode, defaults\) - edit it to change the model
+    rem [char]34 = ": the powershell.exe CLI eats literal quotes inside
+    rem a quoted -Command argument, so build them in PowerShell instead.
+    %PS% -Command "$q=[char]34; (Get-Content -Raw '%ROOT%.env') -replace ('DEPLOY_MODE='+$q+'docker'), ('DEPLOY_MODE='+$q+'windows') | Set-Content -NoNewline '%ROOT%.env'"
+    echo   [ OK ] created .env for windows mode - edit it to change the model
 )
 
 set "PORT=8000"
