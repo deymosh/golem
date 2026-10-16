@@ -50,6 +50,8 @@ $GpuLayers = if ($Cfg["GPU_LAYERS"])        { $Cfg["GPU_LAYERS"] }        else {
 $CacheK    = if ($Cfg["CACHE_TYPE_K"])      { $Cfg["CACHE_TYPE_K"] }      else { "q8_0" }
 $CacheV    = if ($Cfg["CACHE_TYPE_V"])      { $Cfg["CACHE_TYPE_V"] }      else { "q8_0" }
 $LoadMode  = if ($Cfg["LOAD_MODE"])         { $Cfg["LOAD_MODE"] }         else { "mlock" }
+$ModelRepo = if ($Cfg["HF_REPO"])           { $Cfg["HF_REPO"] }           else { "unsloth/Qwen3.6-35B-A3B-GGUF" }
+$DraftRepo = if ($Cfg["DRAFT_HF_REPO"])     { $Cfg["DRAFT_HF_REPO"] }     else { $ModelRepo }
 $SpecType  = $Cfg["SPEC_TYPE"]
 $DraftFile = $Cfg["DRAFT_FILE"]
 $ExtraArgs = $Cfg["EXTRA_ARGS"]
@@ -63,7 +65,6 @@ if ($Preset) {
     if (-not (Test-Path $PresetPath)) { throw "Preset not found: $PresetPath (MODELS_PRESET in .env)" }
 } else {
     $ModelPath = Join-Path $ModelDir $ModelFile
-    if (-not (Test-Path $ModelPath)) { throw "Model not found: $ModelPath (./golem pull downloads it)" }
 }
 
 # ------------------------------------------------------------
@@ -123,6 +124,67 @@ if (-not (Test-Path $Server)) {
     }
     Set-Content -Path $BuildMarker -Value $tag
     Write-Host "[ OK ] llama.cpp $tag installed to $BinDir"
+}
+
+# ------------------------------------------------------------
+# Models (downloaded on first run — a fresh clone must just work)
+# ------------------------------------------------------------
+
+# curl.exe against HF's resolve endpoint, mirroring download-model.sh:
+# -L follows the CDN redirect, -C - resumes a leftover .part, --retry
+# rides out flaky links. Silent (-s): curl's progress meter writes to
+# stderr, which PS 5.1 turns into a terminating error under
+# ErrorActionPreference=Stop; the size HEAD tells the user what's coming.
+function Ensure-Model([string]$Repo, [string]$File) {
+    $path = Join-Path $ModelDir $File
+    if ((Test-Path $path) -and (Get-Item $path).Length -gt 1GB) { return }
+    if (Test-Path $path) {
+        Write-Host "[ .. ] $File is smaller than 1 GB (partial download), retrying"
+        Remove-Item $path -Force
+    }
+
+    $auth = @()
+    if ($Cfg["HF_TOKEN"]) { $auth = @("-H", "Authorization: Bearer $($Cfg['HF_TOKEN'])") }
+
+    $sizeHdr = & curl.exe -sIL @auth "https://huggingface.co/$Repo/resolve/main/$File" |
+        Select-String -Pattern 'x-linked-size:\s*(\d+)' | Select-Object -First 1
+    if ($sizeHdr) {
+        $gb = [math]::Round([long]$sizeHdr.Matches[0].Groups[1].Value / 1GB, 1)
+        Write-Host "[ .. ] downloading $File ($gb GB) from $Repo"
+    } else {
+        Write-Host "[ .. ] downloading $File from $Repo"
+    }
+
+    $part = "$path.part"
+    & curl.exe -sSfL -C - --retry 5 --retry-delay 3 @auth -o $part "https://huggingface.co/$Repo/resolve/main/$File"
+    if ($LASTEXITCODE -ne 0) { throw "download of $File failed (curl exit $LASTEXITCODE)" }
+    if (-not (Test-Path $part) -or (Get-Item $part).Length -lt 1GB) {
+        throw "$File came back smaller than 1 GB — not a real model; delete data\models\$File.part and retry"
+    }
+    Move-Item $part $path -Force
+    Write-Host "[ OK ] $File downloaded"
+}
+
+if ($Preset) {
+    # Router mode: the preset's "; Download: repo -> file" comments say
+    # where each model comes from.
+    Get-Content $PresetPath | ForEach-Object {
+        if ($_ -match '^\s*;\s*Download:\s*(\S+)\s*->\s*(\S+)') {
+            Ensure-Model $Matches[1] $Matches[2]
+        }
+    }
+} else {
+    Ensure-Model $ModelRepo $ModelFile
+    if ($DraftFile) { Ensure-Model $DraftRepo $DraftFile }
+}
+
+# A preset section without a "; Download:" comment would only fail at
+# request time (file not found) — catch it now, with the section named.
+if ($Preset) {
+    $missing = Get-Content $PresetPath | ForEach-Object {
+        if ($_ -match '^\s*(model|spec-draft-model)\s*=\s*(\S+)') { $Matches[2] }
+    } | Where-Object { -not (Test-Path (Join-Path $ModelDir $_)) }
+    if ($missing) { throw "Preset models without a `"; Download:`" source (add one per file in $Preset): $($missing -join ', ')" }
 }
 
 # ------------------------------------------------------------

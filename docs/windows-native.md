@@ -56,6 +56,19 @@ The start script launches with the exact flags compose uses — `SPEC_TYPE` / `D
 `/health`. Only one server can hold `LOCAL_AI_PORT`: stop the docker inference
 (`./golem down --docker`) first, or the script refuses to start.
 
+## First run bootstraps itself
+
+Nothing to set up on a fresh clone: `golem.cmd` creates `.env` from `.env.example`
+(flipped to `DEPLOY_MODE="windows"` — this launcher *is* windows mode), and the start
+script then downloads the pinned llama.cpp build **and every model file the config
+references but `data\models\` lacks** — `MODEL_FILE` / `DRAFT_FILE`, or in router mode
+each file listed in the preset's `; Download: <repo> -> <file>` comments (see
+[config/models.ini](../config/models.ini)). Downloads go straight to Hugging Face's
+resolve endpoint with `curl.exe` (resume across interrupted runs included); expect the
+default coder + draft to take a while (~22 GB). After that, `up` only fetches what's
+missing. The bash `./golem up` does the same on Linux, macOS, WSL and Git Bash via
+[download-model.sh](../scripts/download-model.sh) (curl-based, no python needed).
+
 ## Pinned llama.cpp build
 
 The start script installs the official CUDA release named by `LLAMA_WIN_BUILD` (default
