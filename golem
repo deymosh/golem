@@ -17,6 +17,8 @@
 #   logs              Follow the inference logs
 #   bench [args...]   Speed benchmark: decode + prefill tok/s
 #   eval [args...]    Quality gate: sanity, tool calls, needle (--long N)
+#   report [--no-open] Build bench/report.html from the recorded runs
+#   web [--port N]    Serve the benchmark page + controls on 127.0.0.1:8787
 #   claude [args...]  Launch Claude Code pointed at the local model
 #   env               Print the env exports for Claude Code
 #   help              This message
@@ -279,11 +281,29 @@ cmd_logs() {
     fi
 }
 
+# run_recorded <kind> <command...>: run a bench/eval, show its output live
+# and append its RESULT lines to bench/results.jsonl. RECORD=0 skips it.
+run_recorded() {
+    local kind="$1"; shift
+    local out status=0
+    out="$(mktemp)"
+    "$@" 2>&1 | tee "${out}" || status=$?
+    if [[ "${status}" == 0 && "${RECORD:-1}" != 0 ]] && grep -q '^RESULT' "${out}"; then
+        "${SCRIPTS}/record-result.sh" "${kind}" "${out}" "${RECORD_NOTE:-}" || true
+    fi
+    rm -f "${out}"
+    return "${status}"
+}
+
 cmd_bench() {
-    "${SCRIPTS}/benchmark-ai.sh" "$@"
+    run_recorded bench "${SCRIPTS}/benchmark-ai.sh" "$@"
 }
 
 cmd_eval() {
+    run_recorded eval eval_dispatch "$@"
+}
+
+eval_dispatch() {
     # The eval harness needs python3; Git Bash on Windows usually has none,
     # so hand it to WSL there (the script finds the Windows host itself).
     # A Windows python3 on Git Bash is not enough either: the script writes
@@ -324,6 +344,18 @@ cmd_claude() {
         claude "$@"
 }
 
+cmd_web() {
+    # --port N -> PowerShell -Port N (a -File call takes named parameters).
+    local args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port) args+=("-Port" "${2:-8787}"); shift 2 ;;
+            *) args+=("$1"); shift ;;
+        esac
+    done
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${SCRIPTS}/web.ps1" "${args[@]+"${args[@]}"}"
+}
+
 cmd_help() {
     sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
@@ -338,6 +370,8 @@ case "${CMD}" in
     status)   cmd_status ;;
     logs)     cmd_logs "${1:-}" ;;
     bench)    cmd_bench "$@" ;;
+    report)   "${SCRIPTS}/report.sh" "$@" ;;
+    web)      cmd_web "$@" ;;
     eval)     cmd_eval "$@" ;;
     claude)   cmd_claude "$@" ;;
     env)      cmd_env ;;

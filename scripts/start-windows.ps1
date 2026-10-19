@@ -2,13 +2,15 @@
 #
 # Reads the same .env as every other script and mirrors the compose.yml
 # flags exactly, so a model configured for docker mode behaves identically
-# here. On first run it downloads the pinned official llama.cpp CUDA or
-# ROCm build (GPU_BACKEND in .env; auto = detect the adapter, LLAMA_WIN_BUILD
-# in .env, default below) from GitHub releases into .local\bin-windows.
+# here. On first run it downloads the pinned CUDA or ROCm build of the
+# engine named by ENGINE in .env (default llama.cpp; release source and pin
+# in engines\<name>\engine.ini; GPU_BACKEND auto-detects the adapter) from
+# GitHub releases into .local\engines\<name>\<build>-<backend>.
 # Builds are gated like the docker image digest: adopt a new one only after
 # `eval-model.sh --long 200000` passes on it.
 #
-# Usage:  powershell -ExecutionPolicy Bypass -File scripts\start-windows.ps1
+# Usage:  powershell -ExecutionPolicy Bypass -File scripts\start-windows.ps1 [-DryRun]
+#         -DryRun: install what is missing, print the server command line, exit
 # Stop:   powershell -ExecutionPolicy Bypass -File scripts\stop-windows.ps1
 #
 # LAN exposure: bind 0.0.0.0 (LOCAL_AI_HOST) and open the port once, as admin:
@@ -20,7 +22,12 @@
 # becomes trimmable standby), no Docker Desktop overhead, no VM that can
 # OOM-kill the stack. See docs/windows-native.md.
 
+param([switch]$DryRun)
+
 $ErrorActionPreference = "Stop"
+# PS 5.1 redraws Invoke-WebRequest's progress bar per chunk, which slows a
+# 1 GB engine download to a crawl.
+$ProgressPreference = "SilentlyContinue"
 $Root = Split-Path -Parent $PSScriptRoot
 
 # ------------------------------------------------------------
@@ -92,65 +99,158 @@ if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyCon
 }
 
 # ------------------------------------------------------------
-# llama-server (official CUDA/ROCm build, downloaded once)
+# Engine (ENGINE in .env -> engines\<name>\engine.ini; pinned build
+# downloaded once into .local\engines\<name>\<build>-<backend>)
 # ------------------------------------------------------------
 
-$BinDir = Join-Path $Root ".local\bin-windows"
-$Server = Join-Path $BinDir "llama-server.exe"
-$BuildMarker = Join-Path $BinDir "BUILD"
+$EngineName = if ($Cfg["ENGINE"]) { $Cfg["ENGINE"] } else { "llama.cpp" }
+$EngineIni = Join-Path $Root "engines\$EngineName\engine.ini"
+if (-not (Test-Path $EngineIni)) { throw "Unknown ENGINE '$EngineName' (no $EngineIni)" }
+$Eng = @{}
+Get-Content $EngineIni | ForEach-Object {
+    if ($_ -match '^\s*([A-Za-z0-9_.\-]+)\s*=\s*(.*?)\s*$') { $Eng[$Matches[1]] = $Matches[2] }
+}
+$ServerExe = if ($Eng["server"]) { $Eng["server"] } else { "llama-server.exe" }
 
 # Known-good build: passed the 200K needle + tool calls on this platform.
-$WinBuild = if ($Cfg["LLAMA_WIN_BUILD"]) { $Cfg["LLAMA_WIN_BUILD"] } else { "b11379" }
+# LLAMA_WIN_BUILD is the pre-adapter name, still honored for llama.cpp.
+$WinBuild = if ($Cfg["ENGINE_BUILD"]) { $Cfg["ENGINE_BUILD"] }
+            elseif ($EngineName -eq "llama.cpp" -and $Cfg["LLAMA_WIN_BUILD"]) { $Cfg["LLAMA_WIN_BUILD"] }
+            else { $Eng["build"] }
+if (-not $WinBuild) { throw "No build pinned for engine $EngineName (build in $EngineIni or ENGINE_BUILD in .env)" }
+$EngineRoot = Join-Path $Root ".local\engines\$EngineName"
 
-# The marker stores "<tag> <backend>": switching GPU_BACKEND must not reuse
-# the other vendor's exe, so a backend mismatch wipes like a build mismatch.
-$installed = if (Test-Path $BuildMarker) { (Get-Content $BuildMarker -Raw).Trim() } else { "<no build marker>" }
-# A missing marker counts as a mismatch: a killed install can leave the exe
-# extracted without the marker, and that half-state must reinstall, not run.
-if ((Test-Path $Server) -and $installed -ne "$WinBuild $Backend") {
-    Write-Host "[ .. ] installed llama.cpp $installed != pinned $WinBuild ($Backend), reinstalling..."
-    Remove-Item -Recurse -Force $BinDir
-}
-
-if (-not (Test-Path $Server)) {
-    Write-Host "[ .. ] llama-server not found, downloading official $Backend build $WinBuild..."
-    New-Item -ItemType Directory -Force $BinDir | Out-Null
-
-    # "latest" follows upstream (ungated); any b<number> tag pins that build.
+if ($Eng["launcher"] -eq "strata") {
+    # Strata installs itself with its own setup (private .venv, ready-made
+    # engine, model files - everything under $EngineRoot\data). No GitHub
+    # zip asset to fetch: a shallow clone of the tag, then setup.py
+    # headless. Strata's engine is one build for NVIDIA and AMD, so the
+    # build dir carries no backend suffix.
     if ($WinBuild -eq "latest") {
-        # Skip stub releases (e.g. v0.5.0, a nightly pointer with no assets):
-        # real builds are tagged b<number> and carry the win-cuda/rocm zips.
-        $rels = Invoke-RestMethod "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=15"
-        $rel = $rels | Where-Object { $_.tag_name -match "^b\d+$" -and @($_.assets).Count -gt 0 } | Select-Object -First 1
-    } else {
-        $rel = Invoke-RestMethod "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/$WinBuild"
+        $rels = Invoke-RestMethod "https://api.github.com/repos/$($Eng["source_repo"])/releases?per_page=10"
+        $WinBuild = ($rels | Where-Object { $_.tag_name -match "^v\d+\.\d+\.\d+$" } | Select-Object -First 1).tag_name
+        if (-not $WinBuild) { throw "No Strata release found on GitHub" }
     }
-    if (-not $rel) { throw "No binary llama.cpp release found on GitHub" }
-    $tag = $rel.tag_name
+    $BinDir = Join-Path $EngineRoot $WinBuild
+    $BuildMarker = Join-Path $BinDir ".golem-build"
+    $Server = Join-Path $BinDir ".venv\Scripts\python.exe"   # the API server is Python
+    $installed = if (Test-Path $BuildMarker) { (Get-Content $BuildMarker -Raw).Trim() } else { "" }
+    if ($installed -ne $WinBuild) {
+        if (Test-Path $BinDir) { Remove-Item -Recurse -Force $BinDir }
+        New-Item -ItemType Directory -Force $EngineRoot | Out-Null
+        Write-Host "[ .. ] installing Strata $WinBuild from github.com/$($Eng["source_repo"]) (its setup also fetches the engine binary and the model files)..."
+        & git clone -q --depth 1 -b $WinBuild "https://github.com/$($Eng["source_repo"]).git" $BinDir
+        if ($LASTEXITCODE -ne 0) { throw "git clone of Strata $WinBuild failed (is git on PATH?)" }
+        if (-not (Test-Path $Server)) {
+            # Same bootstrap as its START-HERE.bat: a venv from the py
+            # launcher or python (3.10+, 64-bit); never the system install.
+            $basePy = @((Get-Command py -ErrorAction SilentlyContinue),
+                        (Get-Command python -ErrorAction SilentlyContinue)) |
+                      Where-Object { $_ } | Select-Object -First 1
+            if (-not $basePy) { throw "Strata needs Python 3.10+ (py launcher or python on PATH)" }
+            & $basePy.Source -m venv (Join-Path $BinDir ".venv")
+            if ($LASTEXITCODE -ne 0) { throw "Could not create Strata's .venv" }
+        }
+        # Strata 0.1.45 setup runs the engine to probe which model families
+        # it supports, but puts only HIP dirs on PATH: its pip-installed
+        # CUDA DLLs are not found and the engine dies with 0xC0000135.
+        # Prepend them ourselves.
+        $env:PATH = "$BinDir\.venv\Lib\site-packages\nvidia\cu13\bin\x86_64;$env:PATH"
+        Push-Location $BinDir
+        & $Server setup.py --yes --no-start --no-browser `
+            --family $Eng["strata_family"] --model $Eng["strata_model"] `
+            --data-dir (Join-Path $EngineRoot "data") --context $Eng["strata_context"] `
+            --vision no --port $Port --host $BindHost --api-key $ApiKey `
+            --vram-reserve-mib $Eng["strata_vram_reserve"]
+        $code = $LASTEXITCODE
+        Pop-Location
+        if ($code -ne 0) { throw "Strata setup failed (exit $code); everything already done is kept - fix and rerun" }
 
-    # CUDA ships a separate cudart zip (runtime DLLs); the rocm build bundles
-    # its HIP runtime in the main zip.
-    if ($Backend -eq "cuda") {
-        $serverZip = $rel.assets | Where-Object { $_.name -match "^llama-.*bin-win-cuda-13\.\d+-x64\.zip$" } | Select-Object -First 1
-        $cudartZip = $rel.assets | Where-Object { $_.name -match "^cudart-llama-bin-win-cuda-13\.\d+-x64\.zip$" } | Select-Object -First 1
-        if (-not $serverZip) { throw "No win-cuda x64 asset found in release $tag" }
-        $assets = @($serverZip) + @($cudartZip | Where-Object { $_ })
-    } else {
-        $serverZip = $rel.assets | Where-Object { $_.name -match "^llama-.*bin-win-rocm-\d+\.\d+-x64\.zip$" } | Select-Object -First 1
-        if (-not $serverZip) { throw "No win-rocm x64 asset found in release $tag" }
+        # Strata's setup sizes --expert-vram as vram - 3.0 - reserve, which
+        # assumes weights + context + buffers are ~3 GB. On a 35B-A3B with a
+        # long context they are ~7 GB, so the engine refuses to start
+        # ("not enough VRAM left for the hybrid experts' buffers"). Leave the
+        # flag out (the engine then fits experts to the VRAM free at load),
+        # or set strata_expert_vram in the engine.ini to pin a budget.
+        $cfgPath = (Get-ChildItem $BinDir -Filter "strata-*.json" |
+                    Where-Object { $_.Name -notmatch "^strata-vision" } | Select-Object -First 1).FullName
+        $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
+        $kept = @(); for ($i = 0; $i -lt $cfg.args.Count; $i++) {
+            if ($cfg.args[$i] -eq "--expert-vram") { $i++; continue }
+            $kept += $cfg.args[$i]
+        }
+        if ($Eng["strata_expert_vram"]) { $kept += @("--expert-vram", $Eng["strata_expert_vram"]) }
+        $cfg.args = $kept
+        $cfg | ConvertTo-Json -Depth 6 | Set-Content $cfgPath
+
+        Set-Content -Path $BuildMarker -Value $WinBuild
+        Write-Host "[ OK ] Strata $WinBuild installed to $BinDir"
+    }
+} else {
+    $Repo = $Eng["windows_repo"]
+    if (-not $Repo) { throw "Engine $EngineName has no Windows release source (windows_repo in $EngineIni)" }
+
+    # "latest" follows upstream (ungated), so the tag is only known after asking.
+    $Release = $null
+    if ($WinBuild -eq "latest") {
+        # Skip stub releases (e.g. a nightly pointer with no assets).
+        $rels = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases?per_page=15"
+        $Release = $rels | Where-Object { @($_.assets | Where-Object { $_.name -match $Eng["windows_asset_$Backend"] }).Count -gt 0 } | Select-Object -First 1
+        if (-not $Release) { throw "No $Backend Windows release of $EngineName found on GitHub" }
+        $WinBuild = $Release.tag_name
+    }
+
+    $EngineRoot = Join-Path $Root ".local\engines\$EngineName"
+    $BinDir = Join-Path $EngineRoot "$WinBuild-$Backend"
+    $Server = Join-Path $BinDir $ServerExe
+    $BuildMarker = Join-Path $BinDir "BUILD"
+
+    # One-time move of the pre-adapter install (.local\bin-windows) when it is
+    # exactly this build: saves a ~300 MB download.
+    $Legacy = Join-Path $Root ".local\bin-windows"
+    if ($EngineName -eq "llama.cpp" -and -not (Test-Path $BinDir) -and (Test-Path (Join-Path $Legacy "BUILD"))) {
+        if ((Get-Content (Join-Path $Legacy "BUILD") -Raw).Trim() -eq "$WinBuild $Backend") {
+            New-Item -ItemType Directory -Force $EngineRoot | Out-Null
+            Move-Item $Legacy $BinDir
+            Write-Host "[ OK ] moved llama.cpp $WinBuild from .local\bin-windows to $BinDir"
+        }
+    }
+
+    # The marker ("<tag> <backend>") is written only after every zip extracted:
+    # a killed install leaves the exe without it, and that half-state must
+    # reinstall, not run.
+    $installed = if (Test-Path $BuildMarker) { (Get-Content $BuildMarker -Raw).Trim() } else { "" }
+    if ($installed -ne "$WinBuild $Backend") {
+        if (Test-Path $BinDir) { Remove-Item -Recurse -Force $BinDir }
+        Write-Host "[ .. ] installing $EngineName $WinBuild ($Backend) from github.com/$Repo..."
+        if (-not $Release) { $Release = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/tags/$WinBuild" }
+
+        $serverZip = $Release.assets | Where-Object { $_.name -match $Eng["windows_asset_$Backend"] } | Select-Object -First 1
+        if (-not $Eng["windows_asset_$Backend"] -or -not $serverZip) { throw "No $Backend Windows asset of $EngineName in release $WinBuild" }
         $assets = @($serverZip)
-    }
+        # e.g. llama.cpp's CUDA build ships its runtime DLLs as a separate zip.
+        if ($Eng["windows_runtime_$Backend"]) {
+            $assets += @($Release.assets | Where-Object { $_.name -match $Eng["windows_runtime_$Backend"] } | Select-Object -First 1)
+        }
 
-    $tmp = Join-Path $env:TEMP "llama-cpp-$tag"
-    foreach ($asset in $assets) {
-        Write-Host "[ .. ] $($asset.name) ($([math]::Round($asset.size/1MB)) MB)"
-        $zip = Join-Path $tmp $asset.name
+        New-Item -ItemType Directory -Force $BinDir | Out-Null
+        $tmp = Join-Path $env:TEMP "golem-$EngineName-$WinBuild"
         New-Item -ItemType Directory -Force $tmp | Out-Null
-        Invoke-WebRequest $asset.browser_download_url -OutFile $zip
-        Expand-Archive $zip $BinDir -Force
+        foreach ($asset in $assets) {
+            Write-Host "[ .. ] $($asset.name) ($([math]::Round($asset.size/1MB)) MB)"
+            $zip = Join-Path $tmp $asset.name
+            Invoke-WebRequest $asset.browser_download_url -OutFile $zip
+            Expand-Archive $zip $BinDir -Force
+        }
+        # Some zips wrap everything in a top folder: find the server wherever it landed.
+        if (-not (Test-Path $Server)) {
+            $found = Get-ChildItem $BinDir -Recurse -Filter $ServerExe | Select-Object -First 1
+            if (-not $found) { throw "$ServerExe not found in the $EngineName $WinBuild zips" }
+            Get-ChildItem $found.DirectoryName | Move-Item -Destination $BinDir -Force
+        }
+        Set-Content -Path $BuildMarker -Value "$WinBuild $Backend"
+        Write-Host "[ OK ] $EngineName $WinBuild ($Backend) installed to $BinDir"
     }
-    Set-Content -Path $BuildMarker -Value "$tag $Backend"
-    Write-Host "[ OK ] llama.cpp $tag ($Backend) installed to $BinDir"
 }
 
 # ------------------------------------------------------------
@@ -238,49 +338,106 @@ $LogDir = Join-Path $Root "logs"
 New-Item -ItemType Directory -Force $LogDir | Out-Null
 $Log = Join-Path $LogDir "llama-server-windows.log"
 
-$ServerArgs = @(
-    "--host", $BindHost,
-    "--port", $Port,
-    "--threads", $Threads,
-    "--parallel", $Parallel,
-    "--metrics",
-    "--api-key", $ApiKey,
-    "--log-file", $Log,
-    "--log-colors", "off"
-)
-if ($SleepIdle) { $ServerArgs += @("--sleep-idle-seconds", $SleepIdle) }
-if ($Preset) {
+# Every flag is collected under its canonical (llama.cpp) name, value
+# "true" = bare switch, then translated by the engine adapter on the way
+# out (see engines\llama.cpp\engine.ini for the flag.* / map.* keys).
+$Flags = [ordered]@{
+    "host" = $BindHost; "port" = $Port; "threads" = $Threads; "parallel" = $Parallel
+    "metrics" = "true"; "api-key" = $ApiKey; "log-colors" = "off"
+    # Engines that append ".log" themselves get the path without it.
+    "log-file" = $(if ($Eng["log_file_adds_ext"] -eq "true") { $Log -replace '\.log$', '' } else { $Log })
+}
+if ($SleepIdle) { $Flags["sleep-idle-seconds"] = $SleepIdle }
+
+# Engines without router mode serve one model: the default section's flags
+# ([*] merged with [MODEL_ALIAS]) become the command line. Strata skips
+# this entirely: its launch below runs its own config, not these flags.
+$Router = $Eng["router"] -ne "false"
+if ($Preset -and -not $Router -and $Eng["launcher"] -ne "strata") {
+    $Flags["alias"] = $Alias
+    $section = ""; $found = $false
+    Get-Content $PresetPath | ForEach-Object {
+        if ($_ -match '^\[([^\]]+)\]') { $section = $Matches[1]; if ($section -eq $Alias) { $found = $true } }
+        elseif ($_ -match '^\s*([A-Za-z0-9\-]+)\s*=\s*(.*?)\s*$' -and ($section -eq "*" -or $section -eq $Alias)) {
+            $Flags[$Matches[1]] = $Matches[2]
+        }
+    }
+    if (-not $found) { throw "Engine $EngineName has no router mode and preset section [$Alias] (MODEL_ALIAS) is not in $Preset" }
+    Write-Host "[ .. ] $EngineName has no router mode: serving only [$Alias]"
+} elseif ($Preset) {
     # Router: command-line flags override every preset, so only the shared
     # ones above go here; one model resident at a time (12 GB card).
-    $ServerArgs += @("--models-preset", $PresetPath, "--models-max", "1")
+    $Flags["models-preset"] = $PresetPath; $Flags["models-max"] = "1"
 } else {
-    $ServerArgs += @(
-        "--model", $ModelPath,
-        "--alias", $Alias,
-        "--ctx-size", $Ctx,
-        "--n-gpu-layers", $GpuLayers,
-        "--jinja",
-        "-fa", "on",
-        "--cache-type-k", $CacheK,
-        "--cache-type-v", $CacheV,
-        "--load-mode", $LoadMode
-    )
-    if ($SpecType) { $ServerArgs += @("--spec-type", $SpecType) }
-    if ($DraftFile) { $ServerArgs += @("--spec-draft-model", (Join-Path $ModelDir $DraftFile)) }
-    if ($ExtraArgs) { $ServerArgs += ($ExtraArgs -split '\s+' | Where-Object { $_ }) }
+    $Flags["model"] = $ModelPath; $Flags["alias"] = $Alias; $Flags["ctx-size"] = $Ctx
+    $Flags["n-gpu-layers"] = $GpuLayers; $Flags["jinja"] = "true"; $Flags["flash-attn"] = "on"
+    $Flags["cache-type-k"] = $CacheK; $Flags["cache-type-v"] = $CacheV; $Flags["load-mode"] = $LoadMode
+    if ($SpecType) { $Flags["spec-type"] = $SpecType }
+    if ($DraftFile) { $Flags["spec-draft-model"] = (Join-Path $ModelDir $DraftFile) }
+}
+
+# flag.<key> = --name renames, flag.<key> = - drops (warned);
+# map.<key>.<value> = <args> replaces the whole flag (- drops it).
+$ServerArgs = @()
+if ($Eng["launcher"] -eq "strata") {
+    # Strata's server takes no engine flags: the strata-*.json its setup
+    # wrote carries the model and engine arguments. Golem maps what it can:
+    # the idle timer becomes --idle-unload. Clients ask for the model by
+    # the json's "model_name".
+    $json = Get-ChildItem $BinDir -Filter "strata-*.json" |
+        Where-Object { $_.Name -notmatch "^strata-vision" } | Select-Object -First 1
+    if (-not $json) { throw "No strata-*.json in $BinDir - run ./golem up again to redo the setup" }
+    $StrataModel = ([regex]::Match((Get-Content $json.FullName -Raw), '"model_name"\s*:\s*"([^"]+)"')).Groups[1].Value
+    $ServerArgs = @((Join-Path $BinDir "serve\server.py"), "--engine", "strata",
+                    "--config", $json.FullName, "--port", $Port)
+    if ($SleepIdle) { $ServerArgs += @("--idle-unload", $SleepIdle) }
+    $WorkDir = $BinDir
+    Write-Host "[ .. ] Strata serves the model its setup installed ($StrataModel); set MODEL_ALIAS to that name"
+} else {
+    foreach ($k in $Flags.Keys) {
+        $v = "$($Flags[$k])"
+        if ($v -eq "false") { continue }
+        if ($Eng.Contains("map.$k.$v")) {
+            $repl = $Eng["map.$k.$v"]
+            if ($repl -eq "-") { Write-Host "[WARN] $EngineName has no equivalent of --$k $v, dropped"; continue }
+            $ServerArgs += @($repl -split '\s+' | Where-Object { $_ })
+            continue
+        }
+        $name = if ($Eng.Contains("flag.$k")) { $Eng["flag.$k"] } else { "--$k" }
+        if ($name -eq "-") { Write-Host "[WARN] $EngineName has no equivalent of --$k, dropped"; continue }
+        if ($v -eq "true") { $ServerArgs += $name } else { $ServerArgs += @($name, $v) }
+    }
+    # EXTRA_ARGS are passed verbatim: they are already in the engine's syntax.
+    if ($ExtraArgs -and -not $Preset) { $ServerArgs += ($ExtraArgs -split '\s+' | Where-Object { $_ }) }
+    $WorkDir = $ModelDir
 }
 # Start-Process joins arguments with bare spaces: quote paths that have them.
 $ServerArgs = $ServerArgs | ForEach-Object { if ("$_" -match '\s') { "`"$_`"" } else { "$_" } }
 
+if ($DryRun) {
+    Write-Host "[ OK ] dry run: `"$Server`" $($ServerArgs -join ' ')"
+    Write-Host "       (working directory: $WorkDir)"
+    exit 0
+}
+
 # The server writes its own log (--log-file) instead of -Redirect*: those
 # make Start-Process spawn with handle inheritance, so llama-server would
 # keep the caller's stdout pipe open and hang anything reading it until
-# EOF (e.g. `./golem up | tail`).
-# Started from data\models so preset model paths resolve as bare filenames.
-$Proc = Start-Process -FilePath $Server -ArgumentList $ServerArgs -WorkingDirectory $ModelDir -WindowStyle Hidden -PassThru
+# EOF (e.g. `./golem up | tail`). Strata's Python server has no log-file
+# flag, so its stdout/stderr go to files after all (read them in logs\);
+# its engine also logs via the "log" path in the config json.
+# llama-server starts from data\models so preset model paths resolve as
+# bare filenames.
+if ($Eng["launcher"] -eq "strata") {
+    $Proc = Start-Process -FilePath $Server -ArgumentList $ServerArgs -WorkingDirectory $WorkDir -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput (Join-Path $LogDir "strata-server.out.log") `
+        -RedirectStandardError (Join-Path $LogDir "strata-server.err.log")
+} else {
+    $Proc = Start-Process -FilePath $Server -ArgumentList $ServerArgs -WorkingDirectory $WorkDir -WindowStyle Hidden -PassThru
+}
 New-Item -ItemType Directory -Force (Join-Path $Root ".local") | Out-Null
 Set-Content -Path (Join-Path $Root ".local\llama-server-windows.pid") -Value $Proc.Id
-Write-Host "[ OK ] llama-server started, PID $($Proc.Id)"
+Write-Host "[ OK ] $EngineName $WinBuild started, PID $($Proc.Id)"
 Write-Host "       logs: $Log"
 
 # ------------------------------------------------------------
@@ -293,7 +450,7 @@ $healthy = $false
 while ((Get-Date) -lt $deadline) {
     if ($Proc.HasExited) {
         if (Test-Path $Log) { Get-Content $Log -Tail 15 }
-        throw "llama-server exited during startup (exit code $($Proc.ExitCode))"
+        throw "$EngineName server exited during startup (exit code $($Proc.ExitCode))"
     }
     # curl.exe, not Invoke-WebRequest: PS 5.1 honors the system proxy,
     # which breaks/loops requests to localhost on proxy-rigged machines.
@@ -306,10 +463,10 @@ while ((Get-Date) -lt $deadline) {
 }
 if (-not $healthy) { throw "Server did not become healthy within 10 minutes (logs: $Log)" }
 
-if ($Preset) {
+if ($Preset -and $Router) {
     Write-Host "[ OK ] router healthy on http://$BindHost`:$Port (presets: $Preset; models load on first request)"
 } else {
-    Write-Host "[ OK ] healthy on http://$BindHost`:$Port (model: $ModelFile)"
+    Write-Host "[ OK ] healthy on http://$BindHost`:$Port (model: $(if ($Preset) { $Alias } else { $ModelFile }))"
 }
 Write-Host ""
 Write-Host "Point Claude Code at Golem:"

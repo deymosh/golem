@@ -264,7 +264,7 @@ CUDA 13.4 runtime) answered the 200K needle wrong *twice, identically* (tool cal
 100K needle, throughput and prefill all fine) on Linux, while b10991 passes.
 `compose.yml` pins the known-good image **by digest**; to upgrade, pull the new
 build, point the digest at it, and adopt only if `./golem eval --long 200000`
-passes. Windows mode pins its release the same way (`LLAMA_WIN_BUILD`, default
+passes. Windows mode pins its release the same way (`build` in `engines/llama.cpp/engine.ini`, `ENGINE_BUILD` to override; currently
 b11379 — adopted 2026-10-03 after the full gate passed; the Windows build of
 b11149 also passes; the b11149 regression is Linux-build-specific). On Git Bash,
 `./golem eval` routes through WSL even when a Windows python3 is visible —

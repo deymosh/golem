@@ -2,6 +2,10 @@
 
 set -Eeuo pipefail
 
+# Locale-proof: bash printf %f and awk reject "." as a decimal point under
+# e.g. a Spanish locale, which would corrupt every measured number.
+export LC_ALL=C
+
 # ============================================================
 # SPEED BENCHMARK
 # ============================================================
@@ -62,7 +66,9 @@ request() {
 
 timing() {
     # timing <field> < response -> numeric value from "timings"
-    grep -o "\"$1\":[0-9.eE+-]*" | head -n1 | cut -d: -f2
+    # " *" tolerates pretty-printed JSON (Strata writes `"key": 12.3`,
+    # llama.cpp writes `"key":12.3`).
+    grep -o "\"$1\": *[0-9.eE+-]*" | head -n1 | cut -d: -f2 | tr -d ' '
 }
 
 echo

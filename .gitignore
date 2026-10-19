@@ -176,3 +176,6 @@ htmlcov/
 !data/models/.gitkeep
 !data/cache/.gitkeep
 !config/.gitkeep
+
+# Generated benchmark page (./golem report); the data is bench/results.jsonl
+bench/report.html

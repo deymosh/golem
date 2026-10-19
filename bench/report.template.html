@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Golem Benchmarks</title>
+<!-- Template for ./golem report: the generator replaces the GOLEM_DATA
+     marker with a JSON array of bench/results.jsonl lines. Self-contained:
+     no server, no CDN, opens from file://. -->
+<style>
+:root {
+  --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a64; --line: #e3e1da;
+  --accent: #b4532a; --pass: #2f7d4f; --fail: #b3261e; --warn: #9a6b00;
+  --s1: #b4532a; --s2: #2b6cb0; --s3: #2f7d4f; --s4: #7b4fa8; --s5: #9a6b00; --s6: #0f7c86;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #151513; --panel: #1e1e1b; --ink: #ecebe6; --muted: #9b9a92; --line: #33322d;
+    --accent: #e0814f; --pass: #5cc184; --fail: #f07167; --warn: #e0b54f;
+    --s1: #e0814f; --s2: #6aa8f0; --s3: #5cc184; --s4: #b48ae0; --s5: #e0b54f; --s6: #4cc3cc;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.45 ui-sans-serif, system-ui, "Segoe UI", sans-serif; }
+main { max-width: 1180px; margin: 0 auto; padding: 28px 16px 60px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+h1 { font: 600 22px/1.2 ui-monospace, "Cascadia Code", Consolas, monospace; margin: 0; letter-spacing: -.01em; }
+h1 b { color: var(--accent); }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 34px 0 10px; font-weight: 600; }
+.meta { color: var(--muted); font-size: 13px; }
+.filters { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 18px; padding: 12px 14px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.filters label { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
+select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 5px; padding: 3px 6px; max-width: 260px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font-weight: 600; color: var(--muted); font-size: 12px; cursor: pointer; user-select: none; position: sticky; top: 0; background: var(--panel); }
+th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr:last-child td { border-bottom: 0; }
+tr.suspect td { opacity: .45; }
+.badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.PASS { color: var(--pass); border: 1px solid var(--pass); }
+.FAIL { color: var(--fail); border: 1px solid var(--fail); }
+.none { color: var(--muted); border: 1px dashed var(--line); }
+.best { font-weight: 700; color: var(--accent); }
+.swatch { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
+.flags { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.note { color: var(--muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+.chart { padding: 10px 6px 4px; }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart text { fill: var(--muted); font-size: 11px; }
+.chart .grid { stroke: var(--line); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 4px 14px 12px; font-size: 12px; }
+.empty { padding: 24px; color: var(--muted); text-align: center; }
+.ctl { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; padding: 12px 14px; }
+.btn { font: inherit; font-size: 13px; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 5px; padding: 5px 12px; cursor: pointer; }
+.btn:hover { border-color: var(--accent); }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn.warn { color: var(--accent); }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 5px; }
+.dot.on { background: var(--pass); } .dot.off { background: var(--fail); }
+.state { font-size: 13px; color: var(--muted); margin-right: auto; }
+.state b { color: var(--ink); font-weight: 600; }
+pre.log { margin: 0; padding: 10px 14px; border-top: 1px solid var(--line); font: 11px/1.5 ui-monospace, Consolas, monospace;
+  color: var(--muted); white-space: pre-wrap; max-height: 180px; overflow-y: auto; }
+h2[hidden] { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1><b>▟█▙</b> golem benchmarks</h1>
+    <div class="meta" id="meta"></div>
+  </header>
+
+  <div class="filters">
+    <label>host <select id="f-host"></select></label>
+    <label>engine <select id="f-engine"></select></label>
+    <label>model <select id="f-model"></select></label>
+    <label><input type="checkbox" id="f-quiet" checked> quiet runs only</label>
+  </div>
+
+  <h2 id="control-h" hidden>Control <span class="meta">served by <code>golem web</code> — snapshot pages have no buttons</span></h2>
+  <div class="card" id="control" hidden>
+    <div class="ctl">
+      <span class="state" id="c-state"></span>
+      <button class="btn" data-run="start">Start</button>
+      <button class="btn warn" data-run="stop">Stop</button>
+      <button class="btn" data-run="restart">Restart</button>
+      <button class="btn" data-run="bench">Bench</button>
+      <button class="btn" data-run="eval">Eval 200K</button>
+      <label>default <select id="c-alias"></select><button class="btn" data-apply="c-alias">Set</button></label>
+      <label>engine <select id="c-engine"></select><button class="btn" data-apply="c-engine">Set</button></label>
+      <label>pull <select id="c-pull"></select><button class="btn" data-apply="c-pull">Fetch</button></label>
+    </div>
+    <pre class="log" id="c-log" hidden></pre>
+  </div>
+
+  <h2>Leaderboard — best decode per model × engine build</h2>
+  <div class="card"><table id="board"></table></div>
+
+  <h2>Decode vs prefill (every bench run)</h2>
+  <div class="card chart"><div id="scatter"></div><div class="legend" id="legend"></div></div>
+
+  <h2>All runs</h2>
+  <div class="card"><table id="runs"></table></div>
+</main>
+
+<script id="golem-data" type="application/json">/*GOLEM_DATA*/</script>
+<script>
+"use strict";
+let ROWS = [];
+try { ROWS = JSON.parse(document.getElementById("golem-data").textContent); } catch (e) { ROWS = []; }
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmt = (v, d = 1) => (v == null || isNaN(v)) ? "–" : Number(v).toFixed(d);
+const day = (ts) => (ts || "").slice(0, 10);
+const decode = (r) => r.kind === "bench" ? r.decode_median : null;
+const KEY_FLAGS = ["n-cpu-moe", "fit", "fit-target", "ubatch-size", "spec-type", "ctx-size", "cache-type-k"];
+const flagStr = (f) => KEY_FLAGS.filter((k) => f && f[k] != null).map((k) => `${k.replace("cache-type-", "kv-")}=${f[k]}`).join(" ");
+
+const models = [...new Set(ROWS.map((r) => r.model))].sort();
+const colorOf = (m) => `var(--s${(models.indexOf(m) % 6) + 1})`;
+
+function fillSelect(id, values) {
+  const sel = $(id);
+  sel.innerHTML = `<option value="">all</option>` + values.map((v) => `<option>${esc(v)}</option>`).join("");
+}
+fillSelect("f-host", [...new Set(ROWS.map((r) => r.host))].sort());
+fillSelect("f-engine", [...new Set(ROWS.map((r) => r.engine))].sort());
+fillSelect("f-model", models);
+// Default to the most common host: numbers only compare on the same box.
+const hostCount = {};
+ROWS.forEach((r) => { hostCount[r.host] = (hostCount[r.host] || 0) + 1; });
+const topHost = Object.keys(hostCount).sort((a, b) => hostCount[b] - hostCount[a])[0];
+if (topHost) $("f-host").value = topHost;
+
+function filtered() {
+  const h = $("f-host").value, e = $("f-engine").value, m = $("f-model").value, q = $("f-quiet").checked;
+  return ROWS.filter((r) => (!h || r.host === h) && (!e || r.engine === e) && (!m || r.model === m) && (!q || r.quiet !== false));
+}
+
+function renderBoard(rows) {
+  const groups = {};
+  rows.forEach((r) => {
+    const k = [r.host, r.engine, r.engine_build, r.model].join("|");
+    (groups[k] = groups[k] || { bench: [], eval: [] })[r.kind === "eval" ? "eval" : "bench"].push(r);
+  });
+  const lines = Object.values(groups).filter((g) => g.bench.length).map((g) => {
+    const best = g.bench.reduce((a, b) => ((b.decode_median ?? 0) > (a.decode_median ?? 0) ? b : a));
+    const ev = g.eval.sort((a, b) => (a.ts < b.ts ? 1 : -1))[0];
+    return { best, ev };
+  }).sort((a, b) => (b.best.decode_median ?? 0) - (a.best.decode_median ?? 0));
+  if (!lines.length) { $("board").innerHTML = `<tr><td class="empty">No bench runs match the filters.</td></tr>`; return; }
+  const top = lines[0].best.decode_median;
+  $("board").innerHTML = `<thead><tr><th>model</th><th>engine</th><th class="num">decode med</th><th class="num">best</th>
+    <th class="num">MTP acc.</th><th class="num">prefill</th><th class="num">VRAM GB</th><th class="num">RAM GB</th><th>200K needle</th><th class="num">decode @depth</th><th>date</th><th>flags</th></tr></thead><tbody>` +
+    lines.map(({ best: r, ev }) => {
+      const needle = ev?.eval?.needle;
+      return `<tr><td><span class="swatch" style="background:${colorOf(r.model)}"></span>${esc(r.model)}</td>
+        <td>${esc(r.engine)} <span class="flags">${esc(r.engine_build)}</span></td>
+        <td class="num ${r.decode_median === top ? "best" : ""}">${fmt(r.decode_median)}</td><td class="num">${fmt(r.decode_best)}</td>
+        <td class="num">${r.draft_accept == null ? "–" : Math.round(r.draft_accept * 100) + "%"}</td>
+        <td class="num">${fmt(r.prefill, 0)}</td><td class="num">${r.vram_mib ? fmt(r.vram_mib / 1024) : "–"}</td>
+        <td class="num">${r.ram_used_gib != null ? fmt(r.ram_used_gib) : "–"}</td>
+        <td>${needle ? `<span class="badge ${needle}">${needle}</span>` : `<span class="badge none">not run</span>`}${ev?.eval?.tools === "FAIL" ? ` <span class="badge FAIL">tools</span>` : ""}</td>
+        <td class="num">${fmt(ev?.eval?.depth_decode)}</td><td>${day(r.ts)}</td><td class="flags">${esc(flagStr(r.flags))}</td></tr>`;
+    }).join("") + "</tbody>";
+}
+
+function renderScatter(rows) {
+  const pts = rows.filter((r) => r.kind === "bench" && r.decode_median && r.prefill);
+  if (!pts.length) { $("scatter").innerHTML = `<div class="empty">No bench runs with both decode and prefill.</div>`; $("legend").innerHTML = ""; return; }
+  const W = 900, H = 320, L = 48, R = 16, T = 12, B = 34;
+  const xs = pts.map((p) => p.prefill), ys = pts.map((p) => p.decode_median);
+  const pad = (lo, hi) => { const d = (hi - lo) || hi * 0.2 || 1; return [Math.max(0, lo - d * 0.15), hi + d * 0.15]; };
+  const [x0, x1] = pad(Math.min(...xs), Math.max(...xs)), [y0, y1] = pad(Math.min(...ys), Math.max(...ys));
+  const X = (v) => L + (v - x0) / (x1 - x0) * (W - L - R), Y = (v) => H - B - (v - y0) / (y1 - y0) * (H - T - B);
+  const ticks = (lo, hi) => { const s = Math.pow(10, Math.floor(Math.log10((hi - lo) / 4))); const st = [1, 2, 5, 10].map((m) => m * s).find((v) => (hi - lo) / v <= 6); const out = []; for (let v = Math.ceil(lo / st) * st; v <= hi; v += st) out.push(+v.toFixed(6)); return out; };
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="decode versus prefill scatter">`;
+  ticks(y0, y1).forEach((v) => { svg += `<line class="grid" x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}"/><text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end">${v}</text>`; });
+  ticks(x0, x1).forEach((v) => { svg += `<text x="${X(v)}" y="${H - B + 16}" text-anchor="middle">${v}</text>`; });
+  svg += `<text x="${(L + W - R) / 2}" y="${H - 4}" text-anchor="middle">prefill tok/s (~28.6K-token prompt)</text>`;
+  svg += `<text x="12" y="${(T + H - B) / 2}" text-anchor="middle" transform="rotate(-90 12 ${(T + H - B) / 2})">decode tok/s (median)</text>`;
+  pts.forEach((p) => {
+    svg += `<circle cx="${X(p.prefill)}" cy="${Y(p.decode_median)}" r="6" fill="${colorOf(p.model)}" fill-opacity=".8" stroke="var(--panel)" stroke-width="1.5">
+      <title>${esc(p.model)} · ${esc(p.engine)} ${esc(p.engine_build)}\n${fmt(p.decode_median)} t/s decode · ${fmt(p.prefill, 0)} t/s prefill\n${esc(flagStr(p.flags))}\n${day(p.ts)} ${esc(p.note || "")}</title></circle>`;
+  });
+  $("scatter").innerHTML = svg + "</svg>";
+  $("legend").innerHTML = [...new Set(pts.map((p) => p.model))].map((m) => `<span><span class="swatch" style="background:${colorOf(m)}"></span>${esc(m)}</span>`).join("");
+}
+
+let sortKey = "ts", sortDir = -1;
+const COLS = [
+  ["ts", "time", (r) => (r.ts || "").replace("T", " ").slice(0, 16)],
+  ["kind", "kind", (r) => r.kind],
+  ["model", "model", (r) => `<span class="swatch" style="background:${colorOf(r.model)}"></span>${esc(r.model)}`],
+  ["engine_build", "build", (r) => esc(`${r.engine} ${r.engine_build}`)],
+  ["decode", "decode", (r) => fmt(r.kind === "eval" ? r.eval?.decode_best : r.decode_median), true],
+  ["prefill", "prefill", (r) => fmt(r.kind === "eval" ? r.eval?.needle_prefill : r.prefill, 0), true],
+  ["vram_mib", "VRAM GB", (r) => (r.vram_mib ? fmt(r.vram_mib / 1024) : "–"), true],
+  ["ram_used_gib", "RAM GB", (r) => (r.ram_used_gib != null ? fmt(r.ram_used_gib) : "–"), true],
+  ["result", "eval", (r) => (r.kind === "eval" ? `<span class="badge ${r.eval?.needle || "none"}">${r.eval?.needle || "–"}</span>` : "")],
+  ["flags", "flags", (r) => `<span class="flags">${esc(flagStr(r.flags))}</span>`],
+  ["note", "note", (r) => `<span class="note" title="${esc(r.note)}">${esc(r.note)}</span>`],
+];
+const sortVal = (r, k) => k === "decode" ? (r.kind === "eval" ? r.eval?.decode_best : r.decode_median) ?? -1
+  : k === "prefill" ? (r.kind === "eval" ? r.eval?.needle_prefill : r.prefill) ?? -1
+  : k === "flags" ? flagStr(r.flags) : k === "result" ? r.eval?.needle || "" : r[k] ?? "";
+
+function renderRuns(rows) {
+  const sorted = rows.slice().sort((a, b) => { const x = sortVal(a, sortKey), y = sortVal(b, sortKey); return (x > y ? 1 : x < y ? -1 : 0) * sortDir; });
+  $("runs").innerHTML = `<thead><tr>${COLS.map(([k, label, , num]) => `<th data-k="${k}" class="${num ? "num" : ""}">${label}${k === sortKey ? (sortDir > 0 ? " ▲" : " ▼") : ""}</th>`).join("")}</tr></thead><tbody>` +
+    (sorted.length ? sorted.map((r) => `<tr class="${r.quiet === false ? "suspect" : ""}">${COLS.map(([, , f, num]) => `<td class="${num ? "num" : ""}">${f(r)}</td>`).join("")}</tr>`).join("")
+      : `<tr><td class="empty" colspan="${COLS.length}">No runs match the filters.</td></tr>`) + "</tbody>";
+  $("runs").querySelectorAll("th").forEach((th) => th.onclick = () => { const k = th.dataset.k; sortDir = k === sortKey ? -sortDir : -1; sortKey = k; renderRuns(filtered()); });
+}
+
+function render() {
+  const rows = filtered();
+  const last = ROWS.map((r) => r.ts).sort().pop();
+  $("meta").textContent = `${ROWS.length} runs recorded · ${rows.length} shown · last ${last ? last.replace("T", " ").slice(0, 16) + " UTC" : "–"}`;
+  renderBoard(rows); renderScatter(rows); renderRuns(rows);
+}
+["f-host", "f-engine", "f-model", "f-quiet"].forEach((id) => $(id).addEventListener("change", render));
+render();
+
+// ------------------------------------------------------------
+// Served mode (golem web): results.jsonl is the single source of
+// truth - poll it and the server state; show the control panel.
+// Snapshot pages (file://) keep the embedded data, no buttons.
+// ------------------------------------------------------------
+let STALE = false;
+function fillOpts(id, values, cur) {
+  const sel = $(id);
+  sel.innerHTML = values.map((v) => `<option${v === cur ? " selected" : ""}>${esc(v)}</option>`).join("");
+}
+async function pollLive() {
+  let live = false;
+  try {
+    const r = await fetch("results.jsonl", { cache: "no-store" });
+    if (r.ok) {
+      const rows = (await r.text()).split("\n").filter((l) => l.trim().startsWith("{")).map((l) => JSON.parse(l));
+      if (rows.length !== ROWS.length || !ROWS.length || rows[rows.length - 1].ts !== ROWS[ROWS.length - 1].ts) {
+        ROWS = rows;
+        fillSelect("f-host", [...new Set(ROWS.map((r2) => r2.host))].sort());
+        fillSelect("f-engine", [...new Set(ROWS.map((r2) => r2.engine))].sort());
+        fillSelect("f-model", [...new Set(ROWS.map((r2) => r2.model))].sort());
+        render();
+      }
+      live = true;
+    }
+  } catch (e) { live = false; }
+  $("control").hidden = $("control-h").hidden = !live;
+  if (!live) {
+    if (!STALE) { STALE = true; $("meta").textContent += " · snapshot (run report again, or golem web for live)"; }
+    return;
+  }
+  try {
+    const s = await (await fetch("api/state", { cache: "no-store" })).json();
+    $("c-state").innerHTML =
+      `<span class="dot ${s.up ? "on" : "off"}"></span>${s.up ? "server up" : "server down"}` +
+      (s.up && s.vram ? ` · <b>${(s.vram / 1024).toFixed(1)} GB</b> VRAM` : "") +
+      ` · default <b>${esc(s.alias)}</b> · engine <b>${esc(s.engine)}</b>` +
+      (s.job_running ? ` · <b>${esc(s.job_action)}</b> running…` : "");
+    fillOpts("c-alias", s.presets, s.alias);
+    fillOpts("c-engine", s.engines, s.engine);
+    fillOpts("c-pull", s.presets, null);
+    const log = $("c-log");
+    log.hidden = !s.job_tail;
+    if (s.job_tail) log.textContent = s.job_tail;
+    document.querySelectorAll("#control .btn").forEach((b) => { b.disabled = !!s.job_running; });
+  } catch (e) { /* server gone: buttons stay */ }
+}
+document.querySelectorAll("#control .btn").forEach((b) => b.onclick = async () => {
+  b.disabled = true;
+  const apply = b.dataset.apply;
+  let body = `action=${b.dataset.run || apply}`;
+  if (apply) body += `&arg=${encodeURIComponent($(apply).value)}`;
+  try { await fetch("api/run", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body }); }
+  catch (e) { alert("web server not running (golem web)"); }
+  setTimeout(pollLive, 1500);
+});
+pollLive();
+setInterval(pollLive, 15000);
+</script>
+</body>
+</html>

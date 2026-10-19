@@ -2,7 +2,7 @@
 rem Golem - Windows launcher (windows deploy mode, no Git Bash needed).
 rem
 rem   golem.cmd                 interactive menu (double-click / desktop shortcut)
-rem   golem.cmd start|stop|restart|status|logs
+rem   golem.cmd start|stop|restart|status|logs|report
 rem
 rem Wraps scripts\start-windows.ps1 / stop-windows.ps1 and reads the same .env.
 rem First run bootstraps itself: .env from .env.example, the llama.cpp
@@ -35,8 +35,8 @@ for /f "usebackq tokens=1,* delims==" %%a in ("%ROOT%.env") do (
 )
 
 if "%~1"=="" goto menu
-for %%c in (start stop restart status logs) do if /i "%~1"=="%%c" (call :%%c & exit /b)
-echo Usage: golem.cmd [start^|stop^|restart^|status^|logs]
+for %%c in (start stop restart status logs report web) do if /i "%~1"=="%%c" (call :%%c & exit /b)
+echo Usage: golem.cmd [start^|stop^|restart^|status^|logs^|report^|web]
 exit /b 1
 
 :menu
@@ -48,10 +48,14 @@ echo   2  Stop
 echo   3  Restart
 echo   4  Status
 echo   5  Logs (new window)
+echo   6  Benchmark report (browser)
+echo   7  Web UI (live results + controls)
 echo   Q  Quit
 echo.
-choice /c 12345Q /n /m "  > "
-if errorlevel 6 exit /b 0
+choice /c 1234567Q /n /m "  > "
+if errorlevel 8 exit /b 0
+if errorlevel 7 (call :web & goto menu)
+if errorlevel 6 (call :report & goto menu)
 if errorlevel 5 (call :logs & goto menu)
 if errorlevel 4 (call :status & goto menu)
 if errorlevel 3 (call :restart & goto menu)
@@ -84,4 +88,11 @@ exit /b 0
 
 :logs
 start "golem logs" %PS% -Command "Get-Content -Wait -Tail 40 '%ROOT%logs\llama-server-windows.log'"
+exit /b 0
+
+:report
+%PS% -File "%ROOT%scripts\report.ps1"
+exit /b 0
+:web
+%PS% -File "%ROOT%scripts\web.ps1"
 exit /b 0

@@ -70,14 +70,39 @@ default coder + draft to take a while (~22 GB). After that, `up` only fetches wh
 missing. The bash `./golem up` does the same on Linux, macOS, WSL and Git Bash via
 [download-model.sh](../scripts/download-model.sh) (curl-based, no python needed).
 
-## Pinned llama.cpp build
+## Engines and pinned builds
 
-The start script installs the official CUDA release named by `LLAMA_WIN_BUILD` (default
-`b11149`, which passed the 200K needle and tool calls here) into `.local\bin-windows\`, and
-reinstalls if the pin changes. llama.cpp builds are not interchangeable (b11149's *Linux*
-build fails the 200K needle), so to upgrade: set `LLAMA_WIN_BUILD="b<new>"`,
-`./golem restart`, and keep it only if `./golem eval --long 200000` passes. `"latest"`
-follows upstream ungated.
+`ENGINE` in `.env` picks the inference engine (default `llama.cpp`); its
+[engines/&lt;name&gt;/engine.ini](../engines/llama.cpp/engine.ini) names the GitHub release
+source, the pinned build and the engine's capabilities. The start script installs that build
+into `.local\engines\<name>\<build>-<backend>\` (a `BUILD` marker is written only once every
+zip extracted, so an interrupted install reinstalls) and keeps older builds side by side, so
+switching back is instant. A pre-adapter install in `.local\bin-windows\` is moved there once.
+
+Builds are not interchangeable (b11149's *Linux* build failed the 200K needle), so to
+upgrade: set `ENGINE_BUILD="b<new>"`, `./golem restart`, and keep it only if
+`./golem eval --long 200000` passes; then bump `build` in the engine.ini. `"latest"` follows
+upstream ungated. `start-windows.ps1 -DryRun` installs what is missing and prints the server
+command line without starting anything.
+
+| Engine | Status | Notes |
+|---|---|---|
+| `llama.cpp` (b11379) | **default, adopted** | router mode, `/v1/messages`, MTP |
+| `ik_llama.cpp` (Thireus main-b5483) | **rejected** 2026-10-19 | 16.7-16.9 t/s decode vs llama.cpp 58.1 on the same model and flags (3.4x slower): its `--fit` fills to 12.0 GB (sysmem cliff) and the default split is worse; `-rtr` repack crashes at startup; `mlock` of the 17.7 GB buffer fails; no `/v1/messages`, no router, no idle unload |
+| `strata` (v0.1.45) | **rejected** 2026-10-19 | cannot serve 200K on 12 GB: its VRAM cost per context token is ~57 KB (measured: 32K→64K costs 1.80 GiB) against llama.cpp's ~12.7 KB q8 KV, so 200K needs ~11.5 GB for context alone and the engine reports "0 MiB free" at 236K. Where it runs (32768 ctx) it gives 49.8 t/s vs llama.cpp 58.5 at the same context. Also loads its own catalog model, not our presets |
+
+Engine gate, 2026-10-19, quiet desktop, all rows in `bench/results.jsonl`:
+
+| Engine | Model | ctx | decode best/median | prefill | VRAM |
+|---|---|---|---|---|---|
+| llama.cpp b11379 | Ornith-1.5-35B Q4_K_M | 236544 | 59.6 / 58.1 | 836 | 11.1 GB |
+| llama.cpp b11379 | Ornith-1.5-35B Q4_K_M | 32768 | 59.4 / 58.5 | 823 | 6.6 GB |
+| strata v0.1.45 | Qwen3.6-35B UD-Q4_K_XL | 32768 | 50.6 / 49.8 | 657 | 11.7 GB |
+| strata v0.1.45 | Qwen3.6-35B UD-Q4_K_XL | 236544 | impossible | – | – |
+| ik_llama.cpp main-b5483 | Ornith-1.5-35B Q4_K_M | 236544 | 18.8 / 16.7 | 479 | 12.0 GB |
+
+Keep the adapters: a future build of either engine is one `ENGINE_BUILD` change plus a
+paired bench, and the 200K eval, away from being reconsidered.
 
 ## The VRAM cliff
 
