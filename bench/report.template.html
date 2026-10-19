@@ -66,6 +66,8 @@ tr.suspect td { opacity: .45; }
 .dot.on { background: var(--pass); } .dot.off { background: var(--fail); }
 .state { font-size: 13px; color: var(--muted); margin-right: auto; }
 .state b { color: var(--ink); font-weight: 600; }
+input[type=text], input:not([type]) { font: inherit; font-size: 13px; color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; }
 pre.log { margin: 0; padding: 10px 14px; border-top: 1px solid var(--line); font: 11px/1.5 ui-monospace, Consolas, monospace;
   color: var(--muted); white-space: pre-wrap; max-height: 180px; overflow-y: auto; }
 h2[hidden] { display: none; }
@@ -94,12 +96,30 @@ h2[hidden] { display: none; }
       <button class="btn" data-run="restart">Restart</button>
       <button class="btn" data-run="bench">Bench</button>
       <button class="btn" data-run="eval">Eval 200K</button>
+      <button class="btn" data-run="tune" data-arg="c-alias">Tune this model</button>
       <label>default <select id="c-alias"></select><button class="btn" data-apply="c-alias">Set</button></label>
       <label>engine <select id="c-engine"></select><button class="btn" data-apply="c-engine">Set</button></label>
-      <label>pull <select id="c-pull"></select><button class="btn" data-apply="c-pull">Fetch</button></label>
     </div>
     <pre class="log" id="c-log" hidden></pre>
   </div>
+
+  <h2 id="models-h" hidden>Models</h2>
+  <div class="card" id="models" hidden><table id="m-table"></table></div>
+  <div class="card" id="addmodel" hidden>
+    <div class="ctl">
+      <label>name <input id="m-name" placeholder="my-coder" size="14"></label>
+      <label>HF repo <input id="m-repo" placeholder="owner/repo" size="26"></label>
+      <label>file <input id="m-file" placeholder="model-Q4_K_M.gguf" size="26"></label>
+      <label>ctx <input id="m-ctx" value="236544" size="7"></label>
+      <label>n-cpu-moe <input id="m-ncpu" value="36" size="4"></label>
+      <label><input type="checkbox" id="m-mtp" checked> MTP</label>
+      <button class="btn" id="m-add">Add preset</button>
+      <span class="state" id="m-msg"></span>
+    </div>
+  </div>
+
+  <h2 id="log-h" hidden>Engine log <span class="meta" id="log-file"></span></h2>
+  <div class="card" id="logcard" hidden><pre class="log" id="engine-log"></pre></div>
 
   <h2>Leaderboard — best decode per model × engine build</h2>
   <div class="card"><table id="board"></table></div>
@@ -258,6 +278,7 @@ async function pollLive() {
     }
   } catch (e) { live = false; }
   $("control").hidden = $("control-h").hidden = !live;
+  ["models-h", "models", "addmodel", "log-h", "logcard"].forEach((id) => { $(id).hidden = !live; });
   if (!live) {
     if (!STALE) { STALE = true; $("meta").textContent += " · snapshot (run report again, or golem web for live)"; }
     return;
@@ -271,22 +292,68 @@ async function pollLive() {
       (s.job_running ? ` · <b>${esc(s.job_action)}</b> running…` : "");
     fillOpts("c-alias", s.presets, s.alias);
     fillOpts("c-engine", s.engines, s.engine);
-    fillOpts("c-pull", s.presets, null);
     const log = $("c-log");
     log.hidden = !s.job_tail;
     if (s.job_tail) log.textContent = s.job_tail;
     document.querySelectorAll("#control .btn").forEach((b) => { b.disabled = !!s.job_running; });
-  } catch (e) { /* server gone: buttons stay */ }
+  } catch (e) { $("c-state").textContent = "state error: " + e; }
+  try {
+    const models = await (await fetch("api/models", { cache: "no-store" })).json();
+    $("m-table").innerHTML = `<thead><tr><th>preset</th><th class="num">file GB</th><th>state</th><th>ctx</th>
+      <th class="num">n-cpu-moe</th><th>MTP</th><th>source</th><th></th></tr></thead><tbody>` +
+      models.map((m) => `<tr>
+        <td>${m.Default ? "<b>" + esc(m.Name) + "</b>" : esc(m.Name)}</td>
+        <td class="num">${m.Gb ? fmt(m.Gb) : "–"}</td>
+        <td><span class="badge ${m.Present ? "PASS" : "none"}">${m.Present ? "on disk" : "missing"}</span></td>
+        <td>${m.Ctx || "–"}</td><td class="num">${m.NcMoe >= 0 ? m.NcMoe : "–"}</td>
+        <td>${m.Mtp ? "yes" : ""}</td>
+        <td class="flags">${esc(m.Repo ? m.Repo + " → " + m.File : m.File)}</td>
+        <td><button class="btn" data-fetch="${esc(m.Name)}">${m.Present ? "Set default" : "Fetch"}</button>
+            <button class="btn" data-tunep="${esc(m.Name)}">Tune</button></td></tr>`).join("") + "</tbody>";
+    $("m-table").querySelectorAll("[data-fetch]").forEach((b) => b.onclick = async () => {
+      const name = b.dataset.fetch, m = models.find((x) => x.Name === name);
+      b.disabled = true;
+      const body = m.Present ? `action=alias&arg=${encodeURIComponent(name)}` : `action=pull&arg=${encodeURIComponent(name)}`;
+      try { await fetch("api/run", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body }); }
+      catch (e) { alert("web server not running"); }
+      setTimeout(pollLive, 1500);
+    });
+    $("m-table").querySelectorAll("[data-tunep]").forEach((b) => b.onclick = async () => {
+      b.disabled = true;
+      try { await fetch("api/run", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: `action=tune&arg=${encodeURIComponent(b.dataset.tunep)}` }); }
+      catch (e) { alert("web server not running"); }
+      setTimeout(pollLive, 1500);
+    });
+  } catch (e) { /* older page state */ }
+  try {
+    const l = await (await fetch("api/logs", { cache: "no-store" })).json();
+    $("log-file").textContent = l.file ? "· " + l.file : "";
+    $("engine-log").textContent = l.text || "";
+  } catch (e) { /* no log */ }
 }
 document.querySelectorAll("#control .btn").forEach((b) => b.onclick = async () => {
   b.disabled = true;
   const apply = b.dataset.apply;
   let body = `action=${b.dataset.run || apply}`;
+  const argSel = b.dataset.arg ? $(b.dataset.arg).value : null;
   if (apply) body += `&arg=${encodeURIComponent($(apply).value)}`;
+  else if (argSel) body += `&arg=${encodeURIComponent(argSel)}`;
   try { await fetch("api/run", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body }); }
   catch (e) { alert("web server not running (golem web)"); }
   setTimeout(pollLive, 1500);
 });
+$("m-add").onclick = async () => {
+  const body = new URLSearchParams({
+    name: $("m-name").value, repo: $("m-repo").value, file: $("m-file").value,
+    ctx: $("m-ctx").value, ncpu: $("m-ncpu").value, mtp: $("m-mtp").checked ? "on" : "off",
+  }).toString();
+  $("m-msg").textContent = "…";
+  try {
+    const r = await (await fetch("api/addmodel", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body })).json();
+    $("m-msg").textContent = r.result === "added" ? "added — press Fetch to download it" : "check the fields (owner/repo, name.gguf, unique name)";
+  } catch (e) { $("m-msg").textContent = "web server not running"; }
+  setTimeout(pollLive, 1500);
+};
 pollLive();
 setInterval(pollLive, 15000);
 </script>

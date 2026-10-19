@@ -19,6 +19,7 @@
 #   eval [args...]    Quality gate: sanity, tool calls, needle (--long N)
 #   report [--no-open] Build bench/report.html from the recorded runs
 #   web [--port N]    Serve the benchmark page + controls on 127.0.0.1:8787
+#   tune [preset]     Best engine + flags for this model on this machine (no AI)
 #   claude [args...]  Launch Claude Code pointed at the local model
 #   env               Print the env exports for Claude Code
 #   help              This message
@@ -62,9 +63,12 @@ set +a
 LOCAL_AI_HOST="${LOCAL_AI_HOST:-127.0.0.1}"
 LOCAL_AI_PORT="${LOCAL_AI_PORT:-8000}"
 LOCAL_AI_API_KEY="${LOCAL_AI_API_KEY:-local-ai-key}"
-MODEL_ALIAS="${MODEL_ALIAS:-local-model}"
+MODEL_ALIAS="${GOLEM_MODEL_ALIAS:-${MODEL_ALIAS:-local-model}}"
 DEPLOY_MODE="${DEPLOY_MODE:-native}"
 GPU_BACKEND="${GPU_BACKEND:-auto}"
+# GOLEM_MODELS_PRESET overrides the preset file for one invocation (the
+# auto-tuner sweeps candidate files with it; .env is left untouched).
+MODELS_PRESET="${GOLEM_MODELS_PRESET:-${MODELS_PRESET:-}}"
 
 # ------------------------------------------------------------
 # Args: pull out --native / --docker anywhere in the line
@@ -372,6 +376,7 @@ case "${CMD}" in
     bench)    cmd_bench "$@" ;;
     report)   "${SCRIPTS}/report.sh" "$@" ;;
     web)      cmd_web "$@" ;;
+    tune)     "${SCRIPTS}/tune.sh" "$@" ;;
     eval)     cmd_eval "$@" ;;
     claude)   cmd_claude "$@" ;;
     env)      cmd_env ;;

@@ -35,8 +35,8 @@ for /f "usebackq tokens=1,* delims==" %%a in ("%ROOT%.env") do (
 )
 
 if "%~1"=="" goto menu
-for %%c in (start stop restart status logs report web) do if /i "%~1"=="%%c" (call :%%c & exit /b)
-echo Usage: golem.cmd [start^|stop^|restart^|status^|logs^|report^|web]
+for %%c in (start stop restart status logs report web tune) do if /i "%~1"=="%%c" (call :%%c & exit /b)
+echo Usage: golem.cmd [start^|stop^|restart^|status^|logs^|report^|web^|tune]
 exit /b 1
 
 :menu
@@ -49,11 +49,13 @@ echo   3  Restart
 echo   4  Status
 echo   5  Logs (new window)
 echo   6  Benchmark report (browser)
-echo   7  Web UI (live results + controls)
+echo   7  Web UI (console: results + controls + models)
+echo   8  Auto-tune the offload split
 echo   Q  Quit
 echo.
-choice /c 1234567Q /n /m "  > "
-if errorlevel 8 exit /b 0
+choice /c 12345678Q /n /m "  > "
+if errorlevel 9 exit /b 0
+if errorlevel 8 (call :tune & goto menu)
 if errorlevel 7 (call :web & goto menu)
 if errorlevel 6 (call :report & goto menu)
 if errorlevel 5 (call :logs & goto menu)
@@ -95,4 +97,7 @@ exit /b 0
 exit /b 0
 :web
 %PS% -File "%ROOT%scripts\web.ps1"
+exit /b 0
+:tune
+call "%ROOT%scripts\tune.cmd" %*
 exit /b 0

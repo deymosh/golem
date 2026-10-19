@@ -38,7 +38,8 @@ fi
 
 PORT="${LOCAL_AI_PORT:-8000}"
 API_KEY="${LOCAL_AI_API_KEY:-local-key}"
-MODEL_ALIAS="${MODEL_ALIAS:-local-model}"
+# GOLEM_MODEL_ALIAS overrides for one run (the auto-tuner sweeps presets with it).
+MODEL_ALIAS="${GOLEM_MODEL_ALIAS:-${MODEL_ALIAS:-local-model}}"
 
 RUNS=3
 PREFILL_TOKENS=30000
@@ -65,10 +66,12 @@ request() {
 }
 
 timing() {
-    # timing <field> < response -> numeric value from "timings"
+    # timing <field> < response -> numeric value from "timings", or empty.
     # " *" tolerates pretty-printed JSON (Strata writes `"key": 12.3`,
-    # llama.cpp writes `"key":12.3`).
-    grep -o "\"$1\": *[0-9.eE+-]*" | head -n1 | cut -d: -f2 | tr -d ' '
+    # llama.cpp writes `"key":12.3`). "|| true": a model without
+    # speculative decoding has no draft_n at all, and under pipefail that
+    # missing match would abort the whole bench.
+    { grep -o "\"$1\": *[0-9.eE+-]*" | head -n1 | cut -d: -f2 | tr -d ' '; } || true
 }
 
 echo

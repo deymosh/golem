@@ -5,45 +5,40 @@ top to bottom; commit after each step that passes its check.
 
 ## Status and next steps (update this block every session)
 
-As of 2026-10-19 (`experiment/token-machine`, last commit c0cadff):
+As of 2026-10-19 (`experiment/token-machine`):
 
-- **Phase 1 done** (db1f63b): `./golem bench|eval` append to `bench/results.jsonl`.
-  `golem.cmd` has no bench/eval commands, so nothing to record there.
+- **Phase 1 done** (db1f63b): `./golem bench|eval` append to `bench/results.jsonl`, now with
+  engine RAM (`ram_used_gib`) and a build fallback for engines whose `/props` omits it.
 - **Phase 4 done** (708a933): `./golem report` / `golem.cmd report` (menu 6) →
   `bench/report.html`, verified rendering in headless Edge.
-- **Phase 2 done for Windows** (c0cadff + strata follow-up): `engines/<name>/engine.ini`,
-  installs under `.local/engines/`, flag translation, `start-windows.ps1 -DryRun`.
-  ik_llama.cpp (Thireus main-b5483) and strata (v0.1.45) installed + dry-run verified,
-  **neither benched**. Strata: installs itself on first start (clone of the tag + its
-  headless setup; model files in `.local/engines/strata/data/`); server = its Python
-  `serve/server.py` (`/v1/messages` + OpenAI), `SLEEP_IDLE_SECONDS` → `--idle-unload`;
-  serves `qwen3.6-35b-a3b-ud-q4_k_xl` (its own UD-Q4_K_XL file, not our presets), accepts
-  any model name in requests. The launcher works around a Strata 0.1.45 bug (its pip CUDA
-  DLLs must be on PATH during setup).
-- **Phase 3 step 0 done** (a99df24): fit = 57.4 vs hand-tuned 59.4 t/s.
+- **Phase 2 done for Windows** (c0cadff, e70a53b): `engines/<name>/engine.ini`, installs
+  under `.local/engines/`, flag translation, `start-windows.ps1 -DryRun`.
+- **Engine gate DONE** (31e475a): llama.cpp keeps the default. Measured, paired, same
+  session: llama.cpp 58.1 t/s at 236544 ctx; strata 49.8 at 32768 and **cannot run 236544
+  at all**; ik_llama.cpp 16.7 at 236544. Both alternatives are `reject` rows in
+  `bench/results.jsonl` with the reasons; their adapters stay for a future build.
+- **Phase 3 done, verified on a small model** (a89eb41 + 5bed6d7): `./golem tune` probes,
+  seeds from `llama-fit-params`, sweeps, records every point, writes
+  `data/tuned/<host-slug>/<preset>.ini` + `data/tuned/models.effective.ini`, and can gate
+  the winner with the 200K eval. Verified end to end with `qwen2.5-0.5b-instruct`
+  (candidates restarted, measured, selected, effective preset served). **Not yet run on the
+  35B preset** — it needs ~15 quiet minutes.
+- **Console** (cd5a898): `./golem web` / `golem.cmd web` (menu 7) serves the results page
+  plus model management, controls, engine log and an add-model form; it stays up with no
+  engine running, which is the user's ask.
 
-Next, in order (items marked 🔬 load models — only when the user says testing is OK):
+Next, in order:
 
-1. 🔬 ik_llama.cpp gate: `ENGINE="ik_llama.cpp"` in `.env`, `./golem restart`, paired
-   `./golem bench` vs llama.cpp same session, then `./golem eval --long 200000` (eval uses
-   `/v1/chat/completions`, so it works without `/v1/messages`). Also try ik's
-   `--spec-autotune` (via `EXTRA_ARGS` won't apply in preset mode — add
-   `spec-autotune = true` to a temporary preset section). Record verdict in the table in
-   docs/windows-native.md.
-2. 🔬 Strata gate (adapter done, prepared and ready): `ENGINE="strata"` in `.env`,
-   `./golem up` (first start loads the model ~1.5-2 min; `/health` answers when ready),
-   then `RECORD_NOTE="strata v0.1.45 UD-Q4_K_XL" ./golem bench` and
-   `./golem eval --long 200000`, paired against llama.cpp in the same session (switch
-   ENGINE back, re-bench). Vendor claims 64 t/s decode on this exact GPU vs llama.cpp
-   41.1 — but their llama.cpp run had no MTP; ours does ~60. `--idle-unload 600` wired;
-   one request at a time (its own `--parallel` costs VRAM). If it wins: decide whether a
-   second model file (Ornith via `--gguf-dir`) is worth testing too.
-3. Adapters for the bash side (`scripts/start-local-ai.sh` native, `compose.yml` docker):
-   same engine.ini, Linux assets (`linux_*` keys) or source build recipe; docker image per
-   engine pinned by digest.
-4. Phase 3 tuner (`./golem tune`), 🔬 to validate.
-5. Housekeeping: delete `data/models/Ornith-1.5-35B-A3B-APEX-MTP-Compact.gguf` (rejected)
-   if the user agrees; old `.local/bin` (Linux native build) is untouched by the move.
+1. 🔬 `./golem tune ornith-1.5-35b` on a quiet machine (no game, no download): expect the
+   sweep to land near the hand-tuned `n-cpu-moe 36` (~58 t/s at 231K) and pass the gate.
+   Then decide whether to point `MODELS_PRESET` at `data/tuned/models.effective.ini`
+   permanently.
+2. 🔬 First-run experience on a clean machine: clone → `golem.cmd` → Start should end with a
+   tuned, running model. The pieces exist; nobody has walked the whole path on a fresh box.
+3. Engine search loop (Phase 5) when a new engine or build appears — the adapters make it a
+   paired bench plus the 200K eval.
+4. Housekeeping: delete `data/models/Ornith-1.5-35B-A3B-APEX-MTP-Compact.gguf` (rejected,
+   16 GB) and the two stale Qwen3.8 quants if the user agrees.
 
 Goal: one command gives the fastest *correct* local setup on a single consumer GPU, picking
 the engine, the model preset flags and the offload split automatically, on Windows (with or
@@ -192,12 +187,18 @@ Algorithm (analytic seed → short measured search, ~15-25 min budget):
 7. Launchers merge `data/tuned/...ini` over `config/models.ini` into a generated
    `data/tuned/models.effective.ini` and serve that (llama-server takes one preset file).
 
-**Engine selection** = run step 4's winner config per installed engine that passes the
-capability filter, pick the best eval-PASS result, write `ENGINE=` into the tuned overlay.
-`./golem tune --all-engines` does that; plain `tune` keeps the current engine.
+**Engine selection** (built): plain `./golem tune` sweeps *every* installed engine whose
+`engine.ini` says `tune = true` (llama.cpp, ik_llama.cpp) and picks engine + split together;
+`--engine NAME` is the quick single-engine path. Engines that cannot be swept are skipped with
+their reason from `engine.ini` (`tune_reason`), e.g. Strata, which serves its own catalog model
+and ignores preset flags. The winner is gated with the 200K eval; if it fails, the next-ranked
+candidate is tried, so a fast-but-wrong engine cannot win. `--adopt` writes `ENGINE=` and
+`MODELS_PRESET=` into `.env` (backup `.env.bak`).
 
 **Done when:** on the production box, `./golem tune ornith-1.5-35b` from a fresh overlay lands
-within 3% of the hand-tuned 59.5 t/s and passes eval, unattended.
+within 3% of the hand-tuned 59.5 t/s and passes eval, unattended. Verified on a 0.5B model
+(both engines swept, ranked, overlay + winner.txt + effective preset written); the 35B run
+still needs a quiet machine.
 
 ## Phase 4 — results page
 

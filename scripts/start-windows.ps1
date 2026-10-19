@@ -50,7 +50,7 @@ $BindHost  = if ($Cfg["LOCAL_AI_HOST"])     { $Cfg["LOCAL_AI_HOST"] }     else {
 $Port      = if ($Cfg["LOCAL_AI_PORT"])     { $Cfg["LOCAL_AI_PORT"] }     else { "8000" }
 $ApiKey    = if ($Cfg["LOCAL_AI_API_KEY"])  { $Cfg["LOCAL_AI_API_KEY"] }  else { "local-key" }
 $ModelFile = if ($Cfg["MODEL_FILE"])        { $Cfg["MODEL_FILE"] }        else { "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf" }
-$Alias     = if ($Cfg["MODEL_ALIAS"])       { $Cfg["MODEL_ALIAS"] }       else { "local-model" }
+$Alias     = if ($env:GOLEM_MODEL_ALIAS) { $env:GOLEM_MODEL_ALIAS } elseif ($Cfg["MODEL_ALIAS"]) { $Cfg["MODEL_ALIAS"] } else { "local-model" }
 $Ctx       = if ($Cfg["CONTEXT_SIZE"])      { $Cfg["CONTEXT_SIZE"] }      else { "32768" }
 $Threads   = if ($Cfg["CPU_THREADS"])       { $Cfg["CPU_THREADS"] }       else { "8" }
 $Parallel  = if ($Cfg["PARALLEL"])          { $Cfg["PARALLEL"] }          else { "1" }
@@ -64,7 +64,8 @@ $SpecType  = $Cfg["SPEC_TYPE"]
 $DraftFile = $Cfg["DRAFT_FILE"]
 $ExtraArgs = $Cfg["EXTRA_ARGS"]
 $SleepIdle = $Cfg["SLEEP_IDLE_SECONDS"]
-$Preset    = $Cfg["MODELS_PRESET"]
+# GOLEM_MODELS_PRESET overrides for one run (the auto-tuner sweeps with it).
+$Preset    = if ($env:GOLEM_MODELS_PRESET) { $env:GOLEM_MODELS_PRESET } else { $Cfg["MODELS_PRESET"] }
 
 # GPU vendor: auto = read it off the display adapters; GPU_BACKEND in .env
 # overrides for headless/remote/wrong-guess boxes.
@@ -103,7 +104,8 @@ if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyCon
 # downloaded once into .local\engines\<name>\<build>-<backend>)
 # ------------------------------------------------------------
 
-$EngineName = if ($Cfg["ENGINE"]) { $Cfg["ENGINE"] } else { "llama.cpp" }
+# GOLEM_ENGINE overrides for one run (the auto-tuner sweeps engines with it).
+$EngineName = if ($env:GOLEM_ENGINE) { $env:GOLEM_ENGINE } elseif ($Cfg["ENGINE"]) { $Cfg["ENGINE"] } else { "llama.cpp" }
 $EngineIni = Join-Path $Root "engines\$EngineName\engine.ini"
 if (-not (Test-Path $EngineIni)) { throw "Unknown ENGINE '$EngineName' (no $EngineIni)" }
 $Eng = @{}

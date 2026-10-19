@@ -85,27 +85,37 @@ ok "Available disk space: ${AVAILABLE_GB} GB"
 # ============================================================
 
 # hf_get <repo> <file>: fetch one GGUF into MODELS_DIR, resuming a
-# leftover .part from an interrupted run. Any real GGUF is at least
-# ~1 GB; a smaller file means a truncated download, not a model.
+# leftover .part from an interrupted run. Completeness is judged against
+# the size Hugging Face reports (x-linked-size), so small models are fine;
+# the 1 GB floor is only a fallback when the server does not say.
 hf_get() {
     local repo="$1" file="$2"
     local path="${MODELS_DIR}/${file}"
 
+    local auth=()
+    [[ -n "${HF_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer ${HF_TOKEN}")
+
+    local expected
+    expected="$(curl -sIL "${auth[@]+"${auth[@]}"}" \
+        "https://huggingface.co/${repo}/resolve/main/${file}" 2>/dev/null \
+        | tr -d '\r' | awk 'tolower($1) == "x-linked-size:" {print $2}' | tail -n1)"
+
+    local floor=1000000000
+    [[ -n "${expected}" ]] && floor=$(( expected - expected / 100 ))   # 1% slack
+
+    size_of() { stat -c '%s' "$1" 2>/dev/null || stat -f '%z' "$1"; }
+
     if [[ -f "${path}" ]]; then
-        local size
-        size="$(stat -c '%s' "${path}" 2>/dev/null || stat -f '%z' "${path}")"
-        if (( size > 1000000000 )); then
-            ok "${file} already present."
+        local size; size="$(size_of "${path}")"
+        if (( size >= floor )); then
+            ok "${file} already present ($(( size / 1048576 )) MB)."
             return 0
         fi
-        warn "${file} is smaller than 1 GB — partial download, retrying."
+        warn "${file} is incomplete ($(( size / 1048576 )) MB of $(( ${expected:-0} / 1048576 )) MB), retrying."
         rm -f "${path}"
     fi
 
-    info "Downloading ${file} from ${repo}..."
-
-    local auth=()
-    [[ -n "${HF_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer ${HF_TOKEN}")
+    info "Downloading ${file} from ${repo}${expected:+ ($(( expected / 1048576 )) MB)}..."
 
     # -L follows the CDN redirect; -C - resumes the .part if one is
     # lying around; --retry rides out flaky links.
@@ -113,15 +123,14 @@ hf_get() {
         -o "${path}.part" \
         "https://huggingface.co/${repo}/resolve/main/${file}"
 
-    local size
-    size="$(stat -c '%s' "${path}.part" 2>/dev/null || stat -f '%z' "${path}.part")"
-    if (( size < 1000000000 )); then
-        error "${file} downloaded but smaller than 1 GB — not a real model. Delete data/models/${file}.part and retry."
+    local size; size="$(size_of "${path}.part")"
+    if (( size < floor )); then
+        error "${file} came back incomplete ($(( size / 1048576 )) MB of $(( ${expected:-0} / 1048576 )) MB) — delete data/models/${file}.part and retry."
         exit 1
     fi
 
     mv -f "${path}.part" "${path}"
-    ok "${file} downloaded ($(( size / 1024 / 1024 / 1024 )) GB)."
+    ok "${file} downloaded ($(( size / 1048576 )) MB)."
 
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum "${path}" | tee "${path}.sha256"

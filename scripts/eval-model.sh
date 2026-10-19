@@ -32,7 +32,8 @@ fi
 HOST="${LOCAL_AI_HOST:-127.0.0.1}"
 PORT="${LOCAL_AI_PORT:-8000}"
 API_KEY="${LOCAL_AI_API_KEY:-local-key}"
-MODEL_ALIAS="${MODEL_ALIAS:-local-model}"
+# GOLEM_MODEL_ALIAS overrides for one run (the auto-tuner gates with it).
+MODEL_ALIAS="${GOLEM_MODEL_ALIAS:-${MODEL_ALIAS:-local-model}}"
 TEMPERATURE="${TEMPERATURE:-0.15}"
 TOP_P="${TOP_P:-0.95}"
 

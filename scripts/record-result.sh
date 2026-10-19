@@ -29,10 +29,19 @@ fi
 KIND="$1"
 OUT_FILE="$2"
 NOTE="${3:-}"
+# GOLEM_ENGINE overrides for one run (the auto-tuner sweeps engines with it;
+# .env would otherwise win, since it is sourced above).
+ENGINE="${GOLEM_ENGINE:-${ENGINE:-llama.cpp}}"
+# A file with no RESULT line is not a measurement (a failed or interrupted
+# run): recording it would put a null row in the database.
+if ! grep -q '^RESULT' "${OUT_FILE}" 2>/dev/null; then
+    echo "[WARN] no RESULT line in ${OUT_FILE} - nothing recorded"
+    exit 0
+fi
 PORT="${LOCAL_AI_PORT:-8000}"
 API_KEY="${LOCAL_AI_API_KEY:-local-key}"
 # RECORD_MODEL: record for another preset than MODEL_ALIAS (backfills).
-MODEL_ALIAS="${RECORD_MODEL:-${MODEL_ALIAS:-local-model}}"
+MODEL_ALIAS="${RECORD_MODEL:-${GOLEM_MODEL_ALIAS:-${MODEL_ALIAS:-local-model}}}"
 RESULTS="${ROOT_DIR}/bench/results.jsonl"
 
 json_str() {
@@ -61,9 +70,17 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     GPU="$(echo "${GPU}" | sed 's/^ *//; s/ *$//')"
     VRAM_TOTAL="${VRAM_TOTAL// /}"; VRAM_USED="${VRAM_USED// /}"
 fi
-RAM_GB="$(awk '/^MemTotal/ {printf "%.0f", $2/1048576}' /proc/meminfo 2>/dev/null || echo 0)"
-RAM_FREE_GB="$(awk '/^MemAvailable|^MemFree/ {v=$2} END {printf "%.1f", v/1048576}' /proc/meminfo 2>/dev/null || echo 0)"
-CPU="$(awk -F': ' '/^model name/ {print $2; exit}' /proc/cpuinfo 2>/dev/null || echo unknown)"
+# /proc/meminfo and /proc/cpuinfo are empty under some MSYS/Git Bash setups,
+# so fall back to Windows' own counters there (psutil-free, PS 5.1).
+# PowerShell formats numbers in the machine's locale (a comma decimal
+# separator here), which would break the JSON: force the C form.
+win_query() { powershell.exe -NoProfile -Command "$1" 2>/dev/null | tr -d '\r' | tr ',' '.'; }
+RAM_GB="$(awk '/^MemTotal/ {printf "%.0f", $2/1048576}' /proc/meminfo 2>/dev/null)"
+[[ -n "${RAM_GB}" ]] || RAM_GB="$(win_query '[math]::Round((Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize/1MB,0)')"
+RAM_FREE_GB="$(awk '/^MemAvailable|^MemFree/ {v=$2} END {printf "%.1f", v/1048576}' /proc/meminfo 2>/dev/null)"
+[[ -n "${RAM_FREE_GB}" ]] || RAM_FREE_GB="$(win_query '[math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory/1MB,1)')"
+CPU="$(awk -F': ' '/^model name/ {print $2; exit}' /proc/cpuinfo 2>/dev/null)"
+[[ -n "${CPU}" ]] || CPU="$(win_query '(Get-CimInstance Win32_Processor).Name' | head -n1)"
 
 slug() { tr '[:upper:]' '[:lower:]' | sed 's/(r)\|(tm)//g; s/nvidia\|geforce\|intel\|core\|amd\|radeon\|[0-9]*th gen\|processor//g; s/[^a-z0-9]\+/-/g; s/^-*//; s/-*$//'; }
 HOST_SLUG="$(echo "${GPU}" | slug)_$((VRAM_TOTAL / 1024))g_${RAM_GB}g_$(echo "${CPU}" | slug)"
@@ -133,7 +150,7 @@ if [[ -n "${SRV_PID}" ]]; then
                           Select-Object -ExpandProperty ProcessId)
             }
             [math]::Round(($all | ForEach-Object { (Get-Process -Id $_).WorkingSet64 } |
-                           Measure-Object -Sum).Sum / 1GB, 1)' 2>/dev/null | tr -d '\r')"
+                           Measure-Object -Sum).Sum / 1GB, 1)' 2>/dev/null | tr -d '\r' | tr ',' '.')"
     else
         rss_tree() { ps -o rss= -p "$1" 2>/dev/null; local c; for c in $(pgrep -P "$1" 2>/dev/null); do rss_tree "$c"; done; }
         RAM_USED_GIB="$(awk -v b="$(rss_tree "${SRV_PID}" | awk '{s+=$1} END{print s}')" 'BEGIN {printf "%.1f", b/1048576}')"

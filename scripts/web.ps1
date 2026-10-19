@@ -45,12 +45,71 @@ function Presets() {
 function Engines() {
     Get-ChildItem (Join-Path $Root "engines") -Directory | ForEach-Object { $_.Name }
 }
+
+# The console's model list: every preset with its file, size on disk, the
+# HF source from its "; Download:" comment and its main flags. Those
+# comments sit *above* the section they belong to (see config/models.ini),
+# so they are buffered and applied to the next section header; the first
+# one is the main model (a section can list a draft file after it).
+function Get-Models() {
+    $alias = Env-Get "MODEL_ALIAS"
+    $cur = $null; $out = @(); $pendingRepo = ""; $pendingFile = ""
+    foreach ($line in Get-Content (Join-Path $Root "config\models.ini")) {
+        if ($line -match '^\s*;\s*Download:\s*(\S+)\s*->\s*(\S+)') {
+            if (-not $pendingFile) { $pendingRepo = $Matches[1]; $pendingFile = $Matches[2] }
+            continue
+        }
+        if ($line -match '^\[([^\]]+)\]') {
+            if ($cur -and $cur.Name -ne "*") { $out += $cur }
+            $cur = [pscustomobject]@{ Name = $Matches[1]; File = $pendingFile; Repo = $pendingRepo
+                                      Ctx = 0; NcMoe = -1; Mtp = $false }
+            $pendingRepo = ""; $pendingFile = ""
+            continue
+        }
+        if (-not $cur -or $line -match '^\s*[;#]' -or $line -notmatch '=') { continue }
+        $k, $v = $line -split '=', 2; $k = $k.Trim(); $v = $v.Trim()
+        switch ($k) {
+            "model"       { $cur.File = $v }
+            "ctx-size"    { $cur.Ctx = [int]$v }
+            "n-cpu-moe"   { $cur.NcMoe = [int]$v }
+            "spec-type"   { $cur.Mtp = $true }
+        }
+    }
+    if ($cur -and $cur.Name -ne "*") { $out += $cur }
+    foreach ($m in $out) {
+        $path = Join-Path $Root "data\models\$($m.File)"
+        $m | Add-Member -NotePropertyName Present -NotePropertyValue (Test-Path $path)
+        $m | Add-Member -NotePropertyName Gb -NotePropertyValue $(if (Test-Path $path) { [math]::Round((Get-Item $path).Length / 1GB, 1) } else { 0 })
+        $m | Add-Member -NotePropertyName Default -NotePropertyValue ($m.Name -eq $alias)
+    }
+    $out
+}
+# JSON string escaping. Note .Replace is literal, not regex: newlines must be
+# replaced explicitly or the browser's JSON.parse rejects the payload
+# ("Bad control character in string literal").
+function Json-Str([string]$v) {
+    '"' + $v.Replace('\', '\\').Replace('"', '\"').Replace("`r`n", '\n').Replace("`n", '\n').Replace("`r", '\n') + '"'
+}
+function Json-Obj($o) {
+    $parts = @()
+    foreach ($p in $o.PSObject.Properties) {
+        $v = $p.Value
+        if ($v -is [bool]) { $v = if ($v) { "true" } else { "false" } }
+        elseif ($v -is [int] -or $v -is [double]) { $v = [string]$v }
+        else { $v = Json-Str ([string]$v) }
+        $parts += '"{0}":{1}' -f $p.Name, $v
+    }
+    "{" + ($parts -join ",") + "}"
+}
+function Json-List($items) { "[" + (($items | ForEach-Object { Json-Obj $_ }) -join ",") + "]" }
+
+# ---- helpers -----------------------------------------------------------
 function Json([hashtable]$h) {
     $p = $h.GetEnumerator() | Sort-Object Name | ForEach-Object {
         $v = $_.Value
         if ($v -is [bool]) { $v = if ($v) { "true" } else { "false" } }
         elseif ($v -is [array]) { $v = "[" + (($v | ForEach-Object { '"'+([string]$_).Replace('\','\\').Replace('"','\"')+'"' }) -join ",") + "]" }
-        elseif ($v -isnot [int] -and $v -isnot [double]) { $v = '"' + ([string]$v).Replace('\','\\').Replace('"','\"').Replace("`r?`n", "\n") + '"' }
+        elseif ($v -isnot [int] -and $v -isnot [double]) { $v = Json-Str ([string]$v) }
         '"{0}":{1}' -f $_.Name, $v
     }
     "{" + ($p -join ",") + "}"
@@ -80,6 +139,8 @@ function Start-Job2([string]$action, [string]$arg) {
             switch ($action) {
                 "bench" { $arglist = "-c `"export LC_ALL=C; cd '$Root' && ./golem bench$shDone`"" }
                 "eval"  { $arglist = "-c `"export LC_ALL=C; cd '$Root' && ./golem eval --long 200000$shDone`"" }
+                "tune"  { if ($arg -notmatch "^[A-Za-z0-9._-]+$") { return $false }
+                          $arglist = "-c `"export LC_ALL=C; cd '$Root' && ./golem tune $arg$shDone`"" }
                 "pull"  { if ($arg -notmatch "^[A-Za-z0-9._-]+$") { return $false }
                           $arglist = "-c `"export LC_ALL=C; cd '$Root' && ./golem pull $arg$shDone`"" }
                 default { return $false }
@@ -158,12 +219,57 @@ while ($true) {
             $tail = if ($script:Job.running -or (Test-Path $WebLog)) { (Job-Tail 14) -join "`n" } else { "" }
             Send $client.GetStream() "application/json" ($utf8.GetBytes((Json @{ up = ($up -eq "200"); vram = $vram; alias = $alias; engine = $engine; presets = @(Presets); engines = @(Engines); job_running = $script:Job.running; job_action = $script:Job.action; job_tail = $tail })))
         }
+        elseif ($req.method -eq "GET" -and $path -eq "/api/models") {
+            Send $client.GetStream() "application/json" ($utf8.GetBytes((Json-List (Get-Models))))
+        }
+        elseif ($req.method -eq "GET" -and $path -like "/api/logs*") {
+            # engine log tail: the file the running engine writes (llama.cpp
+            # via --log-file, Strata's own json "log" path), newest first
+            $candidates = @(
+                (Join-Path $Root "logs\llama-server-windows.log"),
+                (Join-Path $Root "logs\strata-server.err.log")
+            ) + @(Get-ChildItem (Join-Path $Root ".local\engines\strata") -Recurse -Filter "strata-*.log" -ErrorAction SilentlyContinue |
+                  Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName)
+            $file = $candidates | Where-Object { $_ -and (Test-Path $_) } |
+                    Sort-Object { (Get-Item $_).LastWriteTime } -Descending | Select-Object -First 1
+            $text = if ($file) { (Get-Content $file -Tail 60 -ErrorAction SilentlyContinue) -join "`n" } else { "no engine log yet" }
+            Send $client.GetStream() "application/json" ($utf8.GetBytes((Json @{ file = $(if ($file) { Split-Path $file -Leaf } else { "" }); text = $text })))
+        }
         elseif ($req.method -eq "POST" -and $path -eq "/api/run") {
             $form = @{}
             foreach ($kv in ($req.body -split "&")) { $k, $v = $kv -split "=", 2; $form[$k] = [URI]::UnescapeDataString(($v -replace "\+", " ")) }
             if ($form.action -eq "alias" -and $form.arg -and (Presets) -contains $form.arg) { Env-Set "MODEL_ALIAS" $form.arg; $ok = "applied" }
             elseif ($form.action -eq "engine" -and $form.arg -and (Engines) -contains $form.arg) { Env-Set "ENGINE" $form.arg; $ok = "applied" }
             else { $ok = if (Start-Job2 $form.action $form.arg) { "started" } else { "busy-or-unknown" } }
+            Send $client.GetStream() "application/json" ($utf8.GetBytes(('{"result":"' + $ok + '"}')))
+        }
+        elseif ($req.method -eq "POST" -and $path -eq "/api/addmodel") {
+            $form = @{}
+            foreach ($kv in ($req.body -split "&")) { $k, $v = $kv -split "=", 2; $form[$k] = [URI]::UnescapeDataString(($v -replace "\+", " ")) }
+            $name = "$($form.name)".Trim().ToLower() -replace '[^a-z0-9._-]', '-'
+            $repo = "$($form.repo)".Trim()
+            $file = "$($form.file)".Trim()
+            $ok = "bad-input"
+            if ($name -and $repo -match '^[\w.-]+/[\w.-]+$' -and $file -match '^[\w.-]+\.gguf$' -and (Presets) -notcontains $name) {
+                $ctx = if ("$($form.ctx)" -match '^\d+$') { [int]$form.ctx } else { 32768 }
+                $ncpu = if ("$($form.ncpu)" -match '^\d+$') { [int]$form.ncpu } else { 32 }
+                $presetFile = Join-Path $Root "config\models.ini"
+                Copy-Item $presetFile "$presetFile.bak" -Force
+                $block = @(
+                    "",
+                    "; Added from the web console $(Get-Date -Format 'yyyy-MM-dd')",
+                    "; Download: $repo -> $file",
+                    "[$name]",
+                    "model = $file",
+                    "ctx-size = $ctx",
+                    "load-mode = mlock",
+                    "n-cpu-moe = $ncpu"
+                )
+                if ($form.mtp -eq "on") { $block += "spec-type = draft-mtp" }
+                $block += @("batch-size = 2048", "ubatch-size = 2048", "temp = 0.6", "top-k = 20", "min-p = 0")
+                Add-Content $presetFile $block
+                $ok = "added"
+            }
             Send $client.GetStream() "application/json" ($utf8.GetBytes(('{"result":"' + $ok + '"}')))
         }
         else {

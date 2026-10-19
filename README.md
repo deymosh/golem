@@ -49,6 +49,8 @@ Dense models that fit entirely in VRAM are a one-line swap. See
 ./golem claude           # launch Claude Code pointed at the local model
 ./golem bench            # speed: decode + prefill tok/s
 ./golem eval --long 200000   # quality gate: tool calls + 200K needle
+./golem tune             # auto-tune the offload split for this machine
+./golem web              # console: results, models, start/stop/bench/eval/tune
 ./golem down             # stop everything
 ```
 
@@ -56,11 +58,27 @@ Dense models that fit entirely in VRAM are a one-line swap. See
 (model, keys, `DEPLOY_MODE`) — the defaults work as-is. `./golem pull` re-downloads /
 pre-fetches `MODEL_FILE` explicitly; `up` does it automatically when a file is missing.
 
+**Auto-tune** (`./golem tune [preset]`) answers "what is the best way to run this model on
+this machine?" with no AI and no hand-editing. It tries every installed engine that can serve
+the preset — sweeping the expert offload for each, seeding from llama.cpp's own placement tool
+— keeps the fastest engine + split that is not spilling VRAM into system memory, gates the
+winner with the 200K eval, and writes the verdict (engine, flags, every measured point) to
+`data/tuned/`. Re-run with `--adopt` to put the winner into `.env`; `--engine NAME` tunes one
+engine only, `--dry-run` prints the plan. It refuses to measure while a download, build or game
+is loading the machine, because the numbers would be meaningless.
+
+**Console** (`./golem web`, or `golem.cmd web`) serves a local page on `127.0.0.1:8787`
+that stays up whether or not an engine is running: live results from `bench/results.jsonl`,
+every preset with its file and state, start/stop/restart/bench/eval/tune buttons, the
+running engine's log, and a form to add a model from a Hugging Face repo. Nothing is
+exposed beyond localhost.
+
 On Windows (`windows` mode) `golem.cmd` does the same without Git Bash: double-click it (or a
-desktop shortcut to it) for a start / stop / restart / status / logs menu, or run
-`golem.cmd start|stop|restart|status|logs`. A fresh clone bootstraps itself from the menu's
-Start: `.env` is created, the pinned llama.cpp build and every missing model download before
-the server starts — no Git Bash, no Docker, no manual steps.
+desktop shortcut to it) for a start / stop / restart / status / logs / report / web / tune
+menu, or run `golem.cmd start|stop|restart|status|logs|report|web|tune`. A fresh clone
+bootstraps itself from the menu's Start: `.env` is created, the pinned llama.cpp build and
+every missing model download before the server starts — no Git Bash, no Docker, no manual
+steps.
 
 Three deploy modes (`DEPLOY_MODE` in `.env`, or `--docker` / `--native` / `--windows`):
 
@@ -82,6 +100,9 @@ Three deploy modes (`DEPLOY_MODE` in `.env`, or `--docker` / `--native` / `--win
 | `logs` | follow the inference logs |
 | `bench [--runs N] [--prefill TOKENS]` | speed: decode best/median + MTP acceptance, prefill on a ~30K prompt (curl + awk only) |
 | `eval [--long TOKENS]` | quality gate: arithmetic, tool calls, throughput, needle + decode at depth (python3; via WSL on Windows) |
+| `report [--no-open]` | build `bench/report.html` (self-contained) from the recorded runs |
+| `web [--port N]` | console on `127.0.0.1:8787`: live results, models, controls, engine log |
+| `tune [preset] [--adopt] [--engine NAME] [--dry-run]` | best engine + flags for this model on this machine |
 | `claude [args…]` | `exec claude` with `ANTHROPIC_*` already set |
 | `env` | print those exports |
 
