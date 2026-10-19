@@ -136,7 +136,8 @@ several models, each loaded on its first request and swapped out when a client a
 
 | `model` | Use | Footprint (RTX 3060 12 GB) |
 |---|---|---|
-| `qwen3.6-35b-a3b` | Coding (Claude Code, OpenCode) — the default above | 11.8 GB VRAM + ~20 GB RAM, 231K ctx, ~62 tok/s |
+| `ornith-1.5-35b` | Coding (Claude Code, OpenCode) — router default | 11.0 GB VRAM + ~20 GB RAM, 231K ctx, ~60 tok/s |
+| `qwen3.6-35b-a3b` | Coding — previous default, fallback | 11.8 GB VRAM + ~20 GB RAM, 231K ctx, ~60 tok/s |
 | `qwen3.5-9b` | Everyday: summaries, curl/shell one-liners, quick questions, tool calls | ~6.6 GB VRAM, 64K ctx, ~49 tok/s, thinking off |
 
 Set `MODEL_ALIAS` to the section clients should use by default. Add `SLEEP_IDLE_SECONDS` to

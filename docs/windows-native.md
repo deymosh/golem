@@ -62,8 +62,9 @@ Nothing to set up on a fresh clone: `golem.cmd` creates `.env` from `.env.exampl
 (flipped to `DEPLOY_MODE="windows"` — this launcher *is* windows mode), and the start
 script then downloads the pinned llama.cpp build **and every model file the config
 references but `data\models\` lacks** — `MODEL_FILE` / `DRAFT_FILE`, or in router mode
-each file listed in the preset's `; Download: <repo> -> <file>` comments (see
-[config/models.ini](../config/models.ini)). Downloads go straight to Hugging Face's
+the files listed in the `; Download: <repo> -> <file>` comments above the default
+section (`MODEL_ALIAS`; see [config/models.ini](../config/models.ini)). Other presets
+only print a warning when missing — fetch one with `./golem pull <preset>`. Downloads go straight to Hugging Face's
 resolve endpoint with `curl.exe` (resume across interrupted runs included); expect the
 default coder + draft to take a while (~22 GB). After that, `up` only fetches what's
 missing. The bash `./golem up` does the same on Linux, macOS, WSL and Git Bash via

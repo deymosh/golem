@@ -193,12 +193,26 @@ function Ensure-Model([string]$Repo, [string]$File) {
 }
 
 if ($Preset) {
-    # Router mode: the preset's "; Download: repo -> file" comments say
-    # where each model comes from.
+    # Router mode: "; Download: repo -> file" comments sit right above the
+    # [section] they belong to. Only the default section (MODEL_ALIAS)
+    # blocks the start; other presets load on request, so a missing file
+    # there is a warning, not a 20 GB download nobody asked for. When
+    # MODEL_ALIAS names no section, fetch everything (fresh preset).
+    $Entries = @(); $Pending = @()
     Get-Content $PresetPath | ForEach-Object {
         if ($_ -match '^\s*;\s*Download:\s*(\S+)\s*->\s*(\S+)') {
-            Ensure-Model $Matches[1] $Matches[2]
+            $Pending += ,@($Matches[1], $Matches[2])
+        } elseif ($_ -match '^\[([^\]]+)\]') {
+            $Section = $Matches[1]
+            foreach ($p in $Pending) { $Entries += [pscustomobject]@{ Section = $Section; Repo = $p[0]; File = $p[1] } }
+            $Pending = @()
         }
+    }
+    $All = -not ($Entries | Where-Object Section -eq $Alias)
+    foreach ($e in $Entries) {
+        if (Test-Path (Join-Path $ModelDir $e.File)) { continue }
+        if ($All -or $e.Section -eq $Alias) { Ensure-Model $e.Repo $e.File }
+        else { Write-Host "[WARN] preset [$($e.Section)] is missing $($e.File) - fetch it with: ./golem pull $($e.Section)" }
     }
 } else {
     Ensure-Model $ModelRepo $ModelFile
@@ -208,9 +222,11 @@ if ($Preset) {
 # A preset section without a "; Download:" comment would only fail at
 # request time (file not found) - catch it now, with the section named.
 if ($Preset) {
+    # Only files with no Download source at all are fatal; known-but-not-
+    # fetched presets were warned about above.
     $missing = Get-Content $PresetPath | ForEach-Object {
         if ($_ -match '^\s*(model|spec-draft-model)\s*=\s*(\S+)') { $Matches[2] }
-    } | Where-Object { -not (Test-Path (Join-Path $ModelDir $_)) }
+    } | Where-Object { -not (Test-Path (Join-Path $ModelDir $_)) -and -not ($Entries.File -contains $_) }
     if ($missing) { throw "Preset models without a `"; Download:`" source (add one per file in $Preset): $($missing -join ', ')" }
 }
 

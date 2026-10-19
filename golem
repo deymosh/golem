@@ -9,7 +9,7 @@
 # Commands:
 #   setup             Inspect the machine, install build deps, scaffold dirs
 #   install           Build llama.cpp with CUDA/ROCm     (native only)
-#   pull              Download the model from Hugging Face
+#   pull [preset]     Download the model (router: one preset section)
 #   up                Start the stack
 #   down              Stop the stack
 #   restart           down + up
@@ -157,7 +157,38 @@ cmd_install() {
 
 cmd_pull() {
     # The model lives on the host in either mode (mounted into the container).
+    # In router mode "pull <preset>" fetches that section's files instead.
+    if [[ -n "${1:-}" ]]; then
+        [[ -n "${MODELS_PRESET:-}" ]] || die "pull <preset> needs router mode (MODELS_PRESET in .env)"
+        local found=0 section repo file
+        while read -r section repo file; do
+            [[ "${section}" == "${1}" ]] || continue
+            found=1
+            [[ -f "${ROOT_DIR}/data/models/${file}" ]] || "${SCRIPTS}/download-model.sh" "${repo}" "${file}"
+        done < <(preset_downloads "${ROOT_DIR}/${MODELS_PRESET}")
+        [[ "${found}" == 1 ]] || die "no \"; Download:\" lines for preset [${1}] in ${MODELS_PRESET}"
+        return
+    fi
     "${SCRIPTS}/download-model.sh"
+}
+
+# "; Download: repo -> file" comments sit right above the [section] they
+# belong to. Prints "section repo file", one line per comment.
+preset_downloads() {
+    awk '
+        /^[[:space:]]*;[[:space:]]*Download:/ {
+            line = $0
+            sub(/^[[:space:]]*;[[:space:]]*Download:[[:space:]]*/, "", line)
+            split(line, f, /[[:space:]]*->[[:space:]]*/); split(f[2], g, /[[:space:]]+/)
+            if (f[1] != "" && g[1] != "") pending[++n] = f[1] " " g[1]
+            next
+        }
+        /^\[[^]]+\]/ {
+            s = $0; gsub(/^\[|\].*$/, "", s)
+            for (i = 1; i <= n; i++) print s, pending[i]
+            n = 0
+        }
+    ' "$1"
 }
 
 # First run has to just work: whatever model files the active config
@@ -171,14 +202,23 @@ ensure_models() {
     fi
     local models_dir="${ROOT_DIR}/data/models"
     if [[ -n "${MODELS_PRESET:-}" ]]; then
-        # Router mode: the preset's "; Download: repo -> file" comments
-        # say where each model comes from.
+        # Router mode: only the default section (MODEL_ALIAS) blocks the
+        # start; other presets load on request, so a missing file there is
+        # a warning, not a 20 GB download nobody asked for. When MODEL_ALIAS
+        # names no section, fetch everything (first run with a fresh preset).
         local preset_path="${ROOT_DIR}/${MODELS_PRESET}"
         [[ -f "${preset_path}" ]] || return 0   # start script errors clearly
-        sed -n 's/^[[:space:]]*;[[:space:]]*Download:[[:space:]]*\([^[:space:]]*\)[[:space:]]*->[[:space:]]*\([^[:space:]]*\).*/\1 \2/p' "${preset_path}" |
-        while read -r repo file; do
-            [[ -f "${models_dir}/${file}" ]] || "${SCRIPTS}/download-model.sh" "${repo}" "${file}"
-        done
+        local entries all=1 section repo file
+        entries="$(preset_downloads "${preset_path}")"
+        grep -q "^${MODEL_ALIAS} " <<<"${entries}" && all=0
+        while read -r section repo file; do
+            [[ -z "${file}" || -f "${models_dir}/${file}" ]] && continue
+            if [[ "${all}" == 1 || "${section}" == "${MODEL_ALIAS}" ]]; then
+                "${SCRIPTS}/download-model.sh" "${repo}" "${file}"
+            else
+                echo "[WARN] preset [${section}] is missing ${file} - fetch it with: ./golem pull ${section}"
+            fi
+        done <<<"${entries}"
     else
         if [[ -z "${MODEL_FILE:-}" || ! -f "${models_dir}/${MODEL_FILE}" ]] \
            || [[ -n "${DRAFT_FILE:-}" && ! -f "${models_dir}/${DRAFT_FILE}" ]]; then
@@ -291,7 +331,7 @@ cmd_help() {
 case "${CMD}" in
     setup)    cmd_setup ;;
     install)  cmd_install ;;
-    pull)     cmd_pull ;;
+    pull)     cmd_pull "$@" ;;
     up)       cmd_up ;;
     down)     cmd_down ;;
     restart)  cmd_restart ;;

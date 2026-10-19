@@ -24,6 +24,29 @@ Why a MoE of this class is the sensible default on a 12 GB VRAM / 32 GB RAM box:
 
 Measured numbers: [Benchmarks by setup](#benchmarks-by-setup) below.
 
+### Router default: Ornith-1.5-35B-A3B (Q4_K_M)
+
+In router mode (`MODELS_PRESET`) the coder is **Ornith-1.5-35B-A3B** —
+`ornith-ai/Ornith-1.5-35B-A3B-GGUF` / `Ornith-1.5-35B-Q4_K_M.gguf`, preset
+`[ornith-1.5-35b]`. Same `qwen35moe` architecture and footprint as Qwen3.6 (so the same
+tuning applies unchanged), MIT, continued pretraining + self-improvement RL; the vendor
+reports SWE-V 79 vs 73.4, SWE-Pro 59.6 vs 49.5, Terminal-Bench 67.8 vs 52.5. The GGUF
+embeds a trained MTP head (`blk.40.nextn.*`), so `draft-mtp` needs no separate draft file.
+
+Adoption gate, 2026-10-19, b11379 Windows native, quiet desktop, paired same session:
+
+| Preset | decode best / median | MTP accept | prefill 28.6K | VRAM | eval (tools + 211.8K needle) | decode @ 211.8K |
+|---|---|---|---|---|---|---|
+| `qwen3.6-35b-a3b` (baseline) | 59.8 / 59.1 t/s | 73% | 785 t/s | 11.8 GB | PASS (2026-10-03) | 30.4 t/s |
+| **`ornith-1.5-35b`** (official Q4_K_M, 21.7 GB) | **59.5 / 59.3 t/s** | 66% | **832 t/s** | **11.0 GB** | **PASS**, 626 t/s prefill | 30.6 t/s |
+| `ornith-1.5-35b-mtp` (mudler APEX-MTP-Compact, 17.4 GB) | 39.4 / 39.2 t/s | 32% | 1135 t/s | 11.0 GB | PASS, 735 t/s prefill | 21.3 t/s |
+
+Ornith matches Qwen3.6 on speed with 0.8 GB more VRAM headroom (further from the ~11.8 GB
+sysmem-fallback cliff) and better vendor coding scores → adopted. The APEX quant passes the
+gate but its bundled MTP head is weak (32% acceptance) and costs a third of decode; its
+only win is prefill (less of the model in RAM). Qwen3.6 stays in `config/models.ini` as
+the fallback and remains the single-model default below.
+
 ## How the scripts pick a model
 
 `scripts/download-model.sh` reads two variables from `.env`:
