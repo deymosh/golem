@@ -23,6 +23,9 @@ As of 2026-10-19 (`experiment/token-machine`):
   the winner with the 200K eval. Verified end to end with `qwen2.5-0.5b-instruct`
   (candidates restarted, measured, selected, effective preset served). **Not yet run on the
   35B preset** — it needs ~15 quiet minutes.
+- **Benchmark records** carry what the model is (`ctx`, `params_b`, `params_active_b`, `moe`,
+  `experts`, `n_layer`, `ctx_train`, from `scripts/gguf-info.sh`, header-only + cached) so a
+  number never travels without the thing it measured.
 - **Console** (cd5a898): `./golem web` / `golem.cmd web` (menu 7) serves the results page
   plus model management, controls, engine log and an add-model form; it stays up with no
   engine running, which is the user's ask.
@@ -242,7 +245,7 @@ Also watch llama.cpp RFC #24528 "MoE expert cache" (~60% gain reported) — re-b
 |---|---|---|---|---|---|---|
 | llama.cpp mainline | official CUDA zips | yes | yes | yes | yes | current; baseline |
 | ik_llama.cpp | no official zip; Thireus fork releases (unverified targets); Docker cu12 | qwen35moe yes, fused DeltaNet; **Unsloth UD/_XL GGUFs may crash** (official Q4_K_M ok) | no (unverified) | no | yes (Qwen3.5/3.6 PRs) | best CPU-expert prefill (2× reported); own auto-fit (`--fit` margin 1872 MB); IQK quants |
-| Strata 0.2.0-beta (engine 0.1.45.3) | installer | Qwen3.6-35B-A3B "Coder" size for 32 GB | yes | no (unverified) | yes | own C++ ggml-derived engine, VRAM expert cache; 0.1.45 claims +40% speed; `strata bench run`; port 8080. Install under `.local/engines/strata/` — no installer side effects |
+| Strata 0.2.0-beta (engine 0.1.45.3) | **standalone tarballs** (`strata-engine-0.1.45.3-windows-x86_64-cuda-cuda13.tar.gz` 553 MB + `strata-control-…zip` 69 MB), so it installs headlessly under `.local/engines/strata/` — the .exe files are the app, not the only option | Qwen3.6-35B-A3B "Coder" size for 32 GB | yes | no (unverified) | yes | own C++ ggml-derived engine, VRAM expert cache; 0.2.0 claims +10.2% decode on an RTX 3060 12 GB (60.36 → 66.52 t/s, 8/8 pairs) from per-architecture defaults; `strata bench run`; port 8080. **The engine is still 0.1.45.x, so the 200K blocker stands** — see the rejected row in `bench/results.jsonl` |
 | ExLlamaV3 / TabbyAPI | Python | needs EXL3 conversion; qwen35moe/DeltaNet support unverified | no | n/a | ? | MoE CPU offload since 1.4.9; only if arch supported |
 | croco.cpp (koboldcpp fork) | CI artifacts | IQK quants | no | no | ? | hobby fork, low priority |
 | vLLM, SGLang, KTransformers, MLC, mistral.rs, Lemonade, Ollama, LM Studio, llamafile | mostly no / wrappers | — | mostly no | — | — | skip: no single-GPU expert offload, Linux-only, or wrap llama.cpp |

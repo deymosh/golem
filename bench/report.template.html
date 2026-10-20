@@ -49,6 +49,9 @@ tr.suspect td { opacity: .45; }
 .best { font-weight: 700; color: var(--accent); }
 .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
 .flags { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+tr.classrow td { background: var(--bg); color: var(--muted); font-size: 11px; letter-spacing: .08em;
+  text-transform: uppercase; padding-top: 14px; border-bottom: 1px solid var(--line); }
+.chart-note { color: var(--muted); font-size: 12px; padding: 0 14px 10px; }
 .note { color: var(--muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
 .chart { padding: 10px 6px 4px; }
 .chart svg { width: 100%; height: auto; display: block; }
@@ -71,6 +74,10 @@ input[type=text], input:not([type]) { font: inherit; font-size: 13px; color: var
 pre.log { margin: 0; padding: 10px 14px; border-top: 1px solid var(--line); font: 11px/1.5 ui-monospace, Consolas, monospace;
   color: var(--muted); white-space: pre-wrap; max-height: 180px; overflow-y: auto; }
 h2[hidden] { display: none; }
+#tip { position: fixed; z-index: 40; max-width: 420px; padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--panel); color: var(--ink); font-size: 12px; line-height: 1.5;
+  box-shadow: 0 6px 20px rgba(0,0,0,.18); pointer-events: none; }
+#tip i { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -84,6 +91,7 @@ h2[hidden] { display: none; }
     <label>host <select id="f-host"></select></label>
     <label>engine <select id="f-engine"></select></label>
     <label>model <select id="f-model"></select></label>
+    <label>size class <select id="f-class"></select></label>
     <label><input type="checkbox" id="f-quiet" checked> quiet runs only</label>
   </div>
 
@@ -124,8 +132,17 @@ h2[hidden] { display: none; }
   <h2>Leaderboard — best decode per model × engine build</h2>
   <div class="card"><table id="board"></table></div>
 
-  <h2>Decode vs prefill (every bench run)</h2>
-  <div class="card chart"><div id="scatter"></div><div class="legend" id="legend"></div></div>
+  <h2>Decode vs prefill (every bench run) <span class="meta" id="chart-class"></span></h2>
+  <div class="card chart">
+    <div class="ctl" style="padding:10px 14px 0">
+      <label>show <select id="f-class-chart"></select></label>
+    </div>
+    <div id="scatter"></div><div class="legend" id="legend"></div>
+    <div class="chart-note">Points of different model sizes are not comparable: a 0.5B at 269 t/s
+      says nothing about a 35B at 59. Pick a size class here, or use the leaderboard's
+      "t/s per active B" column for a cross-size ratio.</div>
+  </div>
+  <div id="tip" hidden></div>
 
   <h2>All runs</h2>
   <div class="card"><table id="runs"></table></div>
@@ -145,6 +162,42 @@ const decode = (r) => r.kind === "bench" ? r.decode_median : null;
 const KEY_FLAGS = ["n-cpu-moe", "fit", "fit-target", "ubatch-size", "spec-type", "ctx-size", "cache-type-k"];
 const flagStr = (f) => KEY_FLAGS.filter((k) => f && f[k] != null).map((k) => `${k.replace("cache-type-", "kv-")}=${f[k]}`).join(" ");
 
+// "35.51B / 3.52B active · MoE 256x8" — what the model actually is, read
+// from its GGUF header by scripts/gguf-info.sh at record time.
+const paramsCell = (r) => {
+  if (r.params_b == null) return "–";
+  let s = `${fmt(r.params_b, 1)}B`;
+  if (r.moe && r.params_active_b != null) s += ` / ${fmt(r.params_active_b, 1)}B active`;
+  if (r.experts) s += ` · ${esc(r.experts)}`;
+  return s;
+};
+
+// Comparing tok/s across model sizes is not a comparison: a 0.5B at 269 t/s
+// says nothing about a 35B at 59. So the leaderboard ranks inside size
+// classes, and the cross-size column is an explicit ratio - decode per
+// billion *active* parameters (what the GPU actually has to push per token).
+const CLASSES = ["≤2B active", "2–8B active", "8–20B active", "20B+ active", "unknown size"];
+const classOf = (r) => {
+  const p = r.params_active_b ?? r.params_b;
+  if (p == null) return CLASSES[4];
+  if (p < 2) return CLASSES[0];
+  if (p < 8) return CLASSES[1];
+  if (p < 20) return CLASSES[2];
+  return CLASSES[3];
+};
+const efficiency = (r) => {
+  const p = r.params_active_b ?? r.params_b;
+  return p && r.decode_median ? r.decode_median / p : null;
+};
+const modelLine = (r) => {
+  const bits = [];
+  if (r.params_b != null) bits.push(`${fmt(r.params_b, 1)}B params` + (r.moe && r.params_active_b != null ? ` (${fmt(r.params_active_b, 1)}B active)` : ""));
+  if (r.moe) bits.push(`MoE${r.experts ? " " + r.experts : ""}`);
+  if (r.n_layer) bits.push(`${r.n_layer} layers`);
+  if (r.ctx) bits.push(`served ctx ${(r.ctx / 1024).toFixed(0)}K` + (r.ctx_train && r.ctx_train != r.ctx ? ` (native ${(r.ctx_train / 1024).toFixed(0)}K)` : ""));
+  return bits.join(" · ");
+};
+
 const models = [...new Set(ROWS.map((r) => r.model))].sort();
 const colorOf = (m) => `var(--s${(models.indexOf(m) % 6) + 1})`;
 
@@ -155,6 +208,8 @@ function fillSelect(id, values) {
 fillSelect("f-host", [...new Set(ROWS.map((r) => r.host))].sort());
 fillSelect("f-engine", [...new Set(ROWS.map((r) => r.engine))].sort());
 fillSelect("f-model", models);
+fillSelect("f-class", CLASSES);
+fillSelect("f-class-chart", CLASSES);
 // Default to the most common host: numbers only compare on the same box.
 const hostCount = {};
 ROWS.forEach((r) => { hostCount[r.host] = (hostCount[r.host] || 0) + 1; });
@@ -163,7 +218,9 @@ if (topHost) $("f-host").value = topHost;
 
 function filtered() {
   const h = $("f-host").value, e = $("f-engine").value, m = $("f-model").value, q = $("f-quiet").checked;
-  return ROWS.filter((r) => (!h || r.host === h) && (!e || r.engine === e) && (!m || r.model === m) && (!q || r.quiet !== false));
+  const c = $("f-class").value;
+  return ROWS.filter((r) => (!h || r.host === h) && (!e || r.engine === e) && (!m || r.model === m)
+    && (!q || r.quiet !== false) && (!c || classOf(r) === c));
 }
 
 function renderBoard(rows) {
@@ -176,18 +233,35 @@ function renderBoard(rows) {
     const best = g.bench.reduce((a, b) => ((b.decode_median ?? 0) > (a.decode_median ?? 0) ? b : a));
     const ev = g.eval.sort((a, b) => (a.ts < b.ts ? 1 : -1))[0];
     return { best, ev };
-  }).sort((a, b) => (b.best.decode_median ?? 0) - (a.best.decode_median ?? 0));
+  }).sort((a, b) => {
+    // Size class first: the numbers only compare inside one class.
+    const ca = CLASSES.indexOf(classOf(a.best)), cb = CLASSES.indexOf(classOf(b.best));
+    return ca - cb || (b.best.decode_median ?? 0) - (a.best.decode_median ?? 0);
+  });
   if (!lines.length) { $("board").innerHTML = `<tr><td class="empty">No bench runs match the filters.</td></tr>`; return; }
-  const top = lines[0].best.decode_median;
-  $("board").innerHTML = `<thead><tr><th>model</th><th>engine</th><th class="num">decode med</th><th class="num">best</th>
-    <th class="num">MTP acc.</th><th class="num">prefill</th><th class="num">VRAM GB</th><th class="num">RAM GB</th><th>200K needle</th><th class="num">decode @depth</th><th>date</th><th>flags</th></tr></thead><tbody>` +
+  // "best" is highlighted per class, not across the whole table.
+  const bestByClass = {};
+  lines.forEach(({ best: r }) => {
+    const c = classOf(r);
+    if (!(c in bestByClass) || (r.decode_median ?? 0) > bestByClass[c]) bestByClass[c] = r.decode_median;
+  });
+  let lastClass = null;
+  $("board").innerHTML = `<thead><tr><th>model</th><th>class</th><th>engine</th><th>params</th><th class="num">ctx</th><th class="num">decode med</th><th class="num">best</th>
+    <th class="num">MTP acc.</th><th class="num">prefill</th><th class="num">t/s per active B</th><th class="num">VRAM GB</th><th class="num">RAM GB</th><th>200K needle</th><th class="num">decode @depth</th><th>date</th><th>flags</th></tr></thead><tbody>` +
     lines.map(({ best: r, ev }) => {
       const needle = ev?.eval?.needle;
-      return `<tr><td><span class="swatch" style="background:${colorOf(r.model)}"></span>${esc(r.model)}</td>
+      const cls = classOf(r);
+      const head = cls !== lastClass ? `<tr><td colspan="16" class="classrow">${esc(cls)}</td></tr>` : "";
+      lastClass = cls;
+      return head + `<tr><td><span class="swatch" style="background:${colorOf(r.model)}"></span>${esc(r.model)}</td>
+        <td class="flags">${esc(cls)}</td>
         <td>${esc(r.engine)} <span class="flags">${esc(r.engine_build)}</span></td>
-        <td class="num ${r.decode_median === top ? "best" : ""}">${fmt(r.decode_median)}</td><td class="num">${fmt(r.decode_best)}</td>
+        <td>${paramsCell(r)}</td>
+        <td class="num">${r.ctx ? (r.ctx / 1024).toFixed(0) + "K" : "–"}</td>
+        <td class="num ${r.decode_median === bestByClass[cls] ? "best" : ""}">${fmt(r.decode_median)}</td><td class="num">${fmt(r.decode_best)}</td>
         <td class="num">${r.draft_accept == null ? "–" : Math.round(r.draft_accept * 100) + "%"}</td>
-        <td class="num">${fmt(r.prefill, 0)}</td><td class="num">${r.vram_mib ? fmt(r.vram_mib / 1024) : "–"}</td>
+        <td class="num">${fmt(r.prefill, 0)}</td><td class="num">${fmt(efficiency(r), 1)}</td>
+        <td class="num">${r.vram_mib ? fmt(r.vram_mib / 1024) : "–"}</td>
         <td class="num">${r.ram_used_gib != null ? fmt(r.ram_used_gib) : "–"}</td>
         <td>${needle ? `<span class="badge ${needle}">${needle}</span>` : `<span class="badge none">not run</span>`}${ev?.eval?.tools === "FAIL" ? ` <span class="badge FAIL">tools</span>` : ""}</td>
         <td class="num">${fmt(ev?.eval?.depth_decode)}</td><td>${day(r.ts)}</td><td class="flags">${esc(flagStr(r.flags))}</td></tr>`;
@@ -195,7 +269,10 @@ function renderBoard(rows) {
 }
 
 function renderScatter(rows) {
-  const pts = rows.filter((r) => r.kind === "bench" && r.decode_median && r.prefill);
+  const active = $("f-class-chart").value;
+  $("chart-class").textContent = active ? "· " + active : "· all sizes (not comparable across them)";
+  const pts = rows.filter((r) => r.kind === "bench" && r.decode_median && r.prefill
+    && (!active || classOf(r) === active));
   if (!pts.length) { $("scatter").innerHTML = `<div class="empty">No bench runs with both decode and prefill.</div>`; $("legend").innerHTML = ""; return; }
   const W = 900, H = 320, L = 48, R = 16, T = 12, B = 34;
   const xs = pts.map((p) => p.prefill), ys = pts.map((p) => p.decode_median);
@@ -209,11 +286,48 @@ function renderScatter(rows) {
   svg += `<text x="${(L + W - R) / 2}" y="${H - 4}" text-anchor="middle">prefill tok/s (~28.6K-token prompt)</text>`;
   svg += `<text x="12" y="${(T + H - B) / 2}" text-anchor="middle" transform="rotate(-90 12 ${(T + H - B) / 2})">decode tok/s (median)</text>`;
   pts.forEach((p) => {
-    svg += `<circle cx="${X(p.prefill)}" cy="${Y(p.decode_median)}" r="6" fill="${colorOf(p.model)}" fill-opacity=".8" stroke="var(--panel)" stroke-width="1.5">
-      <title>${esc(p.model)} · ${esc(p.engine)} ${esc(p.engine_build)}\n${fmt(p.decode_median)} t/s decode · ${fmt(p.prefill, 0)} t/s prefill\n${esc(flagStr(p.flags))}\n${day(p.ts)} ${esc(p.note || "")}</title></circle>`;
+    svg += `<circle cx="${X(p.prefill)}" cy="${Y(p.decode_median)}" r="6" fill="${colorOf(p.model)}" fill-opacity=".8"
+      stroke="var(--panel)" stroke-width="1.5" data-i="${pts.indexOf(p)}" class="pt">
+      <title>${esc(p.model)}</title></circle>`;
   });
   $("scatter").innerHTML = svg + "</svg>";
   $("legend").innerHTML = [...new Set(pts.map((p) => p.model))].map((m) => `<span><span class="swatch" style="background:${colorOf(m)}"></span>${esc(m)}</span>`).join("");
+  wireTip(pts);
+}
+
+// Hovering a point shows what it was: the model and what it is made of, the
+// engine and build, the context and flags it ran with, and every number.
+function wireTip(pts) {
+  const tip = $("tip");
+  document.querySelectorAll("#scatter .pt").forEach((c) => {
+    c.onmouseenter = (e) => {
+      const p = pts[+c.dataset.i];
+      tip.innerHTML =
+        `<b>${esc(p.model)}</b> <span class="flags">${esc(p.model_file || "")}</span><br>` +
+        `${esc(modelLine(p))}<br>` +
+        `${esc(p.engine)} <span class="flags">${esc(p.engine_build)}</span> · ${esc(day(p.ts))}<br>` +
+        `<b>${fmt(p.decode_median)}</b> t/s decode (best ${fmt(p.decode_best)})` +
+        (p.draft_accept != null ? ` · MTP ${Math.round(p.draft_accept * 100)}%` : "") + `<br>` +
+        `${fmt(p.prefill, 0)} t/s prefill · VRAM ${p.vram_mib ? fmt(p.vram_mib / 1024) : "–"} GB` +
+        (p.ram_used_gib != null ? ` · RAM ${fmt(p.ram_used_gib)} GB` : "") + `<br>` +
+        `<span class="flags">${esc(flagStr(p.flags))}</span>` +
+        (p.note ? `<br><i>${esc(p.note)}</i>` : "");
+      tip.hidden = false;
+      moveTip(e);
+    };
+    c.onmousemove = moveTip;
+    c.onmouseleave = () => { tip.hidden = true; };
+  });
+}
+function moveTip(e) {
+  const tip = $("tip");
+  const pad = 14;
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = e.clientX + pad, y = e.clientY + pad;
+  if (x + w > window.innerWidth - 8) x = e.clientX - w - pad;
+  if (y + h > window.innerHeight - 8) y = e.clientY - h - pad;
+  tip.style.left = x + "px";
+  tip.style.top = y + "px";
 }
 
 let sortKey = "ts", sortDir = -1;
@@ -222,6 +336,8 @@ const COLS = [
   ["kind", "kind", (r) => r.kind],
   ["model", "model", (r) => `<span class="swatch" style="background:${colorOf(r.model)}"></span>${esc(r.model)}`],
   ["engine_build", "build", (r) => esc(`${r.engine} ${r.engine_build}`)],
+  ["model_stats", "params", (r) => paramsCell(r), false],
+  ["ctx", "ctx", (r) => (r.ctx ? (r.ctx / 1024).toFixed(0) + "K" : "–"), true],
   ["decode", "decode", (r) => fmt(r.kind === "eval" ? r.eval?.decode_best : r.decode_median), true],
   ["prefill", "prefill", (r) => fmt(r.kind === "eval" ? r.eval?.needle_prefill : r.prefill, 0), true],
   ["vram_mib", "VRAM GB", (r) => (r.vram_mib ? fmt(r.vram_mib / 1024) : "–"), true],
@@ -232,7 +348,7 @@ const COLS = [
 ];
 const sortVal = (r, k) => k === "decode" ? (r.kind === "eval" ? r.eval?.decode_best : r.decode_median) ?? -1
   : k === "prefill" ? (r.kind === "eval" ? r.eval?.needle_prefill : r.prefill) ?? -1
-  : k === "flags" ? flagStr(r.flags) : k === "result" ? r.eval?.needle || "" : r[k] ?? "";
+  : k === "flags" ? flagStr(r.flags) : k === "model_stats" ? (r.params_b ?? -1) : k === "result" ? r.eval?.needle || "" : r[k] ?? "";
 
 function renderRuns(rows) {
   const sorted = rows.slice().sort((a, b) => { const x = sortVal(a, sortKey), y = sortVal(b, sortKey); return (x > y ? 1 : x < y ? -1 : 0) * sortDir; });
@@ -248,7 +364,7 @@ function render() {
   $("meta").textContent = `${ROWS.length} runs recorded · ${rows.length} shown · last ${last ? last.replace("T", " ").slice(0, 16) + " UTC" : "–"}`;
   renderBoard(rows); renderScatter(rows); renderRuns(rows);
 }
-["f-host", "f-engine", "f-model", "f-quiet"].forEach((id) => $(id).addEventListener("change", render));
+["f-host", "f-engine", "f-model", "f-class", "f-class-chart", "f-quiet"].forEach((id) => $(id).addEventListener("change", render));
 render();
 
 // ------------------------------------------------------------
@@ -299,17 +415,20 @@ async function pollLive() {
   } catch (e) { $("c-state").textContent = "state error: " + e; }
   try {
     const models = await (await fetch("api/models", { cache: "no-store" })).json();
-    $("m-table").innerHTML = `<thead><tr><th>preset</th><th class="num">file GB</th><th>state</th><th>ctx</th>
+    $("m-table").innerHTML = `<thead><tr><th>preset</th><th>params</th><th class="num">file GB</th><th>state</th><th>ctx</th>
       <th class="num">n-cpu-moe</th><th>MTP</th><th>source</th><th></th></tr></thead><tbody>` +
       models.map((m) => `<tr>
         <td>${m.Default ? "<b>" + esc(m.Name) + "</b>" : esc(m.Name)}</td>
+        <td>${m.ParamsB ? fmt(m.ParamsB, 1) + "B" + (m.Moe && m.ParamsActiveB ? " / " + fmt(m.ParamsActiveB, 1) + "B active" : "") + (m.Experts ? " · " + esc(m.Experts) : "") : "–"}</td>
         <td class="num">${m.Gb ? fmt(m.Gb) : "–"}</td>
         <td><span class="badge ${m.Present ? "PASS" : "none"}">${m.Present ? "on disk" : "missing"}</span></td>
         <td>${m.Ctx || "–"}</td><td class="num">${m.NcMoe >= 0 ? m.NcMoe : "–"}</td>
         <td>${m.Mtp ? "yes" : ""}</td>
         <td class="flags">${esc(m.Repo ? m.Repo + " → " + m.File : m.File)}</td>
         <td><button class="btn" data-fetch="${esc(m.Name)}">${m.Present ? "Set default" : "Fetch"}</button>
-            <button class="btn" data-tunep="${esc(m.Name)}">Tune</button></td></tr>`).join("") + "</tbody>";
+            <button class="btn" data-tunep="${esc(m.Name)}">Tune</button>
+            ${m.Present ? `<button class="btn warn" data-delmodel="${esc(m.Name)}" title="delete the model file from disk">Delete file</button>` : ""}
+            ${m.Default ? "" : `<button class="btn warn" data-delpreset="${esc(m.Name)}" title="remove this preset from config/models.ini">Remove</button>`}</td></tr>`).join("") + "</tbody>";
     $("m-table").querySelectorAll("[data-fetch]").forEach((b) => b.onclick = async () => {
       const name = b.dataset.fetch, m = models.find((x) => x.Name === name);
       b.disabled = true;
@@ -323,6 +442,24 @@ async function pollLive() {
       try { await fetch("api/run", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: `action=tune&arg=${encodeURIComponent(b.dataset.tunep)}` }); }
       catch (e) { alert("web server not running"); }
       setTimeout(pollLive, 1500);
+    });
+    // Deleting asks first: the model file is re-downloadable, the preset is
+    // in config/models.ini (a .bak is kept next to it).
+    $("m-table").querySelectorAll("[data-delmodel]").forEach((b) => b.onclick = async () => {
+      const name = b.dataset.delmodel;
+      if (!confirm(`Delete ${name}'s model file from disk?\n\nIt can be fetched again later.`)) return;
+      b.disabled = true;
+      try { await fetch("api/delmodel", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: `arg=${encodeURIComponent(name)}` }); }
+      catch (e) { alert("web server not running"); }
+      setTimeout(pollLive, 1200);
+    });
+    $("m-table").querySelectorAll("[data-delpreset]").forEach((b) => b.onclick = async () => {
+      const name = b.dataset.delpreset;
+      if (!confirm(`Remove the preset "${name}" from config/models.ini?\n\nThe model file stays on disk.`)) return;
+      b.disabled = true;
+      try { await fetch("api/delpreset", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: `arg=${encodeURIComponent(name)}` }); }
+      catch (e) { alert("web server not running"); }
+      setTimeout(pollLive, 1200);
     });
   } catch (e) { /* older page state */ }
   try {

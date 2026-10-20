@@ -17,8 +17,9 @@
 #   logs              Follow the inference logs
 #   bench [args...]   Speed benchmark: decode + prefill tok/s
 #   eval [args...]    Quality gate: sanity, tool calls, needle (--long N)
-#   report [--no-open] Build bench/report.html from the recorded runs
+#   report [--no-open|--md]  Static page for sharing, or bench/RESULTS.md for GitHub
 #   web [--port N]    Serve the benchmark page + controls on 127.0.0.1:8787
+#   tui               Full-screen console: status, actions, recent runs, log
 #   tune [preset]     Best engine + flags for this model on this machine (no AI)
 #   claude [args...]  Launch Claude Code pointed at the local model
 #   env               Print the env exports for Claude Code
@@ -74,8 +75,13 @@ MODELS_PRESET="${GOLEM_MODELS_PRESET:-${MODELS_PRESET:-}}"
 # Args: pull out --native / --docker anywhere in the line
 # ------------------------------------------------------------
 
-CMD="${1:-help}"
-shift || true
+# No arguments means the TUI when someone is looking at a terminal, and the
+# help text when a script (or a pipe) runs it.
+if [[ $# -eq 0 ]]; then
+    if [[ -t 0 && -t 1 ]]; then CMD="tui"; else CMD="help"; fi
+else
+    CMD="$1"; shift
+fi
 
 ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -234,6 +240,13 @@ ensure_models() {
 }
 
 cmd_up() {
+    # Engine adapters (engines/<name>/engine.ini) are implemented for windows
+    # mode. Docker runs the pinned llama.cpp image and native builds llama.cpp
+    # from source, so any other engine here would be silently ignored - say so
+    # instead of serving something the user did not ask for.
+    if [[ "${ENGINE:-llama.cpp}" != "llama.cpp" && "${DEPLOY_MODE}" != "windows" ]]; then
+        die "ENGINE=${ENGINE} is only implemented in windows mode; ${DEPLOY_MODE} runs llama.cpp (use --windows, or set ENGINE=\"llama.cpp\")"
+    fi
     banner "up"
     ensure_models
     if [[ "${DEPLOY_MODE}" == "docker" ]]; then
@@ -349,15 +362,38 @@ cmd_claude() {
 }
 
 cmd_web() {
-    # --port N -> PowerShell -Port N (a -File call takes named parameters).
-    local args=()
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --port) args+=("-Port" "${2:-8787}"); shift 2 ;;
-            *) args+=("$1"); shift ;;
-        esac
-    done
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${SCRIPTS}/web.ps1" "${args[@]+"${args[@]}"}"
+    # start (default) / stop / status, using the pid file scripts/web.ps1
+    # writes. The console is a separate process on purpose: it stays useful
+    # with no engine running.
+    local pidfile="${ROOT_DIR}/.local/golem-web.pid"
+    case "${1:-start}" in
+        status)
+            if [[ -f "${pidfile}" ]] && curl -sf --noproxy "*" --connect-timeout 0.3 -m 1 http://127.0.0.1:8787/api/state >/dev/null 2>&1; then
+                local host="http://127.0.0.1:8787"
+                echo "[ OK ] golem web is up: ${host} (pid $(tr -d ' \r\n' < "${pidfile}"))"
+            else
+                echo "[ -- ] golem web is not running"
+                return 1
+            fi ;;
+        stop)
+            if [[ -f "${pidfile}" ]]; then
+                local pid; pid="$(tr -d ' \r\n' < "${pidfile}")"
+                taskkill.exe //T //F //PID "${pid}" >/dev/null 2>&1 || kill "${pid}" 2>/dev/null || true
+                rm -f "${pidfile}"
+                echo "[ OK ] golem web stopped (pid ${pid})"
+            else
+                echo "[ -- ] golem web is not running"
+            fi ;;
+        *)
+            local args=()
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --port) args+=("-Port" "${2:-8787}"); shift 2 ;;
+                    *) args+=("$1"); shift ;;
+                esac
+            done
+            powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${SCRIPTS}/web.ps1" "${args[@]+"${args[@]}"}" ;;
+    esac
 }
 
 cmd_help() {
@@ -376,6 +412,7 @@ case "${CMD}" in
     bench)    cmd_bench "$@" ;;
     report)   "${SCRIPTS}/report.sh" "$@" ;;
     web)      cmd_web "$@" ;;
+    tui)      exec "${SCRIPTS}/tui.sh" ;;
     tune)     "${SCRIPTS}/tune.sh" "$@" ;;
     eval)     cmd_eval "$@" ;;
     claude)   cmd_claude "$@" ;;

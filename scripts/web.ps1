@@ -46,6 +46,27 @@ function Engines() {
     Get-ChildItem (Join-Path $Root "engines") -Directory | ForEach-Object { $_.Name }
 }
 
+# What a model file is (params, active params, MoE), from its GGUF header via
+# scripts/gguf-info.sh. The script caches its own answer on disk; this also
+# caches per process, since the page asks on every poll.
+$script:GgufCache = @{}
+function GgufInfo([string]$path) {
+    if (-not $path -or -not (Test-Path $path)) { return @{} }
+    if ($script:GgufCache.ContainsKey($path)) { return $script:GgufCache[$path] }
+    $info = @{}
+    $bash = (Get-Command bash -ErrorAction SilentlyContinue).Source
+    $script = (Join-Path $Root "scripts\gguf-info.sh") -replace '\\', '/'
+    $target = $path -replace '\\', '/'
+    if ($bash) {
+        $out = & $bash -c "export LC_ALL=C; '$script' '$target'" 2>$null
+        foreach ($line in $out) {
+            if ($line -match '^([a-z_]+)=(.*)$') { $info[$Matches[1]] = $Matches[2] }
+        }
+    }
+    $script:GgufCache[$path] = $info
+    return $info
+}
+
 # The console's model list: every preset with its file, size on disk, the
 # HF source from its "; Download:" comment and its main flags. Those
 # comments sit *above* the section they belong to (see config/models.ini),
@@ -81,6 +102,13 @@ function Get-Models() {
         $m | Add-Member -NotePropertyName Present -NotePropertyValue (Test-Path $path)
         $m | Add-Member -NotePropertyName Gb -NotePropertyValue $(if (Test-Path $path) { [math]::Round((Get-Item $path).Length / 1GB, 1) } else { 0 })
         $m | Add-Member -NotePropertyName Default -NotePropertyValue ($m.Name -eq $alias)
+        # What it is, when the file is here to read.
+        $info = if (Test-Path $path) { GgufInfo $path } else { @{} }
+        $m | Add-Member -NotePropertyName ParamsB -NotePropertyValue $(if ($info["params_total"]) { [math]::Round([double]$info["params_total"] / 1e9, 2) } else { 0 })
+        $m | Add-Member -NotePropertyName ParamsActiveB -NotePropertyValue $(if ($info["params_active"]) { [math]::Round([double]$info["params_active"] / 1e9, 2) } else { 0 })
+        $m | Add-Member -NotePropertyName Moe -NotePropertyValue ($info["moe"] -eq "yes")
+        $m | Add-Member -NotePropertyName Experts -NotePropertyValue $(if ($info["moe"] -eq "yes") { "$($info['n_expert'])x$($info['n_expert_used'])" } else { "" })
+        $m | Add-Member -NotePropertyName CtxTrain -NotePropertyValue $(if ($info["n_ctx_train"]) { [int]$info["n_ctx_train"] } else { 0 })
     }
     $out
 }
@@ -179,7 +207,13 @@ function Job-Tail([int]$n = 14) {
 # ---- minimal HTTP over TcpListener (localhost, no admin needed) --------
 $listener = New-Object System.Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $Port)
 $listener.Start()
-Write-Host "[ OK ] golem web UI on http://127.0.0.1:$Port  (Ctrl+C to stop)"
+# The pid file lets `golem web status|stop`, the TUI's console row and
+# Task Manager (Details tab) all agree on one process.
+$PidFile = Join-Path $Root ".local\golem-web.pid"
+New-Item -ItemType Directory -Force (Split-Path $PidFile) | Out-Null
+Set-Content $PidFile $PID
+$script:WebPidFile = $PidFile
+Write-Host "[ OK ] golem web UI on http://127.0.0.1:$Port  (Ctrl+C to stop)  pid $PID"
 
 function Read-Request($stream) {
     $buf = New-Object byte[] 65536
@@ -213,7 +247,7 @@ while ($true) {
         }
         elseif ($req.method -eq "GET" -and $path -eq "/api/state") {
             $alias = Env-Get "MODEL_ALIAS"; $engine = Env-Get "ENGINE"; if (-not $engine) { $engine = "llama.cpp" }
-            $up = & curl.exe -s -m 2 --noproxy "*" -o NUL -w "%{http_code}" "http://127.0.0.1:$(Env-Get 'LOCAL_AI_PORT')/health"
+            $up = & curl.exe -s --connect-timeout 0.3 -m 1 --noproxy "*" -o NUL -w "%{http_code}" "http://127.0.0.1:$(Env-Get 'LOCAL_AI_PORT')/health"
             $vram = (& nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>$null) -replace "[\s%]", ""
             Update-Job
             $tail = if ($script:Job.running -or (Test-Path $WebLog)) { (Job-Tail 14) -join "`n" } else { "" }
@@ -241,6 +275,61 @@ while ($true) {
             if ($form.action -eq "alias" -and $form.arg -and (Presets) -contains $form.arg) { Env-Set "MODEL_ALIAS" $form.arg; $ok = "applied" }
             elseif ($form.action -eq "engine" -and $form.arg -and (Engines) -contains $form.arg) { Env-Set "ENGINE" $form.arg; $ok = "applied" }
             else { $ok = if (Start-Job2 $form.action $form.arg) { "started" } else { "busy-or-unknown" } }
+            Send $client.GetStream() "application/json" ($utf8.GetBytes(('{"result":"' + $ok + '"}')))
+        }
+        elseif ($req.method -eq "POST" -and $path -eq "/api/delpreset") {
+            # Remove a preset (and its "; Download:" comments) from
+            # config/models.ini. The default preset is refused: switch the
+            # default first, so a click can never leave Golem without one.
+            $form = @{}
+            foreach ($kv in ($req.body -split "&")) { $k, $v = $kv -split "=", 2; $form[$k] = [URI]::UnescapeDataString(($v -replace "\+", " ")) }
+            $name = "$($form.arg)"
+            $alias = Env-Get "MODEL_ALIAS"
+            $ok = "bad-input"
+            if ($name -and (Presets) -contains $name -and $name -ne $alias) {
+                $presetFile = Join-Path $Root "config\models.ini"
+                Copy-Item $presetFile "$presetFile.bak" -Force
+                $keep = @(); $skip = $false; $pending = @()
+                foreach ($line in Get-Content $presetFile) {
+                    # Comments and blank lines belong to the section below
+                    # them (that is where "; Download:" lives), so they are
+                    # held back and dropped with it when it is removed.
+                    if ($line -match '^\s*;' -or $line -match '^\s*$') { $pending += $line; continue }
+                    if ($line -match '^\[([^\]]+)\]') {
+                        $skip = ($Matches[1] -eq $name)
+                        if (-not $skip) { $keep += $pending; $keep += $line }
+                        $pending = @()
+                        continue
+                    }
+                    if ($skip) { continue }
+                    $keep += $pending; $pending = @(); $keep += $line
+                }
+                if (-not $skip) { $keep += $pending }
+                Set-Content $presetFile $keep
+                $ok = "removed"
+            }
+            Send $client.GetStream() "application/json" ($utf8.GetBytes(('{"result":"' + $ok + '"}')))
+        }
+        elseif ($req.method -eq "POST" -and $path -eq "/api/delmodel") {
+            # Delete a preset's model file from disk (the preset stays). The
+            # file is re-downloadable with Fetch; the default's file is
+            # refused so the running setup cannot be broken by a click.
+            $form = @{}
+            foreach ($kv in ($req.body -split "&")) { $k, $v = $kv -split "=", 2; $form[$k] = [URI]::UnescapeDataString(($v -replace "\+", " ")) }
+            $name = "$($form.arg)"
+            $alias = Env-Get "MODEL_ALIAS"
+            $ok = "bad-input"
+            $m = Get-Models | Where-Object { $_.Name -eq $name } | Select-Object -First 1
+            if ($m -and $m.Present -and $name -ne $alias) {
+                $path_ = Join-Path $Root "data\models\$($m.File)"
+                # Only inside data\models, and only a model file.
+                if ((Resolve-Path $path_).Path.StartsWith((Resolve-Path (Join-Path $Root "data\models")).Path) -and $m.File -like "*.gguf") {
+                    Remove-Item $path_ -Force
+                    Remove-Item "$path_.sha256" -Force -ErrorAction SilentlyContinue
+                    $script:GgufCache.Remove($path_) | Out-Null
+                    $ok = "deleted"
+                }
+            }
             Send $client.GetStream() "application/json" ($utf8.GetBytes(('{"result":"' + $ok + '"}')))
         }
         elseif ($req.method -eq "POST" -and $path -eq "/api/addmodel") {
@@ -280,3 +369,7 @@ while ($true) {
     } catch { Write-Host "[WARN] request: $($_.Exception.Message)" }
     finally { try { $client.Close() } catch {} }
 }
+
+# Reached only when the loop exits (Ctrl+C / stop): drop the pid file so
+# `golem web status` and the TUI do not report a dead console.
+Remove-Item $PidFile -Force -ErrorAction SilentlyContinue

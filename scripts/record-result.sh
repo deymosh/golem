@@ -178,13 +178,52 @@ if [[ -n "${MODELS_PRESET:-}" && -f "${ROOT_DIR}/${MODELS_PRESET}" ]]; then
                 if (v !~ /^-?[0-9]+(\.[0-9]+)?$/ && v != "true" && v != "false") {
                     gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v); v = "\"" v "\""
                 }
-                printf "%s\"%s\":%s", (i > 1 ? "," : ""), k, v
+                printf "%s\"%s\": %s", (i > 1 ? ", " : ""), k, v
             }
             printf "}"
         }' "${ROOT_DIR}/${MODELS_PRESET}")"
 else
-    FLAGS="{\"ctx-size\":$(json_num "${CONTEXT_SIZE:-}"),\"extra\":$(json_str "${EXTRA_ARGS:-}")}"
+    FLAGS="{\"ctx-size\": $(json_num "${CONTEXT_SIZE:-}"), \"extra\": $(json_str "${EXTRA_ARGS:-}")}"
 fi
+
+# ------------------------------------------------------------
+# Model facts: what the file actually is (GGUF header, no model load),
+# plus the context this run served. The numbers people compare - params,
+# active params, MoE or not - belong next to the speed they came with.
+# ------------------------------------------------------------
+
+MODEL_PATH_ABS=""
+for cand in "${ROOT_DIR}/data/models/${MODEL_FILE_SERVED:-${MODEL_FILE:-}}" \
+            "${ROOT_DIR}/.local/engines/strata/data/models/"*"/${MODEL_FILE_SERVED:-${MODEL_FILE:-}}"; do
+    [[ -n "${cand}" && -f "${cand}" ]] && { MODEL_PATH_ABS="${cand}"; break; }
+done
+
+CTX=""
+PARAMS_B=""; PARAMS_ACTIVE_B=""; MOE=""; EXPERTS=""; N_LAYER=""; CTX_TRAIN=""
+if [[ -n "${MODEL_PATH_ABS}" ]]; then
+    INFO="$("${ROOT_DIR}/scripts/gguf-info.sh" "${MODEL_PATH_ABS}" 2>/dev/null || true)"
+    get_info() { grep "^$1=" <<<"${INFO}" | cut -d= -f2; }
+    PARAMS_B="$(awk -v v="$(get_info params_total)" 'BEGIN {if (v+0 > 0) printf "%.2f", v/1e9}')"
+    PARAMS_ACTIVE_B="$(awk -v v="$(get_info params_active)" 'BEGIN {if (v+0 > 0) printf "%.2f", v/1e9}')"
+    MOE="$(get_info moe)"
+    N_LAYER="$(get_info n_layer)"
+    CTX_TRAIN="$(get_info n_ctx_train)"
+    if [[ "$(get_info moe)" == "yes" ]]; then
+        EXPERTS="$(get_info n_expert)x$(get_info n_expert_used)"
+    fi
+fi
+
+# The context actually served: the preset's ctx-size (router mode) or
+# CONTEXT_SIZE (single-model mode).
+if [[ -n "${MODELS_PRESET:-}" && -f "${ROOT_DIR}/${MODELS_PRESET}" ]]; then
+    CTX="$(awk -v want="${MODEL_ALIAS}" '
+        /^\[/ { s = $0; gsub(/^\[|\].*$/, "", s); next }
+        /^[[:space:]]*[;#]/ || !/=/ { next }
+        s == want && /^[[:space:]]*ctx-size[[:space:]]*=/ {
+            v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); gsub(/[[:space:]]+$/, "", v); print v; exit }' \
+        "${ROOT_DIR}/${MODELS_PRESET}")"
+fi
+[[ -n "${CTX}" ]] || CTX="${CONTEXT_SIZE:-}"
 
 # ------------------------------------------------------------
 # Metrics
@@ -193,20 +232,26 @@ fi
 if [[ "${KIND}" == bench ]]; then
     ACCEPT="$(result_field draft_accept | tr -d '%')"
     [[ -n "${ACCEPT}" && "${ACCEPT}" != "-" ]] && ACCEPT="$(awk -v a="${ACCEPT}" 'BEGIN {printf "%.2f", a/100}')"
-    METRICS="\"decode_best\":$(json_num "$(result_field decode_best)"),\"decode_median\":$(json_num "$(result_field decode_median)"),\"draft_accept\":$(json_num "${ACCEPT}"),\"prefill\":$(json_num "$(result_field prefill)")"
+    METRICS="\"decode_best\": $(json_num "$(result_field decode_best)"), \"decode_median\": $(json_num "$(result_field decode_median)"), \"draft_accept\": $(json_num "${ACCEPT}"), \"prefill\": $(json_num "$(result_field prefill)")"
 else
     TOOLS=FAIL
     grep -q '^\[ OK \] tool calling' "${OUT_FILE}" && TOOLS=PASS
     NEEDLE_KEY="$(grep '^RESULT' "${OUT_FILE}" | tr ' ' '\n' | grep -o '^long_ctx_[0-9]*' | tail -n1)"
     NEEDLE_TOKENS="$(grep -o 'needle : prompt=[0-9]*' "${OUT_FILE}" | grep -o '[0-9]*$' | tail -n1)"
-    METRICS="\"eval\":{\"tools\":\"${TOOLS}\",\"needle\":$( [[ -n "${NEEDLE_KEY}" ]] && json_str "$(result_field "${NEEDLE_KEY}")" || echo null ),\"needle_tokens\":$(json_num "${NEEDLE_TOKENS}"),\"needle_prefill\":$(json_num "$(result_field prompt_tok_s)"),\"depth_decode\":$(json_num "$(result_field gen_tok_s_at_depth)"),\"decode_best\":$(json_num "$(result_field gen_tok_s_best)")}"
+    METRICS="\"eval\": {\"tools\": \"${TOOLS}\", \"needle\": $( [[ -n "${NEEDLE_KEY}" ]] && json_str "$(result_field "${NEEDLE_KEY}")" || echo null ), \"needle_tokens\": $(json_num "${NEEDLE_TOKENS}"), \"needle_prefill\": $(json_num "$(result_field prompt_tok_s)"), \"depth_decode\": $(json_num "$(result_field gen_tok_s_at_depth)"), \"decode_best\": $(json_num "$(result_field gen_tok_s_best)")}"
 fi
 
 mkdir -p "$(dirname "${RESULTS}")"
-printf '{"ts":"%s","kind":"%s","host":%s,"gpu":%s,"os":"%s","mode":"%s","engine":%s,"engine_build":%s,"model":%s,"model_file":%s,"flags":%s,%s,"vram_mib":%s,"ram_used_gib":%s,"ram_free_gib":%s,"quiet":%s,"note":%s}\n' \
+# json.dumps-style spacing (", " / ": ") so every row reads the same as the
+# backfilled ones: one style in the file, diff-friendly, still one line.
+printf '{"ts": "%s", "kind": "%s", "host": %s, "gpu": %s, "os": "%s", "mode": "%s", "engine": %s, "engine_build": %s, "model": %s, "model_file": %s, "ctx": %s, "params_b": %s, "params_active_b": %s, "moe": %s, "experts": %s, "n_layer": %s, "ctx_train": %s, "flags": %s, %s, "vram_mib": %s, "ram_used_gib": %s, "ram_free_gib": %s, "quiet": %s, "note": %s}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${KIND}" "$(json_str "${HOST_SLUG}")" "$(json_str "${GPU}")" \
     "${OS}" "${DEPLOY_MODE:-native}" "$(json_str "${ENGINE:-llama.cpp}")" "$(json_str "${BUILD:-unknown}")" \
-    "$(json_str "${MODEL_ALIAS}")" "$(json_str "${MODEL_FILE_SERVED:-${MODEL_FILE:-}}")" "${FLAGS}" "${METRICS}" \
+    "$(json_str "${MODEL_ALIAS}")" "$(json_str "${MODEL_FILE_SERVED:-${MODEL_FILE:-}}")" \
+    "$(json_num "${CTX}")" "$(json_num "${PARAMS_B}")" "$(json_num "${PARAMS_ACTIVE_B}")" \
+    "$( [[ "${MOE}" == "yes" ]] && echo true || echo false )" "$( [[ -n "${EXPERTS}" ]] && json_str "${EXPERTS}" || echo null )" \
+    "$(json_num "${N_LAYER}")" "$(json_num "${CTX_TRAIN}")" \
+    "${FLAGS}" "${METRICS}" \
     "$(json_num "${VRAM_USED}")" "$(json_num "${RAM_USED_GIB}")" "$(json_num "${RAM_FREE_GB}")" "${QUIET}" "$(json_str "${NOTE}")" >> "${RESULTS}"
 
 echo "[ OK ] recorded in bench/results.jsonl (${KIND}, ${MODEL_ALIAS}, quiet=${QUIET})"

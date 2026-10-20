@@ -34,9 +34,10 @@ for /f "usebackq tokens=1,* delims==" %%a in ("%ROOT%.env") do (
     if "%%a"=="LOCAL_AI_API_KEY" set "KEY=%%~b"
 )
 
-if "%~1"=="" goto menu
-for %%c in (start stop restart status logs report web tune) do if /i "%~1"=="%%c" (call :%%c & exit /b)
-echo Usage: golem.cmd [start^|stop^|restart^|status^|logs^|report^|web^|tune]
+rem No argument: the TUI is the default face (menu: golem.cmd menu).
+if "%~1"=="" goto tui
+for %%c in (start stop restart status logs report web tune bench eval tui menu) do if /i "%~1"=="%%c" (call :%%c & exit /b)
+echo Usage: golem.cmd [start^|stop^|restart^|status^|logs^|report^|web^|tune^|bench^|eval^|tui]
 exit /b 1
 
 :menu
@@ -50,11 +51,17 @@ echo   4  Status
 echo   5  Logs (new window)
 echo   6  Benchmark report (browser)
 echo   7  Web UI (console: results + controls + models)
-echo   8  Auto-tune the offload split
+echo   8  Auto-tune (engine + offload split)
+echo   9  Bench (speed)
+echo   0  Eval (quality gate)
+echo   T  Full-screen console (TUI)
 echo   Q  Quit
 echo.
-choice /c 12345678Q /n /m "  > "
-if errorlevel 9 exit /b 0
+choice /c 1234567890TQ /n /m "  > "
+if errorlevel 12 exit /b 0
+if errorlevel 11 (call :tui & goto menu)
+if errorlevel 10 (call :eval & goto menu)
+if errorlevel 9 (call :bench & goto menu)
 if errorlevel 8 (call :tune & goto menu)
 if errorlevel 7 (call :web & goto menu)
 if errorlevel 6 (call :report & goto menu)
@@ -100,4 +107,32 @@ exit /b 0
 exit /b 0
 :tune
 call "%ROOT%scripts\tune.cmd" %*
+exit /b 0
+:bench
+call "%ROOT%scripts\golem-bash.cmd" bench %*
+exit /b 0
+:eval
+call "%ROOT%scripts\golem-bash.cmd" eval %*
+exit /b 0
+:menu
+goto menu_show
+
+:tui
+rem The TUI needs a real terminal for raw keys and the mouse: Windows
+rem Terminal first, mintty (shipped with Git for Windows) second, and the
+rem plain bridge — same console, no mouse — as the last resort.
+set "GBASH=%ProgramFiles%\Git\bin\bash.exe"
+where wt.exe >nul 2>nul && if exist "%GBASH%" (
+    start "" wt.exe -w -1 nt --title "Golem" "%GBASH%" -lc "cd '%ROOT:\=/%' && ./golem tui"
+    exit /b 0
+)
+if exist "%ProgramFiles%\Git\usr\bin\mintty.exe" (
+    start "" "%ProgramFiles%\Git\usr\bin\mintty.exe" -h always -e "%GBASH%" -lc "cd '%ROOT:\=/%' && ./golem tui"
+    exit /b 0
+)
+call "%ROOT%scripts\golem-bash.cmd" tui
+exit /b 0
+
+:menu_show
+call "%ROOT%scripts\golem-bash.cmd" tui %*
 exit /b 0

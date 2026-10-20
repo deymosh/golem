@@ -270,6 +270,16 @@ b11149 also passes; the b11149 regression is Linux-build-specific). On Git Bash,
 `./golem eval` routes through WSL even when a Windows python3 is visible —
 MSYS path conversion otherwise breaks the needle/depth requests.
 
+## Candidates and research
+
+The wider landscape — engines and models checked against this box's constraints — lives
+in [engines-and-models.md](engines-and-models.md) (updated on each research pass), and the
+plan for serving Strata's RAM-resident models is [strata-models.md](strata-models.md).
+The short version: nothing measured beats the current defaults in their class; the
+open candidates are an Ornith-1.5-9B everyday-coder preset, Gemma 4 12B QAT in the same
+slot, and a llama.cpp build bump (b11379 → b11687+), each pending a quiet-desktop bench
+and the eval gate.
+
 ## Client pairing
 
 - **Claude Code** (200K assumed): needs a server ctx ≥ 200K — the default Qwen3.6 config.

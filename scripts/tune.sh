@@ -26,8 +26,11 @@ export LC_ALL=C
 #   --engines      engines to compare (default: every installed one whose
 #                  engine.ini says tune = true)
 #   --engine NAME  tune just this engine (the quick path)
-#   --gate         run ./golem eval --long 200000 on the winner (default on)
+#   --gate         run the needle eval on the winner (default on; the needle
+#                  is 200K tokens, or 90% of the model's context when that is
+#                  smaller - a 64K model cannot answer a 200K needle)
 #   --adopt        write ENGINE= and MODELS_PRESET= into .env for the winner
+#   --no-refine    only sweep the offload split (skip batch/threads/spec)
 #   --dry-run      probe, print the plan, change nothing
 #
 # Output: data/tuned/<host>/<engine>/<preset>.ini   winning flags, per engine
@@ -47,15 +50,18 @@ fi
 
 PORT="${LOCAL_AI_PORT:-8000}"
 API_KEY="${LOCAL_AI_API_KEY:-local-key}"
-MODEL_ALIAS="${MODEL_ALIAS:-local-model}"
-PRESET="${MODELS_PRESET:-config/models.ini}"
-ENGINE="${ENGINE:-llama.cpp}"
+# GOLEM_* overrides survive the .env re-source above (same convention as ./golem):
+# without them there is no way to point the tuner at another preset file.
+MODEL_ALIAS="${GOLEM_MODEL_ALIAS:-${MODEL_ALIAS:-local-model}}"
+PRESET="${GOLEM_MODELS_PRESET:-${MODELS_PRESET:-config/models.ini}}"
+ENGINE="${GOLEM_ENGINE:-${ENGINE:-llama.cpp}}"
 DEPLOY_MODE="${DEPLOY_MODE:-native}"
 
 RUNS=3
 PREFILL=8000
 GATE=1
 DRY_RUN=0
+REFINE=1
 CANDIDATES=""
 TARGET=""
 ENGINES_ARG=""
@@ -67,6 +73,8 @@ while [[ $# -gt 0 ]]; do
         --prefill) PREFILL="$2"; shift 2 ;;
         --gate) GATE=1; shift ;;
         --no-gate) GATE=0; shift ;;
+        --refine) REFINE=1; shift ;;
+        --no-refine) REFINE=0; shift ;;
         --candidates) CANDIDATES="$2"; shift 2 ;;
         --engines) ENGINES_ARG="${2//,/ }"; shift 2 ;;
         --all-engines) ENGINES_ARG="__all__"; shift ;;
@@ -184,6 +192,17 @@ echo "             wall ${WALL_MIB} MiB (seed heuristic; the real cliff shows up
 echo "             prefill collapse during the sweep)"
 echo "  ram free   ${RAM_FREE_GB} GB   cpu ${CORES} threads   ctx ${CTX}   ubatch ${UB}"
 
+# The gate asks for a 200K-token needle, which a model with a smaller context
+# cannot answer at all: use 90% of what it can actually serve (a 64K model is
+# gated at 57K, an 8K one at 7K). Without this, tuning any preset below 200K
+# context would fail every candidate and adopt nothing.
+GATE_TOKENS="${GATE_TOKENS:-200000}"
+if [[ -n "${CTX}" ]] && (( CTX > 0 )); then
+    GATE_MAX=$(( CTX * 9 / 10 ))
+    (( GATE_MAX < GATE_TOKENS )) && GATE_TOKENS="${GATE_MAX}"
+fi
+echo "  gate       needle of ${GATE_TOKENS} tokens$( (( GATE_TOKENS < 200000 )) && echo " (capped by the model's ${CTX}-token context)")"
+
 # A game or a render job on the GPU makes every number noisy (decode varies
 # by several times with desktop load, measured). Downloads and builds are
 # refused outright below; heavy VRAM use only earns a warning, since the
@@ -248,24 +267,90 @@ HOST_SLUG="$(echo "${GPU}" | slug)_$((VRAM_TOTAL / 1024))g_${RAM_GB}g_$(echo "${
 OUT_DIR="${TUNE_DIR}/${HOST_SLUG}"
 mkdir -p "${CAND_DIR}" "${OUT_DIR}"
 
-# A candidate preset file: everything from the real preset, with this
-# section's n-cpu-moe replaced and fit switched off (fit only touches unset
-# arguments, so an explicit n-cpu-moe is what disables it).
+# A candidate preset file: everything from the real preset, with the given
+# "key = value" overrides applied to this section (they are printed right
+# after its header, replacing the original lines for those keys).
 write_candidate() {
-    local n="$1" out="$2"
-    awk -v want="${TARGET}" -v n="${n}" '
+    local out="$1"; shift
+    awk -v want="${TARGET}" -v ov="$(printf '%s\n' "$@")" '
+        BEGIN {
+            n = split(ov, lines, "\n")
+            for (i = 1; i <= n; i++) {
+                if (lines[i] == "") continue
+                k = lines[i]; sub(/[ \t]*=.*/, "", k); gsub(/^[ \t]+|[ \t]+$/, "", k)
+                o[k] = lines[i]; keys[++nk] = k
+            }
+        }
         /^\[/ {
             s = $0; gsub(/^\[|\].*$/, "", s)
-            print; if (s == want) { print "n-cpu-moe = " n; print "fit = off" }
+            print
+            if (s == want) for (i = 1; i <= nk; i++) print o[keys[i]]
             next
         }
-        s == want && /^[[:space:]]*(n-cpu-moe|fit)[[:space:]]*=/ { next }
+        s == want && /=/ {
+            k = $0; sub(/[ \t]*=.*/, "", k); gsub(/^[ \t]+|[ \t]+$/, "", k)
+            if (k in o) next
+        }
         { print }
     ' "${PRESET_PATH}" > "${out}"
 }
 
-declare -A RESULT_DEC RESULT_PRE RESULT_VRAM RESULT_ENG
-POINTS=()          # "engine n" in measured order
+declare -A RESULT_DEC RESULT_PRE RESULT_VRAM RESULT_ENG RESULT_OV RESULT_N
+POINTS=()          # "<engine>|<label>" in measured order
+
+# One measurement point: write the candidate preset, restart the engine on
+# it, bench it, and record it. Sets M_DEC / M_PRE / M_VRAM on success.
+measure() {
+    local eng="$1" label="$2"; shift 2
+    local cfg="${CAND_DIR}/${TARGET}-${label}.ini"
+    M_DEC=""; M_PRE=""; M_VRAM=""
+    write_candidate "${cfg}" "$@"
+    say "${eng} ${label}: restarting..."
+    # GOLEM_* overrides, not plain env vars: ./golem re-sources .env, so
+    # MODELS_PRESET/ENGINE/MODEL_ALIAS set here would be overwritten.
+    ( cd "${ROOT_DIR}" && GOLEM_ENGINE="${eng}" GOLEM_MODEL_ALIAS="${TARGET}" \
+        GOLEM_MODELS_PRESET="data/tuned/candidates/${TARGET}-${label}.ini" \
+        ./golem restart >/dev/null 2>&1 ) \
+        || { echo "  restart failed, skipping"; return 1; }
+
+    for _ in $(seq 1 120); do
+        curl -s --noproxy '*' -m 3 "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1 && break
+        sleep 5
+    done
+    curl -s --noproxy '*' -m 3 "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1 \
+        || { echo "  never became healthy, skipping"; return 1; }
+
+    local out; out="$(cd "${ROOT_DIR}" && GOLEM_MODEL_ALIAS="${TARGET}" \
+        RECORD_NOTE="tune ${TARGET} on ${eng}: ${label}" \
+        ./scripts/benchmark-ai.sh --runs "${RUNS}" --prefill "${PREFILL}" 2>&1 || true)"
+    M_DEC="$(grep -o 'decode_median=[0-9.]*' <<<"${out}" | cut -d= -f2)"
+    M_PRE="$(grep -o 'prefill=[0-9.]*' <<<"${out}" | cut -d= -f2)"
+    M_VRAM="$(grep -o 'vram=[0-9]*' <<<"${out}" | cut -d= -f2)"
+    [[ -n "${M_DEC}" && -n "${M_VRAM}" ]] || { echo "  no usable result, skipping"; return 1; }
+
+    local key="${eng}|${label}"
+    POINTS+=("${key}")
+    RESULT_DEC["${key}"]="${M_DEC}"; RESULT_PRE["${key}"]="${M_PRE}"
+    RESULT_VRAM["${key}"]="${M_VRAM}"; RESULT_ENG["${key}"]="${eng}"
+    RESULT_OV["${key}"]="$(printf '%s\n' "$@" | tr '\n' ';')"
+    RESULT_N["${key}"]="$(grep -o 'n-cpu-moe = [0-9]*' <<<"$(printf '%s\n' "$@")" | awk '{print $3}')"
+    printf "  %-14s %-12s decode %6s t/s  prefill %6s t/s  vram %5s MiB\n" \
+        "${eng}" "${label}" "${M_DEC}" "${M_PRE}" "${M_VRAM}"
+    # Every point is a measurement like any other: record it (the bench
+    # script alone does not - recording lives in the ./golem wrapper).
+    printf '%s\n' "${out}" > "${CAND_DIR}/out-${TARGET}-${label}.txt"
+    GOLEM_ENGINE="${eng}" RECORD_MODEL="${TARGET}" "${ROOT_DIR}/scripts/record-result.sh" bench \
+        "${CAND_DIR}/out-${TARGET}-${label}.txt" "tune ${TARGET} on ${eng}: ${label}" \
+        >/dev/null 2>&1 || true
+    return 0
+}
+
+# A model with a mixture of experts has an MTP head only if its GGUF says so;
+# the spec on/off point is only worth spending time on when it might help.
+MODEL_HAS_MTP=""
+if [[ -n "${MODEL_PATH}" ]]; then
+    MODEL_HAS_MTP="$("${ROOT_DIR}/scripts/gguf-info.sh" "${MODEL_PATH}" 2>/dev/null | awk -F= '/^mtp_tensors/ {print $2}')"
+fi
 
 for eng in ${SWEEPABLE}; do
     SEED="$(seed_for "${eng}")"
@@ -283,48 +368,35 @@ for eng in ${SWEEPABLE}; do
     fi
     LIST="${LIST% }"
     echo
-    echo "  --- ${eng}: seed ${SEED}, candidates ${LIST// /, }"
+    echo "  --- ${eng}: seed ${SEED}, offload candidates ${LIST// /, }"
     if [[ "${DRY_RUN}" == 1 ]]; then continue; fi
 
+    BEST_LOCAL=""; BEST_LOCAL_DEC=""
     for n in ${LIST}; do
-        cfg="${CAND_DIR}/${TARGET}-${eng}-n${n}.ini"
-        write_candidate "${n}" "${cfg}"
-        say "${eng} n-cpu-moe ${n}: restarting..."
-        # GOLEM_* overrides, not plain env vars: ./golem re-sources .env, so
-        # MODELS_PRESET/ENGINE/MODEL_ALIAS set here would be overwritten.
-        ( cd "${ROOT_DIR}" && GOLEM_ENGINE="${eng}" GOLEM_MODEL_ALIAS="${TARGET}" \
-            GOLEM_MODELS_PRESET="data/tuned/candidates/${TARGET}-${eng}-n${n}.ini" \
-            ./golem restart >/dev/null 2>&1 ) \
-            || { echo "  restart failed, skipping"; continue; }
-
-        for _ in $(seq 1 120); do
-            curl -s --noproxy '*' -m 3 "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1 && break
-            sleep 5
-        done
-        curl -s --noproxy '*' -m 3 "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1 \
-            || { echo "  never became healthy, skipping"; continue; }
-
-        BENCH_OUT="$(cd "${ROOT_DIR}" && GOLEM_MODEL_ALIAS="${TARGET}" \
-            RECORD_NOTE="tune ${TARGET} on ${eng}: n-cpu-moe=${n}" \
-            ./scripts/benchmark-ai.sh --runs "${RUNS}" --prefill "${PREFILL}" 2>&1 || true)"
-        dec="$(grep -o 'decode_median=[0-9.]*' <<<"${BENCH_OUT}" | cut -d= -f2)"
-        pre="$(grep -o 'prefill=[0-9.]*' <<<"${BENCH_OUT}" | cut -d= -f2)"
-        vram="$(grep -o 'vram=[0-9]*' <<<"${BENCH_OUT}" | cut -d= -f2)"
-        [[ -n "${dec}" && -n "${vram}" ]] || { echo "  no usable result, skipping"; continue; }
-
-        key="${eng}|${n}"
-        POINTS+=("${key}")
-        RESULT_DEC["${key}"]="${dec}"; RESULT_PRE["${key}"]="${pre}"
-        RESULT_VRAM["${key}"]="${vram}"; RESULT_ENG["${key}"]="${eng}"
-        printf "  %-14s n-cpu-moe %-3s decode %6s t/s  prefill %6s t/s  vram %5s MiB\n" \
-            "${eng}" "${n}" "${dec}" "${pre}" "${vram}"
-        # Every point is a measurement like any other: record it (the bench
-        # script alone does not - recording lives in the ./golem wrapper).
-        printf '%s\n' "${BENCH_OUT}" > "${CAND_DIR}/out-${TARGET}-${eng}-n${n}.txt"
-        GOLEM_ENGINE="${eng}" RECORD_MODEL="${TARGET}" "${ROOT_DIR}/scripts/record-result.sh" bench \
-            "${CAND_DIR}/out-${TARGET}-${eng}-n${n}.txt" "tune ${TARGET} on ${eng}: n-cpu-moe=${n}" \
-            >/dev/null 2>&1 || true
+        measure "${eng}" "${eng}-n${n}" "n-cpu-moe = ${n}" "fit = off" || continue
+        # Track this engine's best so far; the refine points build on it.
+        if [[ -z "${BEST_LOCAL_DEC}" ]] || awk -v a="${M_DEC}" -v b="${BEST_LOCAL_DEC}" 'BEGIN {exit !(a > b)}'; then
+            BEST_LOCAL="${n}"; BEST_LOCAL_DEC="${M_DEC}"
+        fi
     done
+
+    # Refine the engine's best offload with the knobs the plan promised:
+    # prompt batch, thread count, and speculative decoding on/off. Bounded to
+    # three extra points per engine; --no-refine skips them.
+    if [[ "${REFINE}" == 1 && -n "${BEST_LOCAL}" ]]; then
+        echo "  --- ${eng}: refining n-cpu-moe ${BEST_LOCAL} (batch, threads, spec)"
+        base=("n-cpu-moe = ${BEST_LOCAL}" "fit = off")
+        if [[ -n "${UB}" && "${UB}" != "1024" ]]; then
+            measure "${eng}" "${eng}-ub1024" "${base[@]}" "ubatch-size = 1024" || true
+        fi
+        if [[ -n "${CORES}" && "${CORES}" -gt 4 ]]; then
+            HALF=$(( CORES / 2 ))
+            [[ "${HALF}" != "${CPU_THREADS:-}" ]] && measure "${eng}" "${eng}-t${HALF}" "${base[@]}" "threads = ${HALF}" || true
+        fi
+        if [[ "$(preset_value "${TARGET}" spec-type)" == "draft-mtp" && "${MODEL_HAS_MTP}" == "1" ]]; then
+            measure "${eng}" "${eng}-nospec" "${base[@]}" "spec-type = none" || true
+        fi
+    fi
 done
 
 if [[ "${DRY_RUN}" == 1 ]]; then echo; ok "dry run: nothing started"; exit 0; fi
@@ -351,7 +423,7 @@ RANKED=()
 for k in "${POINTS[@]}"; do
     eng="${RESULT_ENG[${k}]}"
     if awk -v p="${RESULT_PRE[${k}]}" -v m="${ENG_MAXPRE[${eng}]}" 'BEGIN {exit !(m > 0 && p < 0.75 * m)}'; then
-        echo "  ${eng} n-cpu-moe ${k##*|}: prefill ${RESULT_PRE[${k}]} far under ${eng}'s own ${ENG_MAXPRE[${eng}]} - spilling, excluded"
+        echo "  ${eng} ${k##*|}: prefill ${RESULT_PRE[${k}]} far under ${eng}'s own ${ENG_MAXPRE[${eng}]} - spilling, excluded"
         continue
     fi
     RANKED+=("${k}")
@@ -364,7 +436,7 @@ mapfile -t SORTED < <(for k in "${RANKED[@]}"; do printf '%s %s\n' "${RESULT_DEC
 echo
 echo "  ranked (best decode that is not spilling):"
 for k in "${SORTED[@]}"; do
-    printf "    %-14s n-cpu-moe %-3s %6s t/s decode  %6s t/s prefill  %5s MiB\n" \
+    printf "    %-14s %-12s %6s t/s decode  %6s t/s prefill  %5s MiB\n" \
         "${RESULT_ENG[${k}]}" "${k##*|}" "${RESULT_DEC[${k}]}" "${RESULT_PRE[${k}]}" "${RESULT_VRAM[${k}]}"
 done
 
@@ -373,14 +445,15 @@ done
 # ------------------------------------------------------------
 
 write_overlay() {
-    local eng="$1" n="$2" dir="${OUT_DIR}/${eng}"
+    local eng="$1" key="$2" dir="${OUT_DIR}/${eng}"
     mkdir -p "${dir}"
     {
         echo "; Auto-tuned by scripts/tune.sh on $(date -u +%Y-%m-%dT%H:%MZ) for this machine."
-        echo "; Winner for engine ${eng}; the launchers merge it over ${PRESET}."
-        echo "; Sweep (n-cpu-moe=decode t/s): $(for k in "${POINTS[@]}"; do [[ "${RESULT_ENG[${k}]}" == "${eng}" ]] && printf '%s=%s ' "${k##*|}" "${RESULT_DEC[${k}]}"; done)"
+        echo "; Winner for engine ${eng} (${key##*|}); the launchers merge it over ${PRESET}."
+        echo "; Sweep (label=decode t/s): $(for k in "${POINTS[@]}"; do [[ "${RESULT_ENG[${k}]}" == "${eng}" ]] && printf '%s=%s ' "${k##*|}" "${RESULT_DEC[${k}]}"; done)"
         echo "[${TARGET}]"
-        echo "n-cpu-moe = ${n}"
+        # The winner's own overrides, minus the bookkeeping ones.
+        printf '%s\n' "${RESULT_OV[${key}]}" | tr ';' '\n' | grep -vE '^[[:space:]]*$' | grep -v '^fit = off$'
         echo "fit = off"
     } > "${dir}/${TARGET}.ini"
 
@@ -421,13 +494,13 @@ write_overlay() {
 
 WINNER=""; WINNER_ENG=""; WINNER_N=""
 for k in "${SORTED[@]}"; do
-    eng="${RESULT_ENG[${k}]}"; n="${k##*|}"
-    ok "candidate winner: ${eng} with n-cpu-moe ${n} (${RESULT_DEC[${k}]} t/s decode, ${RESULT_PRE[${k}]} t/s prefill, ${RESULT_VRAM[${k}]} MiB VRAM)"
-    EFFECTIVE="$(write_overlay "${eng}" "${n}")"
+    eng="${RESULT_ENG[${k}]}"; n="${RESULT_N[${k}]:-?}"
+    ok "candidate winner: ${eng} ${k##*|} (${RESULT_DEC[${k}]} t/s decode, ${RESULT_PRE[${k}]} t/s prefill, ${RESULT_VRAM[${k}]} MiB VRAM)"
+    EFFECTIVE="$(write_overlay "${eng}" "${k}")"
 
     if [[ "${GATE}" != 1 ]]; then WINNER="${k}"; WINNER_ENG="${eng}"; WINNER_N="${n}"; break; fi
 
-    say "gating ${eng} + n-cpu-moe ${n}: restarting and running the 200K eval (this takes a while)..."
+    say "gating ${eng} ${k##*|}: restarting and running the ${GATE_TOKENS}-token needle (this takes a while)..."
     ( cd "${ROOT_DIR}" && GOLEM_ENGINE="${eng}" GOLEM_MODEL_ALIAS="${TARGET}" \
         GOLEM_MODELS_PRESET="data/tuned/models.effective.ini" \
         ./golem restart >/dev/null 2>&1 ) || true
@@ -436,7 +509,7 @@ for k in "${SORTED[@]}"; do
         sleep 5
     done
     if ( cd "${ROOT_DIR}" && GOLEM_MODEL_ALIAS="${TARGET}" \
-        ./golem eval --long 200000 2>&1 | grep -q 'long_ctx_200000=PASS' ); then
+        ./golem eval --long "${GATE_TOKENS}" 2>&1 | grep -q "long_ctx_${GATE_TOKENS}=PASS" ); then
         ok "eval gate PASSED"
         WINNER="${k}"; WINNER_ENG="${eng}"; WINNER_N="${n}"
         break
@@ -458,11 +531,11 @@ VERDICT="${OUT_DIR}/winner.txt"
     echo "engine     ${WINNER_ENG}"
     echo "n-cpu-moe  ${WINNER_N}"
     echo "decode     ${RESULT_DEC[${WINNER}]} t/s (median), prefill ${RESULT_PRE[${WINNER}]} t/s, vram ${RESULT_VRAM[${WINNER}]} MiB"
-    echo "eval       ${GATE:+200K gate}${GATE:+ }$( [[ "${GATE}" == 1 ]] && echo PASS || echo "not run" )"
+    echo "eval       $( [[ "${GATE}" == 1 ]] && echo "${GATE_TOKENS}-token needle PASS" || echo "not run" )"
     echo
     echo "all points:"
     for k in "${POINTS[@]}"; do
-        printf '  %-14s n-cpu-moe %-3s %6s t/s decode  %6s t/s prefill  %5s MiB\n' \
+        printf '  %-14s %-12s %6s t/s decode  %6s t/s prefill  %5s MiB\n' \
             "${RESULT_ENG[${k}]}" "${k##*|}" "${RESULT_DEC[${k}]}" "${RESULT_PRE[${k}]}" "${RESULT_VRAM[${k}]}"
     done
 } > "${VERDICT}"
