@@ -1,14 +1,14 @@
-# golem-rs — the portable binary
+# golem-rs — the binary
 
-One `golem` binary that owns the TUI, the console, the results database and the tuner,
-so the shell stack is needed only as engine drivers. The plan, phase by phase, is
-[docs/plan-portable-binary.md](../docs/plan-portable-binary.md); a script is deleted only
-when this binary replaces its gate.
+One `golem` binary that owns everything: the commands, the measurement, the tuner, the
+console, the TUI, the engine and the service that owns it. There is no shell behind any of
+it — the shell stack was deleted on 2026-10-20 once this binary replaced every gate it had.
+The plan, phase by phase, is [docs/plan-portable-binary.md](../docs/plan-portable-binary.md).
 
 ```
 crates/
   golem-core/   the testable core: JSON, results.jsonl, INI, GGUF, RESULT lines
-  golem/        the binary (phase 0: --version and help)
+  golem/        the binary
 ```
 
 ## Build and test
@@ -61,61 +61,43 @@ sitting next to them.
 
 ## Status
 
-Phases 0-6, per [docs/plan-portable-binary.md](../docs/plan-portable-binary.md): the
-scaffold and CI; the read-only core (JSON, `results.jsonl` with its size classes and
-best-per-configuration reduction, the `RESULT`-line contract, the GGUF header, the INI
-reader and merge, both report views); the console (`golem web`'s page, `results.jsonl`,
-`api/state`, `api/logs`, `api/run`, and the Models tab's `api/models`,
-`api/addmodel`, `api/delmodel`, `api/delpreset`); the controls (`golem status`,
-`up`/`down`/`restart`) driving the shell launchers; `golem tune <preset>`, which
-measures through those same launchers and decides with `golem-core`'s tuner; `golem
-tui`; and the switchover, where `./golem` and `golem.cmd` hand it every command it
-owns.
+Every command is this binary's, and there is no shell left to fall back to. Phases 0-6 per
+[docs/plan-portable-binary.md](../docs/plan-portable-binary.md): the scaffold and CI; the
+read-only core (JSON, `results.jsonl` with its size classes and best-per-configuration
+reduction, the `RESULT`-line contract, the GGUF header, the INI reader and merge, both report
+views); the console and its Models tab; the controls; the tuner; the TUI; and the switchover,
+which ended with the launchers deleted rather than handed anything.
 
-Every command the shell used to have is the binary's now - `logs`, `pull`, `bench`,
-`eval`, `claude`, `env`, `menu`, `setup`, `install` and `tune --auto` alongside the
-phases above, and since 2026-10-20 `up` / `down` / `restart` as well: the binary
-installs the pinned engine build from its GitHub release, spawns the server with its
-own `--log-file`, writes the pid file and waits for `/health` itself. What is left of
-the shell is `web status` / `web stop`, the launchers' helpers, the no-binary
-fallbacks, and the two cases `up` hands back - docker mode, and an engine that
-installs itself (Strata's git-clone-and-Python setup).
+`up` resolves the command line, installs the pinned build when it is absent (`release.rs`,
+over curl and `%SystemRoot%\System32\tar.exe` on Windows — no new crate, and Git's GNU tar on
+PATH cannot read a zip), fetches the model the preset needs before starting (`pull.rs`'s
+downloader, so `up` and `pull` fetch the same bytes by the same rule), spawns the server,
+writes the pid and polls `/health` with a deadline and an early exit. `down` kills the process
+tree and waits for the card; `restart` is the two. An engine whose adapter says it installs
+itself — Strata — is refused by name: there is nothing to hand it back to.
 
-The recorder is `golem-core::record` plus `src/facts.rs`: the row a bench or an eval
-writes to `bench/results.jsonl`, verified byte-identical to what
-`scripts/record-result.sh` wrote for the same capture against the same live engine -
-which is what `golem bench --replay <capture>` is for.
+**The engine belongs to `golem service`** (`service.rs`). `up`, `down`, `restart` and
+`status` are executed by that process, and the CLI is a *client* of it: it sends a verb over a
+loopback socket and the output streams back a line at a time, ending with the exit code. Two
+things fall out of that. A client that spawns nothing cannot hand its caller's handles to a
+long-lived process, which is what closes the piped-`up` problem that `std`'s handle
+inheritance causes on Windows; and the engine is a child of the service, so it goes when the
+service does instead of being orphaned by a killed run. `golem service --up` is the same
+service with the engine started on the way in, for a container's PID 1, which has nobody to
+send it a verb. A request may carry `GOLEM_*` overrides, set for that one verb and put back
+after, which is how the tuner points a candidate restart at its own preset.
 
-The two things worth knowing before changing it: the binary **orchestrates** (the
-scripts stay the engine drivers, and phase 3's rule is that a script is deleted only
-when the binary replaces its gate), and `golem` is a bin-only crate, so a module a
-tested module uses has to be declared in `tests/*.rs` as well - see the `#[path]`
+The recorder is `golem-core::record` plus `src/facts.rs`: the row a bench or an eval writes to
+`bench/results.jsonl`, verified byte-identical to what the shell recorder wrote for the same
+capture against the same live engine — which is what `golem bench --replay <capture>` is for.
+
+Two things worth knowing before changing it: **the configuration is `golem.toml`**, written
+from the compiled-in `golem.toml.example` on first run and never overwritten after (a key the
+binary reads comes from there, and `.env` is gone); and `golem` is a bin-only crate, so a
+module a tested module uses has to be declared in `tests/*.rs` as well — see the `#[path]`
 block at the top of each.
 
-What the clean-machine walk found, and what the next plan is: a fresh clone has no
-`golem.exe` (the binary is git-ignored), so the missing piece is a **release asset**.
-The measurement no longer needs a shell - `bench`, `eval` and `tune` are `bench.rs`,
-`eval.rs` and `tune.rs`, and `scripts/benchmark-ai.sh`, `scripts/eval-model.sh`,
-`scripts/record-result.sh`, `scripts/tune.sh` and `scripts/tune-auto.sh` were deleted
-on 2026-10-20 under the migration gate. The scripts that remain are the launchers'
-helpers and the no-binary fallbacks.
-
-The launchers are ported for Windows and native mode: `golem up` resolves the command
-line, installs the pinned build when it is absent (`release.rs`, over curl and
-`%SystemRoot%\System32\tar.exe` - no new crate, and Git's GNU tar on PATH cannot read a
-zip), fetches the model the preset needs before starting (`pull.rs`'s downloader, so
-`up` and `pull` fetch the same bytes by the same rule), spawns the server, writes the
-pid and polls `/health` with a deadline and an early exit; `down` kills the process tree
-and waits for the card; `restart` is the two. Docker, Strata and single-model mode with
-no preset keep the shell launcher.
-
-The live paired start has run: `golem up` and `start-windows.ps1` produce the same
-`/props`, the same pid file and the same banner, and in a scratch clone `up --dry-run`
-matches `-DryRun` flag for flag for both single-model shapes. What keeps `./golem` and
-`golem.cmd` owning their `up`/`restart` arms is one measured gap - on Windows the engine
-inherits the caller's stdout pipe, so a *piped* `up` returns only when the engine stops
-([plan-service.md](../docs/plan-service.md) is the fix) - plus docker, which
-[plan-deploy-modes.md](../docs/plan-deploy-modes.md) argues should stop being a mode at all. The plan
-is -
-[docs/plan-launchers.md](../docs/plan-launchers.md) has them in order. After that the
-last `.env` keys move to `golem.toml` and there is no shell left anywhere.
+The binary is git-ignored and so is the `golem.toml` beside it, so a fresh clone builds its
+own with `./scripts/cargo.sh build`; a release is the executable plus the config it writes.
+The container ([../Dockerfile](../Dockerfile)) is the same binary with the pinned engine baked
+in and `golem service --up` as PID 1.

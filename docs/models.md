@@ -47,41 +47,44 @@ gate but its bundled MTP head is weak (32% acceptance) and costs a third of deco
 only win is prefill (less of the model in RAM). Qwen3.6 stays in `config/models.ini` as
 the fallback and remains the single-model default below.
 
-**Tuned 2026-10-20** (`./golem tune ornith-1.5-35b --adopt`, both engines swept): the
+**Tuned 2026-10-20** (`golem tune ornith-1.5-35b --adopt`, both engines swept): the
 preset's hand-tuned `n-cpu-moe 36` at 236544 ctx was not the best this card can do. The
 sweep found **`n-cpu-moe 35`** and the context ladder grew it to **249344** - 262144 did
 not fit and the midpoint probe did - for **62.8 t/s decode and 878 t/s prefill** against
-59.5 / 835, with the 200K needle passing at 35.8 t/s at depth. `.env` now names
-`ENGINE="llama.cpp"` and `MODELS_PRESET="data/tuned/models.effective.ini"`, so the served
-flags are the overlay in `data/tuned/<host>/`, and `config/models.ini` stays the seed.
+59.5 / 835, with the 200K needle passing at 35.8 t/s at depth. `golem.toml` now names
+`ENGINE = "llama.cpp"` and `MODELS_PRESET = "data/tuned/models.effective.ini"`, so the
+served flags are the overlay in `data/tuned/<host>/`, and `config/models.ini` stays the
+seed.
 The sweep also shows why the split has to be measured: `ub1024` decoded at 62.3 t/s but
 prefilled at 560 against its own engine's 878 - the sysmem cliff, caught by the prefill
 collapse rather than by a VRAM number.
 
-## How the scripts pick a model
+## How golem picks a model
 
-`scripts/download-model.sh` reads two variables from `.env`:
+Two keys in `golem.toml` name it, and `golem pull` (or the `up` that finds it missing)
+fetches exactly those:
 
-```bash
-HF_REPO="unsloth/Qwen3.6-35B-A3B-GGUF"
-MODEL_FILE="Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+```toml
+HF_REPO = "unsloth/Qwen3.6-35B-A3B-GGUF"
+MODEL_FILE = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
 ```
 
-The compose `command` serves `/models/$MODEL_FILE` and advertises it under `MODEL_ALIAS`.
-Extra llama-server flags go in `EXTRA_ARGS` (`.env`) — `compose.yml` appends them
-via the `sh -c` entrypoint (e.g. `--cpu-moe`, `--n-cpu-moe N`, `--mmproj ...`).
+The engine serves `data/models/MODEL_FILE` and advertises it under `MODEL_ALIAS`. Extra
+llama-server flags go in `EXTRA_ARGS` (e.g. `--cpu-moe`, `--n-cpu-moe N`, `--mmproj ...`);
+in router mode the preset file carries a section's own flags instead.
 
 **Keep `MODEL_ALIAS` constant** (`local-model`) across swaps: clients keep working untouched.
 
 ## Swapping
 
 1. Pick a GGUF on Hugging Face (`unsloth`, `bartowski`, `lmstudio-community` publish per-quant files).
-2. Set `HF_REPO`, `MODEL_FILE` and `EXTRA_ARGS` in `.env` (MoE → `--cpu-moe`; dense → empty).
-   For MTP: `SPEC_TYPE="draft-mtp"`, plus `DRAFT_HF_REPO` / `DRAFT_FILE` if the MTP head is a
-   separate file (empty `DRAFT_FILE` when the model GGUF embeds it); `SPEC_TYPE=""` disables.
-3. `./golem pull`
-4. `./golem restart`
-5. `./golem eval --long 200000` (quality gate) and `./golem bench` (speed)
+2. Set `HF_REPO`, `MODEL_FILE` and `EXTRA_ARGS` in `golem.toml` (MoE → `--cpu-moe`; dense →
+   empty). For MTP: `SPEC_TYPE = "draft-mtp"`, plus `DRAFT_HF_REPO` / `DRAFT_FILE` if the MTP
+   head is a separate file (leave `DRAFT_FILE` empty when the model GGUF embeds it);
+   `SPEC_TYPE = ""` disables it.
+3. `golem pull`
+4. `golem restart`
+5. `golem eval --long 200000` (quality gate) and `golem bench` (speed)
 
 ## Memory math, two regimes
 
@@ -101,12 +104,12 @@ locked RAM at boot (best over bind mounts, notably Docker Desktop/WSL2 on Window
 
 # Benchmarks by setup
 
-One section per machine. To add yours: configure the candidate in `.env`, then run
-`./golem bench` (decode best/median + MTP acceptance, prefill on a ~30K prompt) and
-`./golem eval --long 200000` (tool calls, 200K needle, decode at 200K depth), and record the
+One section per machine. To add yours: configure the candidate in `golem.toml`, then run
+`golem bench` (decode best/median + MTP acceptance, prefill on a ~30K prompt) and
+`golem eval --long 200000` (tool calls, 200K needle, decode at 200K depth), and record the
 `RESULT` lines in a new subsection. Measure best-of-3 on a quiet desktop.
 
-## Setup A — 12 GB VRAM GPU + 32 GB RAM, Windows host, native (`DEPLOY_MODE=windows`)
+## Setup A — 12 GB VRAM GPU + 32 GB RAM, Windows host (native, no container)
 
 RTX 3060 12 GB, i7-12700KF (8P+4E, 20 threads), 32 GB DDR. llama.cpp b11149 Windows/CUDA 13.
 Qwen3.6-35B-A3B UD-Q4_K_M + MTP, ctx 236544. Decode = 600-token code generation, best-of-3;
@@ -188,9 +191,9 @@ Reading:
 
 | Test | Result |
 |---|---|
-| `./golem bench` (2026-09-24, b11149) | decode 63.4 t/s best / 63.2 median, MTP acceptance 73%, prefill 842 t/s (28.6K tokens), VRAM 11.8 GB |
-| `./golem bench` (2026-10-03, b11379) | decode 60.6 t/s best / 60.4 median, acceptance 73%, prefill 822 t/s, VRAM 11.8 GB (busier desktop day) |
-| `./golem eval --long 200000` (2026-10-03, b11379) | arithmetic + tool calls PASS; needle 211.8K **PASS**, prefill 629 t/s over the full 211.8K; decode at depth 30.4 t/s |
+| `golem bench` (2026-09-24, b11149) | decode 63.4 t/s best / 63.2 median, MTP acceptance 73%, prefill 842 t/s (28.6K tokens), VRAM 11.8 GB |
+| `golem bench` (2026-10-03, b11379) | decode 60.6 t/s best / 60.4 median, acceptance 73%, prefill 822 t/s, VRAM 11.8 GB (busier desktop day) |
+| `golem eval --long 200000` (2026-10-03, b11379) | arithmetic + tool calls PASS; needle 211.8K **PASS**, prefill 629 t/s over the full 211.8K; decode at depth 30.4 t/s |
 | Real Claude Code session | 27,251-token first prompt at 747 t/s; follow-up turns reprocess only the new tokens (56) |
 
 Cache reuse note: Qwen3.6 is a hybrid recurrent model, so the server rolls back through
@@ -248,7 +251,7 @@ via `--n-cpu-ffn N`, and every dense layer on the CPU is paid on every token:
 | ctx 262144, KV q4_0, `--fit`, MTP | 4.7 t/s |
 
 KV is ~35 KB/token at q8_0 (16 full-attention layers of 64), so 262K alone needs ~9 GB.
-Usable only as a short-context profile (see `.env.example`); on a 24 GB card it would
+Usable only as a short-context profile (see `golem.toml.example`); on a 24 GB card it would
 be the stronger choice.
 
 ### Model comparison
@@ -274,11 +277,11 @@ give generous `max_tokens` (reasoning eats the budget first) or send
 CUDA 13.4 runtime) answered the 200K needle wrong *twice, identically* (tool calls,
 100K needle, throughput and prefill all fine) on Linux, while b10991 passes.
 `compose.yml` pins the known-good image **by digest**; to upgrade, pull the new
-build, point the digest at it, and adopt only if `./golem eval --long 200000`
+build, point the digest at it, and adopt only if `golem eval --long 200000`
 passes. Windows mode pins its release the same way (`build` in `engines/llama.cpp/engine.ini`, `ENGINE_BUILD` to override; currently
 b11379 — adopted 2026-10-03 after the full gate passed; the Windows build of
 b11149 also passes; the b11149 regression is Linux-build-specific). On Git Bash,
-`./golem eval` routes through WSL even when a Windows python3 is visible —
+`golem eval` routes through WSL even when a Windows python3 is visible —
 MSYS path conversion otherwise breaks the needle/depth requests.
 
 ## Candidates and research
@@ -294,7 +297,7 @@ and the eval gate.
 ## Client pairing
 
 - **Claude Code** (200K assumed): needs a server ctx ≥ 200K — the default Qwen3.6 config.
-  `./golem env` prints the exports.
+  `golem env` prints the exports.
 - **OpenCode** (context declared per model in `opencode.json` via
   `limit: { context, output }`, auto-compact honours it): pair it with the Gemma 12B
   profile (`MODEL_FILE="gemma-4-12b-it-IQ4_NL.gguf"`, `EXTRA_ARGS=""`,

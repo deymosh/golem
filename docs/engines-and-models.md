@@ -76,5 +76,5 @@ beats the current default `ornith-1.5-35b` (SWE-V 79) in this class.
 ## Reading rules (unchanged)
 
 Compare only inside a size class, only same-session pairs, best-of-3 on a quiet desktop;
-nothing is adopted without `./golem eval --long 200000` PASS. Vendor and guide numbers
+nothing is adopted without `golem eval --long 200000` PASS. Vendor and guide numbers
 above are reasons to *measure*, never reasons to adopt.

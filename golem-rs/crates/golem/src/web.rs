@@ -26,7 +26,7 @@ use axum::routing::{get, post};
 
 use golem_core::json;
 
-use crate::driver;
+use crate::runner;
 use crate::models;
 use crate::state::{self, Job, SharedJob};
 
@@ -337,25 +337,21 @@ fn result_json(result: &str) -> String {
 /// single resource and two benchmarks at once measure each other. The reply
 /// comes back immediately; the page follows the job through `api/state`.
 ///
-/// Two actions never reach a launcher: `alias` and `engine` rewrite `.env`,
-/// which the shell console also answers in-process. That also makes them the
-/// only controls that work in a folder with no scripts in it.
+/// Two actions never reach a verb: `alias` and `engine` rewrite `.env`,
+/// which the shell console also answers in-process. Everything else goes
+/// through `runner::run` - the engine verbs to the service that owns the
+/// engine, the rest as this binary's own commands - so the controls work in
+/// a folder with no scripts in it.
 async fn api_run(State(app): State<Arc<App>>, body: Bytes) -> Response {
     let form = parse_form(&body);
     let action = form.get("action").cloned().unwrap_or_default();
     let arg = form.get("arg").cloned().unwrap_or_default();
-    if driver::is_setting(&action) {
+    if runner::is_setting(&action) {
         return apply_setting(&app, &action, &arg).await;
     }
-    if !driver::is_action(&action) {
+    if !runner::is_action(&action) {
         return plain(StatusCode::BAD_REQUEST, format!("unknown action: {action:?}"));
     }
-    let Some(launcher) = driver::Driver::find(&app.cfg.home) else {
-        return plain(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no launcher in this folder (golem.cmd or golem) - controls need the scripts until phase 3 finishes",
-        );
-    };
 
     // Take the job slot, or say who has it. A guard cannot call a &mut
     // method, so this is a plain match rather than a condition on the arm.
@@ -372,10 +368,11 @@ async fn api_run(State(app): State<Arc<App>>, body: Bytes) -> Response {
     }
 
     let log = app.cfg.home.join("logs/web-job.log");
+    let app_home = app.cfg.home.clone();
     let job = app.job.clone();
     let started = action.clone();
     tokio::task::spawn_blocking(move || {
-        let outcome = driver::run(&launcher, &started, &arg, &log);
+        let outcome = crate::runner::run(&app_home, &started, &arg, &log);
         if let Ok(mut job) = job.lock() {
             job.finish();
         }

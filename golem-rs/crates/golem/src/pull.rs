@@ -34,14 +34,15 @@ const DEFAULT_MODEL: &str = "Qwen3.6-35B-A3B-UD-Q3_K_M.gguf";
 
 /// `golem pull [preset]`.
 pub fn run(home: &Path, args: &[String]) -> i32 {
+    let mut out = std::io::stdout();
     let preset = match parse_args(args) {
         Ok(preset) => preset,
         Err(message) => {
-            eprintln!("[ERROR] {message}");
+            let _ = writeln!(out, "[ERROR] {message}");
             return 1;
         }
     };
-    let mut log = Log::open(home);
+    let mut log = Log::open(home, &mut out);
     match run_inner(home, preset.as_deref(), &mut log) {
         Ok(()) => 0,
         Err(message) => {
@@ -113,12 +114,12 @@ fn run_inner(home: &Path, preset: Option<&str>, log: &mut Log) -> Result<(), Str
 /// preset needs before anything may start and fetches only that. A second
 /// download path would be a second completeness rule, and the two would
 /// disagree about a model the day one of them changed.
-pub fn fetch_all(home: &Path, jobs: &[(String, String)]) -> Result<(), String> {
+pub fn fetch_all(home: &Path, jobs: &[(String, String)], out: &mut dyn Write) -> Result<(), String> {
     let models_dir = home.join("data/models");
     std::fs::create_dir_all(&models_dir)
         .map_err(|e| format!("cannot create {}: {e}", models_dir.display()))?;
     let token = env_value(home, "HF_TOKEN");
-    let mut log = Log::open(home);
+    let mut log = Log::open(home, out);
     for (repo, file) in jobs {
         hf_get(&mut log, &models_dir, repo, file, token.as_deref())?;
     }
@@ -401,29 +402,32 @@ fn timestamp() -> String {
 
 /// Everything printed also lands in `logs/download-model-<stamp>.log`, the way
 /// the shell's `exec > >(tee -a ...)` duplicates the run into a file.
-struct Log {
+struct Log<'a> {
     path: PathBuf,
     file: Option<File>,
+    out: &'a mut dyn Write,
 }
 
-impl Log {
-    fn open(home: &Path) -> Log {
+impl<'a> Log<'a> {
+    fn open(home: &Path, out: &'a mut dyn Write) -> Log<'a> {
         let dir = home.join("logs");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join(format!("download-model-{}.log", timestamp()));
         let file = File::create(&path).ok();
-        Log { path, file }
+        Log { path, file, out }
     }
 
-    /// A normal line: to stdout, and to the log.
+    /// A normal line: to the sink, and to the log.
     fn line(&mut self, text: &str) {
-        println!("{text}");
+        let _ = writeln!(self.out, "{text}");
         self.write(text);
     }
 
-    /// An error line: to stderr, and to the log.
+    /// An error line: to the sink, and to the log. The sink cannot tell
+    /// stdout from stderr, so the `[ERROR] ` prefix is what keeps the text
+    /// the same as the `eprintln!` it replaced.
     fn error(&mut self, text: &str) {
-        eprintln!("[ERROR] {text}");
+        let _ = writeln!(self.out, "[ERROR] {text}");
         self.write(&format!("[ERROR] {text}"));
     }
 

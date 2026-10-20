@@ -23,11 +23,16 @@ use std::path::{Path, PathBuf};
 /// is what a downloaded binary uses.
 const EMBEDDED_TEMPLATE: &str = include_str!("../../../../bench/report.template.html");
 
-/// The configuration file, compiled in for the same reason: a release folder
-/// has no `golem.toml`, and without one the moved keys would silently fall
-/// back to the code's defaults - which work, but leave the user with no file
-/// to read the settings out of or edit them in.
-const EMBEDDED_CONFIG: &str = include_str!("../../../../golem.toml");
+/// The configuration template, compiled in for the same reason: a release
+/// folder has no `golem.toml.example`, and without one the moved keys would
+/// silently fall back to the code's defaults - which work, but leave the user
+/// with no file to read the settings out of or edit them in.
+///
+/// The template is what the binary writes as `golem.toml` on first run, and
+/// `golem.toml` is the machine's own file: it is git-ignored, the way `.env`
+/// and `.local/` are, because it holds the port, the key and the model this
+/// machine serves.
+const EMBEDDED_CONFIG: &str = include_str!("../../../../golem.toml.example");
 
 /// The directories the binary expects under the home. Created on demand.
 const DIRS: [&str; 5] = ["bench", "data/models", "data/cache", "data/tuned", "logs"];

@@ -553,31 +553,19 @@ mod tests {
         assert!(text.ends_with("tensors=3\n"));
     }
 
-    /// The bash to run the reference script with.
-    ///
-    /// On Windows, `bash` on PATH is WSL's stub, which cannot open a
-    /// `C:\...` path or reach the repository the way the script needs
-    /// (scripts/golem-bash.cmd documents the same trap and resolves it the
-    /// same way). Elsewhere, bash on PATH is the one to use.
-    fn bash_for_reference_script() -> std::path::PathBuf {
-        for var in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
-            let Ok(base) = std::env::var(var) else { continue };
-            let candidate = Path::new(&base).join("Git/bin/bash.exe");
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-        std::path::PathBuf::from("bash")
-    }
-
-    /// The real check: every GGUF in data/models, against the shell script
-    /// that has been the reference all along. Ignored by default because it
-    /// needs the model files (git-ignored, not on CI):
+    /// Every GGUF this machine has, read end to end. Ignored by default
+    /// because it needs the model files (git-ignored, not on CI):
     ///
     ///     cargo test -- --ignored --nocapture
+    ///
+    /// It used to be a golden test against `scripts/gguf-info.sh` - the shell
+    /// reader this one was ported from and had to agree with byte for byte.
+    /// That script is gone with the rest of the shell stack, so what is left
+    /// is the check that still means something: every real model's header
+    /// parses, and the fields the tuner sizes a context from are there.
     #[test]
-    #[ignore = "needs data/models/*.gguf and scripts/gguf-info.sh"]
-    fn golden_against_the_shell_for_every_local_model() {
+    #[ignore = "needs data/models/*.gguf"]
+    fn every_local_model_reads() {
         // crates/golem-core -> the repository root is three levels up.
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let models = root.join("data/models");
@@ -587,40 +575,31 @@ mod tests {
                 models.display()
             )
         });
-        let bash = bash_for_reference_script();
         let mut checked = 0;
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("gguf") {
                 continue;
             }
-            let name = path.file_name().expect("file name");
-            // Run the script from the repository root with a relative path:
-            // a path built by joining ".." onto a Windows path is not
-            // something MSYS bash can be relied on to open.
-            let expected = std::process::Command::new(&bash)
-                .current_dir(&root)
-                .arg("scripts/gguf-info.sh")
-                .arg(Path::new("data/models").join(name))
-                .output()
-                .unwrap_or_else(|e| panic!("cannot run {}: {e}", bash.display()));
+            let info = read(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+            // A header that parses but says nothing is the failure this
+            // catches: a truncated download, or a key this reader reads from
+            // the wrong place.
             assert!(
-                expected.status.success(),
-                "gguf-info.sh failed on {}: {}",
-                name.to_string_lossy(),
-                String::from_utf8_lossy(&expected.stderr)
-            );
-            let expected = String::from_utf8_lossy(&expected.stdout);
-            let ours = read(&path).expect("should read").to_info_text();
-            assert_eq!(
-                ours.trim_end(),
-                expected.trim_end(),
-                "disagreement on {}",
+                info.n_layer > 0,
+                "{} has no layer count - the tuner seeds a split from it",
                 path.display()
             );
+            assert!(
+                info.n_ctx_train > 0,
+                "{} has no trained context - the context ceiling comes from it",
+                path.display()
+            );
+            eprintln!("{}: {}", path.file_name().unwrap_or_default().to_string_lossy(), info.to_info_text().replace('\n', " | "));
             checked += 1;
         }
         assert!(checked > 0, "no .gguf files found in {}", models.display());
-        eprintln!("golden: {checked} model(s) agree with gguf-info.sh");
+        eprintln!("read {checked} model(s)");
     }
 }

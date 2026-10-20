@@ -1,9 +1,10 @@
 # Plan: the launchers move into the binary
 
-Status: **decided 2026-10-20**, and most of it is built - see "Where this stands" at the
-bottom. This is the last piece of [plan-portable-binary.md](plan-portable-binary.md)'s
-configuration migration, and the reason it exists is one sentence from that plan: *a key
-moves when the binary owns every reader*.
+Status: **done, and the launchers are gone** (2026-10-20). `up` / `down` / `restart` are the
+binary's, the last `.env` keys moved to `golem.toml`, and `./golem`, `golem.cmd` and the
+scripts behind them were deleted with the keys' readers. This was the last piece of
+[plan-portable-binary.md](plan-portable-binary.md)'s configuration migration, and the reason
+it exists is one sentence from that plan: *a key moves when the binary owns every reader*.
 
 ## Why
 
@@ -53,8 +54,10 @@ Two details from the launcher that a port must keep, both of which bite:
   that never comes. **The port does this and the pipe still stays open on Windows** -
   `Stdio::null()` cannot stop the child inheriting the caller's pipe as an extra handle, and
   neither can the alternatives that were measured. It is the one known gap in the port, it
-  costs a piped `up` (not a typed one, and not one whose output goes to a file), and
-  [plan-service.md](plan-service.md) sets out the three ways to close it.
+  costs a piped `up` (not a typed one, and not one whose output goes to a file). **The
+  service closed it**: `up` and `down` are clients of a process that owns the engine, and a
+  client that spawns nothing has no handles to leak. The measurement above is what the
+  launcher port shipped with; `docs/plan-service.md` is what replaced it.
 - **Health is a deadline plus an early-exit check**: ten minutes, `/health` every three
   seconds, and the moment the child has exited, print its log tail and fail with the exit
   code - instead of polling a dead process for ten minutes.
@@ -179,11 +182,13 @@ verification this item was waiting on, and it needed the clone because the scrip
 
 **Still to do, in order.**
 
-1. **The piped `up`**, above: the one place the port does not behave like the launcher, and
-   the reason `./golem` and `golem.cmd` keep their `up`/`restart` arms and both scripts stay.
-   [plan-service.md](plan-service.md) sets out the three ways to close it - and records that
-   the service alone does *not*, because the inheritance happens at whichever process calls
-   `CreateProcess`, not at whichever process owns the engine.
+1. **The piped `up`** - **closed** (2026-10-20), by the design
+   [plan-service.md](plan-service.md) describes: the CLI no longer spawns anything, so it
+   has no handles to pass on. Measured on this box, a piped `up` and a piped `down` both
+   return in about a second, where `up | cat` used to wait for the engine to stop.
+   What remains is the *cold start*: the first `up` after a boot starts the service itself,
+   and that one child can still inherit a piped caller's hop. It is one spawn per session
+   instead of one per `up`, and the FFI option in that plan closes even that.
 2. **The Linux and docker drivers.** Linux is the same code as Windows with different asset
    keys and no zip to work around. Docker is a larger question than a driver:
    [plan-deploy-modes.md](plan-deploy-modes.md) argues it stops being a deploy mode at all and becomes an

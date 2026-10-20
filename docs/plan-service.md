@@ -1,8 +1,12 @@
 # Plan: the app and the service
 
-Status: **direction, 2026-10-20, from the user**, not started. One item here is not a
-direction but a measured defect in the launcher port; the rest is the shape the user asked
-for.
+Status: **done** (2026-10-20). The service owns the engine; the two fronts that used to
+drive the launchers - the TUI's menu and the console's job runner - are clients of it
+(`runner.rs`), and the tuner's own candidate restarts are too, now that the protocol carries
+the caller's `GOLEM_*` overrides with the request. There is no launcher anywhere to hand
+anything back to: the shell stack is deleted, and an engine whose adapter says it installs
+itself is refused by name. What is still open is the tray and the logo (a GUI toolkit and an
+asset the repo does not carry).
 
 ## The measurement that makes this concrete
 
@@ -88,22 +92,50 @@ Independently of the pipe, the service is still the right shape - it is what the
 needs, what the tray needs, and what stops a killed tune from leaving an orphan holding the
 VRAM.
 
-## What has to be decided
+## The design, as built
 
-- **A real Windows service (SCM) or a plain detached process?** A detached process is one
-  implementation on all three platforms and is enough for "the engine is a child of
-  something that outlives my terminal". SCM gives start-on-boot and a Services entry, and is
-  Windows-only. The cheap answer is the detached process plus a tray app that starts it.
-- **How the app finds the service.** A loopback socket with a tiny JSON protocol reuses what
-  `web.rs` already has; a named pipe is the Windows-native answer and needs a second
-  implementation. `golem web`'s `api/state` is already the shape of the payload.
-- **Autostart.** On demand (the app starts the service if it is not there) is the least
-  surprising and needs no installer. A tray icon implies "it is always running", which
-  implies autostart.
-- **The tray and the logo are new dependencies**, and that is a decision this repository has
-  consistently made deliberately: a tray needs a window/GUI toolkit, and a logo is an asset
-  the repo does not carry. Neither is needed for the service to be worth having, and both
-  can land after it.
+The rule is one sentence: **the service is the only process that spawns the engine, and
+every verb is a client of it.** That is what makes the pipe problem go away at the root
+rather than being worked around - a client that spawns nothing cannot pass its handles to
+anything - and it is what the container needs, because there the service is PID 1 and the
+verbs have to work with no CLI at all.
+
+- **One socket, one protocol.** `.local/golem-service.json` holds the port the service bound
+  (ephemeral, so two checkouts never fight over one) and a token. Requests and replies are
+  one JSON object per line: `{"token":…,"verb":"up"}` in, and
+  `{"event":"line","text":…}` … `{"event":"done","ok":true,"code":0}` back.
+- **Streamed, not collected.** A verb can install an engine and fetch 20 GB, and a command
+  that shows nothing for ten minutes reads as a hang. The lines arrive as they happen, and
+  the `done` event is the acknowledgement a caller waits for before it reports anything -
+  which is also what keeps `golem up && golem bench` from racing.
+- **The verbs are the same code.** `up`, `down`, `restart` and `status` take a sink instead
+  of writing to stdout, so the CLI and the service run one implementation and neither is a
+  second copy of the other.
+- **The sink goes two places**: the client that asked, and the service's own stdout. A
+  terminal asking for `up` gets the lines back; a container has no client, and there the
+  service's stdout *is* the container's log.
+- **Ctrl+C stops the engine.** The watcher is why the service needs a runtime at all. A
+  service that died without stopping what it owned would leave a model resident with nothing
+  pointing at it - the orphan that once cost a session's testing.
+- **One verb at a time.** A second request while one runs is refused rather than queued;
+  two `up`s at once would fight over one engine, one pid file and one card.
+
+**Starting the service is the one spawn that remains**, and it is where the pipe question
+survives in miniature: `up` starts it detached, and on Windows a *piped* first `up` would
+wait on that one child. Once a service is running, nothing the CLI does can hold a caller's
+pipe, so the deviation shrinks from "every `up`" to "the first `up` after a cold start" -
+and the FFI option below closes even that.
+
+## What is still open
+
+- **A detached process, not a Windows service (SCM).** One implementation on all three
+  platforms, no installer, and enough for "the engine is a child of something that outlives
+  my terminal". SCM would buy start-on-boot and a Services entry, and cost a second code
+  path that only exists on one platform; a tray app or a login item gets the same result.
+- **The tray and the logo are the open question**, and they are presentation on top of all
+  of this rather than part of it: a tray needs a window/GUI toolkit - a new dependency, which
+  this repository has always decided deliberately - and a logo is an asset it does not carry.
+  Neither is needed for the service to be worth having, and both can land after it.
 
 ## The third thing that wants this
 
@@ -119,13 +151,30 @@ desktop problem, and the three ways out of it are above.
 
 ## Order
 
-1. **The service.** One process that owns the engine: start, stop, restart, health, the pid,
-   and the engine's log. `up` / `down` / `restart` become verbs it answers; the CLI and the
-   console stop spawning anything.
-2. **The app.** `golem` with no arguments already opens the TUI; make it ask the service
-   instead of driving launchers, and make it start the service when there is none.
+1. **The service** - `service.rs`, built: the endpoint file and token, the line protocol, the
+   streamed sink, `up` / `down` / `restart` / `status` / `shutdown`, the Ctrl+C watcher (and,
+   for a container's PID 1, SIGTERM), and the one-verb-at-a-time rule. The CLI is the client
+   of it: `up` / `down` / `restart` send verbs, `up` starts a service when there is none.
+2. **The app** - built (2026-10-20, `runner.rs`): the TUI's menu and the console's job runner
+   ask the same runner, which asks the service for the engine verbs and runs the binary's
+   own verbs for the rest. Verified live through the console: a `status` spawns the service
+   on demand and its lines reach the page's job pane; `start` brings the router up; `stop`
+   takes the engine down and leaves the service; a folder with no launcher runs the whole
+   menu, which is the shape a release folder has.
 3. **Then the tray and the logo**, which are presentation over the same snapshot
    (`api/state` is already a plain struct, which is what `tui.rs` was built to prove).
+
+## The last launcher path, closed
+
+`tune` used to drive the launchers for its own work: every candidate restart and every gate
+eval was a child process with the `GOLEM_*` overrides in its environment. That is done - a
+candidate restart is a service request carrying those overrides, and the gate runs this
+binary's own `eval` as a child of the tuner. The protocol learned the one thing it was
+missing to make that possible: a request may carry an `env` object of `GOLEM_*` pairs, set for
+that one verb and put back afterwards, so one request's candidate preset cannot decide the
+next request's engine. It also fixed a bug that predated the tuner work: `GOLEM_MODELS_PRESET=x
+golem up` was silently ignored, because the service runs a verb in its own environment and a
+caller's cannot reach it by inheritance.
 
 Nothing here blocks [plan-launchers.md](plan-launchers.md) or
 [plan-portable-binary.md](plan-portable-binary.md) except the pipe, which is recorded here

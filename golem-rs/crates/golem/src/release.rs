@@ -10,9 +10,10 @@
 //! - the `BUILD` marker is written **last**, after every zip extracted: "a
 //!   killed install leaves the exe without it, and that half-state must
 //!   reinstall, not run";
-//! - the asset is picked by the adapter's `windows_asset_<backend>` pattern,
-//!   which is a regex the binary has no crate for - `golem_core::pattern` is
-//!   the subset those patterns use, and PowerShell's `-match` semantics;
+//! - the asset is picked by the adapter's `<platform>_asset_<backend>`
+//!   pattern, which is a regex the binary has no crate for -
+//!   `golem_core::pattern` is the subset those patterns use, and PowerShell's
+//!   `-match` semantics;
 //! - `curl` is the transport because the binary has no TLS (see
 //!   `engine::request`) and GitHub is HTTPS-only; `pull.rs` uses curl for
 //!   Hugging Face the same way.
@@ -22,12 +23,32 @@
 //! ("This does not look like a tar archive"). `%SystemRoot%\System32\tar.exe`
 //! is bsdtar and reads one.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use golem_core::ini;
 use golem_core::json::{self, Value};
 use golem_core::pattern;
+
+/// The platform's name in an adapter's keys: `windows_repo`,
+/// `linux_asset_cuda`, `macos_asset_metal`.
+///
+/// A platform is a fact about the machine, not a setting, so it is read rather
+/// than configured: an adapter names an asset per platform and per backend,
+/// and this picks the pair that applies. That is why one
+/// `engines/llama.cpp/engine.ini` serves Windows and Linux with no mode key
+/// between them - `windows_*` was never about Windows being *chosen*, only
+/// about Windows being where the release path was first written.
+pub fn platform() -> &'static str {
+    if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
+}
 
 /// What to install, resolved by `launch::plan`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,7 +85,7 @@ struct Asset {
 /// and extracting it from GitHub when it is not. Returns the tag that is
 /// installed and the directory holding it - which for `latest` is only known
 /// here. `Err` is a message the caller prints after `[FAIL] `.
-pub fn ensure(home: &Path, pinned: &Pinned) -> Result<Installed, String> {
+pub fn ensure(home: &Path, pinned: &Pinned, out: &mut dyn Write) -> Result<Installed, String> {
     let ini_path = home.join("engines").join(&pinned.engine).join("engine.ini");
     let text = std::fs::read_to_string(&ini_path)
         .map_err(|e| format!("cannot read {}: {e}", ini_path.display()))?;
@@ -72,32 +93,37 @@ pub fn ensure(home: &Path, pinned: &Pinned) -> Result<Installed, String> {
 
     // 1. Strata installs itself (`launcher = strata` in engines/strata/engine.ini):
     //    its own setup, a private .venv, a ready-made engine and model. There is
-    //    no zip asset to fetch, so the binary hands it back to the shell.
+    //    no zip asset to fetch, and no shell launcher to hand it to any more, so
+    //    this engine is one golem does not support.
     if let Some(launcher) = adapter_key(&adapter, "launcher") {
         return Err(format!(
-            "engine {} installs itself with its `{launcher}` launcher ({}); \
-             the binary cannot install it yet - rerun through scripts/start-windows.ps1",
+            "engine {} installs itself with its `{launcher}` launcher ({}), which golem does \
+             not speak - and the shell launchers it used to be handed back to are gone, so \
+             this engine cannot be installed or started by golem",
             pinned.engine,
             ini_path.display()
         ));
     }
 
-    // 2. The script's own line: "Engine $EngineName has no Windows release
-    //    source (windows_repo in $EngineIni)".
-    let repo = adapter_key(&adapter, "windows_repo").ok_or_else(|| {
+    // 2. The release source for the platform this binary is running on. The
+    //    message names the key, because the answer is "add it to the adapter"
+    //    and a reader who cannot see which key is wanted cannot do that.
+    let repo_key = format!("{}_repo", platform());
+    let repo = adapter_key(&adapter, &repo_key).ok_or_else(|| {
         format!(
-            "Engine {} has no Windows release source (windows_repo in {})",
+            "engine {} has no release source for {} (`{repo_key}` in {})",
             pinned.engine,
+            platform(),
             ini_path.display()
         )
     })?;
 
-    // 3. The pattern for this backend's server zip. Without it there is nothing
-    //    to pick out of the release.
-    let asset_key = format!("windows_asset_{}", pinned.backend);
+    // 3. The pattern for this backend's server archive. Without it there is
+    //    nothing to pick out of the release.
+    let asset_key = format!("{}_asset_{}", platform(), pinned.backend);
     let asset_pattern = adapter_key(&adapter, &asset_key).ok_or_else(|| {
         format!(
-            "Engine {} has no `{asset_key}` in {}",
+            "engine {} has no `{asset_key}` in {}",
             pinned.engine,
             ini_path.display()
         )
@@ -113,7 +139,7 @@ pub fn ensure(home: &Path, pinned: &Pinned) -> Result<Installed, String> {
         let releases = json::parse(&curl_text(&url)?)
             .map_err(|e| format!("cannot parse the releases of {repo}: {e}"))?;
         let release = first_release_with_asset(&releases, &asset_pattern)?.ok_or_else(|| {
-            format!("No {} Windows release of {} found on GitHub", pinned.backend, pinned.engine)
+            format!("No {} {} release of {} found on GitHub", pinned.backend, platform(), pinned.engine)
         })?;
         tag = tag_of(&release).ok_or_else(|| {
             format!("the newest {} release of {} has no tag_name", pinned.backend, pinned.engine)
@@ -145,7 +171,8 @@ pub fn ensure(home: &Path, pinned: &Pinned) -> Result<Installed, String> {
             .map_err(|e| format!("cannot create {}: {e}", pinned.root.display()))?;
         std::fs::rename(&legacy, &dir)
             .map_err(|e| format!("cannot move {} to {}: {e}", legacy.display(), dir.display()))?;
-        println!(
+        let _ = writeln!(
+            out,
             "[ OK ] moved {} {tag} from .local/bin-windows to {}",
             pinned.engine,
             dir.display()
@@ -154,7 +181,8 @@ pub fn ensure(home: &Path, pinned: &Pinned) -> Result<Installed, String> {
     }
 
     // 7. Install.
-    println!(
+    let _ = writeln!(
+        out,
         "[ .. ] installing {} {tag} ({}) from github.com/{repo}...",
         pinned.engine, pinned.backend
     );
@@ -177,7 +205,12 @@ pub fn ensure(home: &Path, pinned: &Pinned) -> Result<Installed, String> {
     let assets = assets_of(&release);
 
     let server_zip = asset_for(&assets, &asset_pattern)?.ok_or_else(|| {
-        format!("No {} Windows asset of {} in release {tag}", pinned.backend, pinned.engine)
+        format!(
+            "no {} {} asset of {} in release {tag}",
+            pinned.backend,
+            platform(),
+            pinned.engine
+        )
     })?;
     let mut chosen = vec![server_zip];
 
@@ -185,7 +218,7 @@ pub fn ensure(home: &Path, pinned: &Pinned) -> Result<Installed, String> {
     // key that is set but matches nothing is an error: the script would add an
     // empty selection and skip the runtime silently, and a missing DLL is a
     // worse failure than a loud one.
-    let runtime_key = format!("windows_runtime_{}", pinned.backend);
+    let runtime_key = format!("{}_runtime_{}", platform(), pinned.backend);
     if let Some(runtime_pattern) = adapter_key(&adapter, &runtime_key) {
         let runtime = asset_for(&assets, &runtime_pattern)?.ok_or_else(|| {
             format!(
@@ -203,7 +236,7 @@ pub fn ensure(home: &Path, pinned: &Pinned) -> Result<Installed, String> {
     let tar = tar_program();
     for asset in &chosen {
         let mb = (asset.size as f64 / 1_048_576.0).round() as u64;
-        println!("[ .. ] {} ({mb} MB)", asset.name);
+        let _ = writeln!(out, "[ .. ] {} ({mb} MB)", asset.name);
         let zip = tmp.join(&asset.name);
         curl_download(&asset.url, &zip)?;
         extract(&tar, &zip, &dir)?;
@@ -215,7 +248,8 @@ pub fn ensure(home: &Path, pinned: &Pinned) -> Result<Installed, String> {
     // and that half-state must reinstall, not run.
     write_marker(&dir, &tag, &pinned.backend)?;
 
-    println!(
+    let _ = writeln!(
+        out,
         "[ OK ] {} {tag} ({}) installed to {}",
         pinned.engine,
         pinned.backend,
@@ -484,6 +518,16 @@ mod tests {
         dir
     }
 
+    /// An adapter carrying this platform's release keys, so the same tests
+    /// pass on all three (CI runs them on all three).
+    fn adapter_text(repo: &str, asset: &str) -> String {
+        let platform = platform();
+        format!(
+            "name = llama.cpp\nbuild = b11379\n{platform}_repo = {repo}\n\
+             {platform}_asset_cuda = {asset}\n"
+        )
+    }
+
     fn pinned(home: &Path, engine: &str, build: &str, backend: &str, server: &str) -> Pinned {
         Pinned {
             engine: engine.to_string(),
@@ -568,15 +612,17 @@ mod tests {
         let dir = adapter_home(
             "already",
             "llama.cpp",
-            "name = llama.cpp\nbuild = b11379\nwindows_repo = ggml-org/llama.cpp\n\
-             windows_asset_cuda = ^llama-.*bin-win-cuda-13\\.\\d+-x64\\.zip$\n",
+            &adapter_text(
+                "ggml-org/llama.cpp",
+                r"^llama-.*bin-\w+-cuda-13\.\d+-x64\.(zip|tar\.gz)$",
+            ),
         );
         let pinned = pinned(&dir, "llama.cpp", "b11379", "cuda", "llama-server.exe");
         let install = dir_of(&dir, "llama.cpp", "b11379", "cuda");
         std::fs::create_dir_all(&install).expect("install dir");
         std::fs::write(install.join("llama-server.exe"), "x").expect("exe");
         write_marker(&install, "b11379", "cuda").expect("marker");
-        let installed = ensure(&dir, &pinned).expect("already installed");
+        let installed = ensure(&dir, &pinned, &mut std::io::sink()).expect("already installed");
         assert_eq!(installed.tag, "b11379");
         assert_eq!(installed.dir, install);
         std::fs::remove_dir_all(&dir).ok();
@@ -653,13 +699,18 @@ mod tests {
 
     #[test]
     fn an_adapter_key_is_read_and_a_blank_one_counts_as_absent() {
-        let adapter = ini::parse(
-            "windows_repo = ggml-org/llama.cpp\nwindows_asset_cuda =\nlauncher = strata\n",
+        let adapter = ini::parse(&format!(
+            "{}_repo = ggml-org/llama.cpp\n{}_asset_cuda =\nlauncher = strata\n",
+            platform(),
+            platform()
+        ));
+        assert_eq!(
+            adapter_key(&adapter, &format!("{}_repo", platform())).as_deref(),
+            Some("ggml-org/llama.cpp")
         );
-        assert_eq!(adapter_key(&adapter, "windows_repo").as_deref(), Some("ggml-org/llama.cpp"));
         // An empty assignment is unset, as the shell's `-not $Eng[key]` reads it.
-        assert_eq!(adapter_key(&adapter, "windows_asset_cuda"), None);
-        assert_eq!(adapter_key(&adapter, "windows_asset_rocm"), None, "a missing key");
+        assert_eq!(adapter_key(&adapter, &format!("{}_asset_cuda", platform())), None);
+        assert_eq!(adapter_key(&adapter, &format!("{}_asset_rocm", platform())), None, "a missing key");
         assert_eq!(adapter_key(&adapter, "launcher").as_deref(), Some("strata"));
     }
 
@@ -673,18 +724,25 @@ mod tests {
             "name = strata\nbuild = v0.1.45\nlauncher = strata\n",
         );
         let pinned = pinned(&dir, "strata", "v0.1.45", "cuda", "python.exe");
-        let err = ensure(&dir, &pinned).expect_err("strata installs itself");
+        let err = ensure(&dir, &pinned, &mut std::io::sink()).expect_err("strata installs itself");
         assert!(err.contains("strata") && err.contains("launcher"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn a_missing_windows_repo_is_the_scripts_error() {
+    fn a_missing_release_source_names_the_key_to_add() {
+        // The message has to name the key, because the answer is "add it to
+        // the adapter" and a reader who cannot see which key is wanted cannot
+        // do that.
         let dir = adapter_home("no-repo", "llama.cpp", "name = llama.cpp\nbuild = b11379\n");
         let pinned = pinned(&dir, "llama.cpp", "b11379", "cuda", "llama-server.exe");
-        let err = ensure(&dir, &pinned).expect_err("no windows_repo");
+        let err = ensure(&dir, &pinned, &mut std::io::sink()).expect_err("no release source");
         assert!(
-            err.starts_with("Engine llama.cpp has no Windows release source (windows_repo in "),
+            err.starts_with(&format!(
+                "engine llama.cpp has no release source for {} (`{}_repo` in ",
+                platform(),
+                platform()
+            )),
             "{err}"
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -695,11 +753,11 @@ mod tests {
         let dir = adapter_home(
             "no-asset",
             "llama.cpp",
-            "name = llama.cpp\nbuild = b11379\nwindows_repo = ggml-org/llama.cpp\n",
+            &adapter_text("ggml-org/llama.cpp", ""),
         );
         let pinned = pinned(&dir, "llama.cpp", "b11379", "rocm", "llama-server.exe");
-        let err = ensure(&dir, &pinned).expect_err("no windows_asset_rocm");
-        assert!(err.contains("windows_asset_rocm"), "{err}");
+        let err = ensure(&dir, &pinned, &mut std::io::sink()).expect_err("no rocm asset key");
+        assert!(err.contains(&format!("{}_asset_rocm", platform())), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

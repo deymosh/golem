@@ -185,10 +185,33 @@ As of 2026-10-20 (`experiment/token-machine`):
   and refine spends one probe per knob). A **native UI** is a direction the user raised, not
   a task: the page stays until something better exists, and `tui.rs` is the proof that the
   console's data is a plain struct with actions as callbacks.
-- **Next**: the launcher port's live paired start (the binary's `up` against
-  `start-windows.ps1`, same `/props`, same pid file, a paired bench), then the model fetch
-  `up` still owes - after which the handover and the scripts go under the migration gate.
-  Then a release asset, so a fresh clone can reach any of this at all.
+- **The docker image is built and verified** (2026-10-20): one `Dockerfile`,
+  `--build-arg GPU_BACKEND=cuda|rocm`, `golem install` baking the pinned
+  engine, `ENTRYPOINT ["golem","service","--up"]`, and `compose.yml`'s
+  ~70-line shell entrypoint retired with its digest pin. The container forced
+  three real fixes on the way - SIGTERM on PID 1, reaping the engine child,
+  `GOLEM_LOCAL_AI_HOST` - all in [plan-deploy-modes.md](plan-deploy-modes.md)'s
+  "as built" section.
+- **The app is the service's client** (2026-10-20, later): `runner.rs` is the
+  one path the TUI's menu and the console's job runner take - the engine verbs
+  to `golem service` (started on demand, its lines streaming into the job log
+  the page polls), the measuring verbs as this binary's own commands, the
+  launcher only as the hand-back for an engine that installs itself. A folder
+  with no launcher runs the whole menu, which is the shape a release folder
+  has; see [plan-service.md](plan-service.md).
+- **The shell stack is gone, and the configuration moved with it** (2026-10-20, late):
+  `./golem`, `golem.cmd` and the scripts behind them are deleted, and with their last
+  readers gone the keys moved into `golem.toml`. `golem.toml` is git-ignored (it holds the
+  machine's port, its API key and the model it serves, and a secret cannot live in a tracked
+  file) and the tracked template is `golem.toml.example`, which the binary writes as
+  `golem.toml` on first run. The tuner's own restarts went onto the service first, so no
+  launcher was left on the measuring path either; `driver.rs`, `launch::Outcome` and
+  `service::HAND_BACK` are deleted with them, and an engine that installs itself (Strata) is
+  refused by name instead of handed back. `docs/plan-launchers.md` is done.
+- **Next**: [plan-smart-tune.md](plan-smart-tune.md) step 2 - the context prediction, then
+  one full `tune` end to end on a free desktop - and the release tag, which is a push and
+  the user's call. The tray and the logo stay open (a GUI toolkit and an asset the repo does
+  not carry).
 - Worth borrowing when the console grows a LAN face: a `Host`-header check, since the
   current console binds 127.0.0.1 only and that is the reason it needs none today.
 
@@ -392,19 +415,20 @@ launcher). The binary should not inherit that.
   Until then: **no new keys in `.env`.** A setting only the binary owns goes straight
   into `golem.toml` from its first day, so the surface that has to migrate only ever
   shrinks.
-- **Where this stands after the ports (2026-10-20).** The migration has started, and the
-  rule above is what decided the first nine keys. `TEMPERATURE`, `TOP_P`,
-  `TUNE_MIN_DECODE`, `TUNE_MIN_PREFILL`, `TUNE_MIN_DEPTH_DECODE`, `TUNE_CTX_POLICY`,
-  `TUNE_RUNS`, `TUNE_PREFILL` and `GATE_TOKENS` are in `golem.toml` now: the shell drivers
-  never read any of them, and the scripts that did are the measurement harnesses the binary
-  is. `state::env_value` reads `golem.toml` first and `.env` second - one mechanism, so a
-  key is in one file and never both - and the writers route a TOML-owned key to the TOML
-  file, because writing `.env` for a key the reader takes from elsewhere looks like it
-  worked and changes nothing.
-  The rest still cannot move: the launchers source `.env` for `ENGINE`, `MODELS_PRESET`,
-  `MODEL_ALIAS`, `LOCAL_AI_PORT` and `LOCAL_AI_API_KEY`, and they are still the shell's
-  because the binary starts engines by running them. So the order is unchanged - `up` (or
-  the launchers' `.env` reads) first, then the rest of the file.
+- **The migration is complete (2026-10-20, late).** Every key is in `golem.toml` now, because
+  the launchers that were the last readers of the rest are deleted: `ENGINE`, `GPU_BACKEND`,
+  `ENGINE_BUILD`, `LOCAL_AI_HOST`, `LOCAL_AI_PORT`, `LOCAL_AI_API_KEY`, `LOCAL_AI_BASE_URL`,
+  `HF_REPO`, `MODEL_FILE`, `SPEC_TYPE`, `DRAFT_HF_REPO`, `DRAFT_FILE`, `MODEL_ALIAS`,
+  `MODELS_PRESET`, `SLEEP_IDLE_SECONDS`, `HF_TOKEN`, `CONTEXT_SIZE`, `CPU_THREADS`,
+  `PARALLEL`, `GPU_LAYERS`, `CACHE_TYPE_K`, `CACHE_TYPE_V`, `LOAD_MODE` and `EXTRA_ARGS`,
+  alongside the nine that were already there. `DEPLOY_MODE` is gone rather than moved: there
+  are no deploy modes left to switch on.
+  The file split is the one `.env` had, for the same reason: `golem.toml.example` is the
+  tracked template and `golem.toml` is the machine's own, git-ignored - it holds the port,
+  the API key and the model this box serves, and a secret cannot live in a tracked file. A
+  release is the executable plus the `golem.toml` it writes beside itself on first run.
+  `state::env_value` still reads the TOML first and `.env` second, which is now only a
+  fallback for a machine that has one lying around.
 - **Nothing about this is urgent.** It is written down so the shell is not extended
   with configuration work the binary will own (2026-10-20: "we don't want to add
   features with the scripting way if we will have to rebuild in rust").

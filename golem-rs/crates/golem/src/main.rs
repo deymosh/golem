@@ -1,8 +1,9 @@
 //! The portable `golem` front door.
 //!
-//! The binary orchestrates; the shell scripts stay the engine drivers until a
-//! phase replaces their gate (docs/plan-portable-binary.md). Today it can read
-//! the results database and render both views of it.
+//! Every command is this binary's: the measurement, the tuner, the console,
+//! the screen, the engine and the service that owns it. There is no shell
+//! stack behind any of it, and the configuration is one file beside the
+//! binary (`golem.toml`, written from the compiled-in template on first run).
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -13,7 +14,6 @@ use std::sync::Arc;
 mod auto_tune;
 mod bench;
 mod client;
-mod driver;
 mod engine;
 mod eval;
 mod facts;
@@ -25,6 +25,8 @@ mod models;
 mod paths;
 mod pull;
 mod release;
+mod runner;
+mod service;
 mod setup;
 mod state;
 mod tune;
@@ -45,6 +47,7 @@ Commands (phased in, docs/plan-portable-binary.md):
   report [--no-open|--md]  Static page for sharing, or RESULTS.md for GitHub
   web              Web console: results, controls, live  (phases 2-3)
   status           Is the engine up, and what is it serving
+  service          Own the engine in the background; up/down/restart ask it
   up / down        Start / stop the engine (up installs the pinned build)
   restart          Down then up
   logs [--lines N] Follow the inference log
@@ -57,13 +60,12 @@ Commands (phased in, docs/plan-portable-binary.md):
   claude [args]    Launch Claude Code pointed at this server
   env              Print the exports for a shell
   setup            Inspect the machine, install build deps, scaffold dirs
-  install          Build llama.cpp with CUDA/ROCm  (native mode only)
+  install          Put the pinned engine build on this machine
 ";
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let mode = take_mode_flags(&mut args);
+    let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--version" | "-V" | "version") => {
             println!("golem {}", env!("CARGO_PKG_VERSION"));
@@ -96,6 +98,7 @@ async fn main() -> ExitCode {
         Some("pull") => code(pull::run(&prepare_home(), &args[1..])),
         Some("setup") => code(setup::run(&prepare_home(), &args[1..])),
         Some("install") => code(install::run(&prepare_home(), &args[1..])),
+        Some("service") => code(service::run(&prepare_home(), &args[1..])),
         Some("env") => {
             print!("{}", client::exports(&prepare_home()));
             ExitCode::SUCCESS
@@ -108,7 +111,7 @@ async fn main() -> ExitCode {
         }
         Some("tune") => cmd_tune(&args[1..]),
         Some(action @ ("up" | "down" | "start" | "stop" | "restart")) => {
-            cmd_driver(action, mode.as_deref(), &args[1..])
+            cmd_driver(action, &args[1..])
         }
         Some(other) => {
             eprintln!("golem: '{other}' is not wired up yet; see docs/plan-portable-binary.md");
@@ -119,35 +122,22 @@ async fn main() -> ExitCode {
 
 /// `golem status`: up or down, on what port, with what the engine lists.
 ///
+/// The verb itself lives in [`launch::status`] - it is engine state, and the
+/// service needs the same answer - so this is the front door's thin wrapper.
+///
 /// Exit code follows the shell's health check: 0 when the engine answers,
 /// 1 when it does not, so a script can branch on it.
 fn cmd_status() -> ExitCode {
     let home = prepare_home();
-    let endpoint = engine::Endpoint::from_home(&home);
-    let status = engine::status(&home);
-
-    if !status.up {
-        println!("[ .. ] engine down - no answer on http://127.0.0.1:{}", endpoint.port);
-        match status.pid {
-            // A pid file that outlived its process is worth saying out loud:
-            // it is what leaves an engine looking running when it is not.
-            Some(pid) => println!("        a pid file still records {pid} (start it, or the launcher clears it)"),
-            None => println!("        start it with: golem up"),
-        }
-        return ExitCode::from(1);
+    let exit = launch::status(&home, &mut std::io::stdout());
+    // The service is worth a line of its own because it changes what the
+    // engine's state *means*: with one running, `down` stops the engine and
+    // the service stays, and a reader who does not know that will wonder what
+    // is still holding the home.
+    if let Some(endpoint) = service::Endpoint::read(&home).filter(|_| service::running(&home)) {
+        println!("       golem service is up on 127.0.0.1:{} and owns the engine", endpoint.port);
     }
-
-    match status.pid {
-        Some(pid) => println!("[ OK ] engine up on http://127.0.0.1:{} (pid {pid})", status.port),
-        None => println!("[ OK ] engine up on http://127.0.0.1:{}", status.port),
-    }
-    let models = engine::models(&endpoint);
-    if models.is_empty() {
-        println!("       no models listed");
-    } else {
-        println!("       serving: {}", models.join(", "));
-    }
-    ExitCode::SUCCESS
+    code(exit)
 }
 
 /// `golem tune [preset]`: sweep, decide and gate (phase 4).
@@ -164,61 +154,59 @@ fn cmd_tune(args: &[String]) -> ExitCode {
     }
 }
 
-/// Pull the front door's global mode flags out of the command line.
+/// One engine verb, asked of the service that owns the engine.
 ///
-/// `--native`, `--docker` and `--windows` belong to the front door, not to a
-/// command: `./golem up --docker` and `./golem logs --windows` both mean "run
-/// this in that mode", and the shell resolves them before it dispatches. The
-/// binary does the same, in two steps - the resolved mode goes into
-/// `GOLEM_DEPLOY_MODE`, which is the per-invocation override every mode-aware
-/// command already reads through [`state::override_value`], and the flag is
-/// taken out of the argument list so the command it belonged to is not handed
-/// an argument it never declared.
+/// The service is started when there is none: it is what owns the engine from
+/// then on, and a client that spawns nothing cannot hand its caller's handles
+/// to a process that outlives the command. That last part is the whole reason
+/// the service exists - see `service.rs`.
 ///
-/// Returns the mode, or `None` when the line named none.
-fn take_mode_flags(args: &mut Vec<String>) -> Option<String> {
-    let mut mode = None;
-    args.retain(|arg| {
-        let resolved = match arg.as_str() {
-            "--native" => "native",
-            "--docker" => "docker",
-            "--windows" => "windows",
-            _ => return true,
-        };
-        // Last one wins, as the shell's loop does.
-        mode = Some(resolved.to_string());
-        false
-    });
-    if let Some(mode) = &mode {
-        std::env::set_var("GOLEM_DEPLOY_MODE", mode);
+/// A verb the service cannot serve at all - an engine whose adapter says it
+/// installs itself - comes back as its own failure with the reason in the
+/// reply, which is `launch::up`'s decision and not one to re-decide here.
+///
+/// The caller's `GOLEM_*` overrides travel with the request: the service
+/// runs the verb in its own environment, and losing them there is how a
+/// gate once scored the wrong model.
+fn through_service(home: &Path, verb: &str) -> Result<i32, String> {
+    let overrides: Vec<(String, String)> = [
+        "GOLEM_ENGINE",
+        "GOLEM_MODELS_PRESET",
+        "GOLEM_MODEL_ALIAS",
+        "GOLEM_LOCAL_AI_HOST",
+    ]
+    .iter()
+    .filter_map(|key| {
+        std::env::var(key).ok().filter(|v| !v.is_empty()).map(|v| ((*key).to_string(), v))
+    })
+    .collect();
+    let mut out = std::io::stdout();
+    if let Some(exit) = service::send_env(home, verb, &overrides, &mut out) {
+        return Ok(exit);
     }
-    mode
+    service::ensure_running(home, &mut out)?;
+    service::send_env(home, verb, &overrides, &mut out)
+        .ok_or_else(|| "the golem service started but did not answer".to_string())
 }
 
 /// `golem up|down|restart`: the engine, started and stopped.
 ///
-/// `up`, `down` and `restart` are the binary's for Windows and native mode
-/// (docs/plan-launchers.md); the shell launchers keep docker, and any engine
-/// whose adapter says it installs itself some other way. `up` and `down` are
-/// this binary's words and `start`/`stop` are `golem.cmd`'s; the launcher path
-/// below translates whichever it is given through [`driver::Driver::verb`],
-/// which is what makes `golem up` reach `golem.cmd` at all - it has no `up`,
-/// so the verb used to arrive as an unknown command.
+/// The five engine verbs, in this binary's words and `start`/`stop` as the
+/// console spells them, all reach the service that owns the engine. There are
+/// no deploy modes any more: the platform is detected and the engine is the
+/// pinned release built for it, so nothing here needs a shell to run a start.
 ///
-/// A mode flag the user typed is handed to the launcher as the launcher's own
-/// flag: the launcher reads `DEPLOY_MODE` from `.env`, so a mode that lived
-/// only in this process's environment would be silently dropped - and
-/// `./golem up --docker` would start a native server.
-fn cmd_driver(action: &str, mode: Option<&str>, rest: &[String]) -> ExitCode {
+/// `up --dry-run` is the one exception to "the service runs it": it resolves
+/// the command line and starts nothing, so it is answered here.
+fn cmd_driver(action: &str, rest: &[String]) -> ExitCode {
     let home = prepare_home();
-    let deploy = state::deploy_mode(&home);
 
     // `up --dry-run` resolves everything and starts nothing - the launcher's
     // `-DryRun`, and the check a port of `up` needs: the command line is the
-    // thing worth diffing, not the banner. It answers in every mode, as it did
-    // before the port: it is a resolution report, not a start.
+    // thing worth diffing, not the banner. It is a resolution report, not a
+    // start.
     if matches!(action, "up" | "start") && rest.iter().any(|a| a == "--dry-run") {
-        return match launch::up(&home, true) {
+        return match launch::up(&home, true, &mut std::io::stdout()) {
             Ok(_) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("[FAIL] {e}");
@@ -227,76 +215,48 @@ fn cmd_driver(action: &str, mode: Option<&str>, rest: &[String]) -> ExitCode {
         };
     }
 
-    // The port's own verbs. Docker keeps its launcher (`docker compose up -d`
-    // is a different thing), and an engine the binary cannot install says so
-    // and falls through to the shell below rather than failing.
-    if deploy != "docker" && matches!(action, "up" | "start" | "restart") {
-        let outcome = if action == "restart" {
-            launch::restart(&home)
-        } else {
-            launch::up(&home, false)
-        };
-        match outcome {
-            Ok(launch::Outcome::Started) => return ExitCode::SUCCESS,
-            Ok(launch::Outcome::NeedsLauncher(why)) => println!("[ .. ] {why}"),
+    // The engine's verbs go through the service that owns the engine. A verb
+    // the service cannot serve at all - an engine whose adapter says it
+    // installs itself - comes back as its own failure, because there is no
+    // shell launcher to hand it to any more.
+    if matches!(action, "up" | "start" | "restart") {
+        let verb = if action == "restart" { "restart" } else { "up" };
+        return match through_service(&home, verb) {
+            Ok(exit) => code(exit),
             Err(e) => {
                 eprintln!("[FAIL] {e}");
-                return ExitCode::from(1);
+                ExitCode::from(1)
             }
-        }
+        };
     }
 
-    // `down` is the binary's own, for windows and native mode. Stopping is a
-    // process tree and a wait for the card, and neither needs a launcher - the
-    // first step of the launchers' port, and the one with the correctness rule
-    // (kill the children, then wait for the VRAM). Docker keeps the launcher:
-    // its stop is `docker compose down`, which is a different thing.
-    if matches!(action, "down" | "stop") && deploy != "docker" {
-        return code(launch::down(&home));
+    // `down` is the service's too when there is one - the engine is its child,
+    // and it is the one that knows what it started. With no service the engine
+    // may still be running (a service that died, an engine started before it),
+    // so the direct stop stays: kill the tree, then wait for the card.
+    if matches!(action, "down" | "stop") {
+        let mut out = std::io::stdout();
+        return match service::send(&home, "down", &mut out) {
+            Some(exit) => code(exit),
+            None => code(launch::down(&home, &mut out)),
+        };
     }
 
-    let Some(launcher) = driver::Driver::find(&home) else {
-        eprintln!(
-            "[FAIL] no launcher in {} (golem.cmd or golem) - the engine drivers come with the repository for now",
-            home.display()
-        );
-        return ExitCode::from(1);
-    };
-    let args: Vec<String> = mode.map(|mode| format!("--{mode}")).into_iter().collect();
-    let log = home.join("logs/web-job.log");
-    println!("[ .. ] {action}: running the launcher (its output goes to logs/web-job.log)");
-    match driver::run_command(launcher.command_with(action, &args), &log) {
-        Ok(0) => {
-            println!("[ OK ] {action} finished");
-            ExitCode::SUCCESS
-        }
-        Ok(code) => {
-            eprintln!("[FAIL] {action} exited {code} - read logs/web-job.log");
-            ExitCode::from(1)
-        }
-        Err(e) => {
-            eprintln!("[FAIL] cannot run the launcher: {e}");
-            ExitCode::from(1)
-        }
-    }
+    // Every verb this front door takes returned above; this is the compiler's
+    // exit rather than a path a caller can reach.
+    eprintln!("[FAIL] {action} is not an engine verb");
+    ExitCode::from(2)
 }
 
 /// `golem tui`: the full-screen console, with every action routed through the
-/// same launcher the CLI uses.
+/// service that owns the engine, or run as this binary's own verbs.
 ///
 /// The screen decides *which* action; what an action does is this function's
 /// business, which is the seam `tui::run` takes a callback for. One entry is
-/// not a launcher verb - `Web` starts this binary's own console, in this
+/// not an action - `Web` starts this binary's own console, in this
 /// process, so it lives exactly as long as the screen that asked for it.
 async fn cmd_tui() -> ExitCode {
     let home = prepare_home();
-    let Some(launcher) = driver::Driver::find(&home) else {
-        eprintln!(
-            "[FAIL] no launcher in {} (golem.cmd or golem) - the engine drivers come with the repository for now",
-            home.display()
-        );
-        return ExitCode::from(1);
-    };
     let log = home.join("logs/web-job.log");
     let console = Console::new(home.clone());
     let handle = tokio::runtime::Handle::current();
@@ -307,8 +267,8 @@ async fn cmd_tui() -> ExitCode {
         // it exists because the match has to be total.
         tui::Action::Quit => String::new(),
         other => match verb_of(other) {
-            Some(verb) => describe(verb, driver::run(&launcher, verb, "", &log)),
-            None => format!("{other:?} has no launcher verb"),
+            Some(verb) => describe(verb, runner::run(&home, verb, "", &log)),
+            None => format!("{other:?} has no action"),
         },
     });
 
@@ -341,11 +301,10 @@ fn verb_of(action: tui::Action) -> Option<&'static str> {
 
 /// What the message line says after an action: short enough for one line,
 /// and it points at the log whenever the log is where the answer is.
-fn describe(verb: &str, outcome: std::io::Result<i32>) -> String {
-    match outcome {
-        Ok(0) => format!("{verb}: done"),
-        Ok(code) => format!("{verb}: exit {code} - see logs/web-job.log"),
-        Err(e) => format!("{verb}: cannot run the launcher ({e})"),
+fn describe(verb: &str, code: i32) -> String {
+    match code {
+        0 => format!("{verb}: done"),
+        code => format!("{verb}: exit {code} - see logs/web-job.log"),
     }
 }
 

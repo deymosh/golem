@@ -15,7 +15,8 @@ pub mod results;
 /// merge behind `write_candidate` / `write_overlay` in scripts/tune.sh.
 pub mod ini;
 
-/// GGUF header reader, golden-tested against scripts/gguf-info.sh.
+/// GGUF header reader: the layer count, the trained context and the parameter
+/// count the recorder and the tuner size their work from.
 pub mod gguf;
 
 /// Parsers for the RESULT lines of bench and eval output.

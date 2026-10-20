@@ -16,7 +16,7 @@ them keeps every OpenAI client working, but Claude Code will not connect to them
 | **vLLM** | `http://127.0.0.1:8000/v1` | OpenAI only; strong if you ever get a bigger GPU |
 | **LM Studio** | `http://127.0.0.1:1234/v1` | OpenAI only; GUI-driven |
 
-To swap: set `LOCAL_AI_BASE_URL` + `MODEL_ALIAS` in `.env` and start that backend yourself.
+To swap: set `LOCAL_AI_BASE_URL` + `MODEL_ALIAS` in `golem.toml` and start that backend yourself.
 
 `golem status` and `golem eval` (sanity, tool calls, needle) only use
 `LOCAL_AI_PORT` + `LOCAL_AI_API_KEY` + `MODEL_ALIAS`, so they work against any

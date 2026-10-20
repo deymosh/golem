@@ -12,7 +12,9 @@ license.workspace = true
 golem-core = { path = "../golem-core" }
 axum = "0.7"
 # process/time: the controls spawn the shell drivers and poll them.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "process", "time", "io-util"] }
+# signal: `golem service` stops the engine it owns when it is interrupted,
+# which is what keeps a Ctrl+C from leaving a model resident.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "process", "time", "io-util", "signal"] }
 # The full-screen console (phase 5).
 ratatui = "0.29"
 crossterm = "0.28"

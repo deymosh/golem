@@ -31,6 +31,7 @@
 //! its own. Both fall back rather than fail: the port is per engine, not per
 //! mode.
 
+use std::io::Write;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -69,6 +70,11 @@ const HEALTH_INTERVAL: Duration = Duration::from_secs(3);
 /// all: a bad flag or a missing model says so in those lines.
 const LOG_TAIL: usize = 15;
 
+/// The engine's own log, under `logs/`. One name for every platform: the
+/// `-windows` suffix was a mode, and there are no modes any more. The console
+/// tails this file and so does `golem logs`, which is why it is one constant.
+pub const LOG_NAME: &str = "llama-server.log";
+
 /// The model an unconfigured `MODEL_FILE` falls back to, as the launcher's is
 /// the same file.
 const DEFAULT_MODEL_FILE: &str = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
@@ -81,21 +87,21 @@ fn setting(home: &Path, key: &str, default: &str) -> String {
 }
 
 /// `golem down`: stop the engine and wait for the memory.
-pub fn down(home: &Path) -> i32 {
+pub fn down(home: &Path, out: &mut dyn Write) -> i32 {
     let Some(pid) = engine::pid(home) else {
-        println!("[INFO] no pid file - nothing to stop");
+        let _ = writeln!(out, "[INFO] no pid file - nothing to stop");
         return 0;
     };
     if !alive(pid) {
         // A pid file outliving its process is normal enough (a crash, a kill),
         // and the honest answer is to clean it up rather than report a stop
         // that did not happen.
-        println!("[INFO] process {pid} is not running - clearing the pid file");
+        let _ = writeln!(out, "[INFO] process {pid} is not running - clearing the pid file");
         remove_pid(home);
         return 0;
     }
 
-    println!("[ .. ] stopping the engine (pid {pid})...");
+    let _ = writeln!(out, "[ .. ] stopping the engine (pid {pid})...");
     kill_tree(pid);
 
     let deadline = Instant::now() + PROCESS_SETTLE;
@@ -105,37 +111,27 @@ pub fn down(home: &Path) -> i32 {
     remove_pid(home);
 
     if !wait_for_card() {
-        println!(
+        let _ = writeln!(
+            out,
             "[WARN] the GPU still reports {CARD_IDLE_MIB} MiB or more in use after {}s - \
              the next start may fail",
             CARD_SETTLE.as_secs()
         );
     }
-    println!("[ OK ] engine (pid {pid}) stopped");
+    let _ = writeln!(out, "[ OK ] engine (pid {pid}) stopped");
     0
-}
-
-/// What `up` did, or what it found that it cannot do.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Outcome {
-    /// The engine is running - or, in a dry run, resolved and printable.
-    Started,
-    /// This engine installs itself with something the binary does not speak.
-    /// The caller runs the shell launcher instead, which is what the shell
-    /// does today: a port that cannot cover one engine must not break it.
-    NeedsLauncher(String),
 }
 
 /// `golem up`: install the pinned build if it is missing, start the engine,
 /// and wait until it answers.
 ///
-/// `dry_run` is the launcher's `-DryRun`: resolve everything, install
-/// nothing, start nothing. It comes *before* the port check, which is the
-/// one place this deliberately differs from `start-windows.ps1` - there the
-/// check is earlier, so a dry run fails while an engine is up. The dry run's
-/// whole job is to say what would be started, and refusing to answer while
-/// something is running is the opposite of useful.
-pub fn up(home: &Path, dry_run: bool) -> Result<Outcome, String> {
+/// `dry_run` is the shell launcher's `-DryRun`: resolve everything, install
+/// nothing, start nothing. It comes *before* the port check, which is the one
+/// place this deliberately differs from the launcher it was ported from -
+/// there the check was earlier, so a dry run failed while an engine was up.
+/// The dry run's whole job is to say what would be started, and refusing to
+/// answer while something is running is the opposite of useful.
+pub fn up(home: &Path, dry_run: bool, out: &mut dyn Write) -> Result<(), String> {
     let mut plan = plan(home)?;
 
     // The launcher's line before it starts a single model rather than a
@@ -143,12 +139,13 @@ pub fn up(home: &Path, dry_run: bool) -> Result<Outcome, String> {
     // before the dry run's own exit in the script. Only the shape with a
     // preset gets it - with no preset there is no section to name.
     if plan.preset.is_some() && !plan.router {
-        println!("[ .. ] {} has no router mode: serving only [{}]", plan.engine, plan.served);
+        let _ = writeln!(out, "[ .. ] {} has no router mode: serving only [{}]", plan.engine, plan.served);
     }
 
     if dry_run {
         if !plan.program.is_file() {
-            println!(
+            let _ = writeln!(
+                out,
                 "[ .. ] would install {} {} ({}) into {}",
                 plan.engine,
                 plan.build,
@@ -157,30 +154,33 @@ pub fn up(home: &Path, dry_run: bool) -> Result<Outcome, String> {
             );
         }
         for (key, value) in &plan.dropped {
-            println!("[WARN] this engine has no equivalent of --{key} {value}, dropped");
+            let _ = writeln!(out, "[WARN] this engine has no equivalent of --{key} {value}, dropped");
         }
-        println!("[ OK ] dry run: \"{}\" {}", plan.program.display(), plan.args.join(" "));
-        println!("       (working directory: {})", plan.workdir.display());
-        println!("       serving: {}  -> pid {}", plan.served, plan.pid_file.display());
+        let _ = writeln!(out, "[ OK ] dry run: \"{}\" {}", plan.program.display(), plan.args.join(" "));
+        let _ = writeln!(out, "       (working directory: {})", plan.workdir.display());
+        let _ = writeln!(out, "       serving: {}  -> pid {}", plan.served, plan.pid_file.display());
         // The launcher's `-DryRun` downloads what is missing before it prints
         // this; a dry run that installed nothing must at least say what a real
         // one would fetch, or the report is a lie by omission.
-        if let Ok(jobs) = model_jobs(home, &plan) {
+        if let Ok(jobs) = model_jobs(home, &plan, out) {
             if !jobs.is_empty() {
-                println!("[ .. ] would fetch {} model file(s) the preset needs", jobs.len());
+                let _ = writeln!(out, "[ .. ] would fetch {} model file(s) the preset needs", jobs.len());
             }
         }
-        // A dry run still resolves a shape the binary hands back - the line
-        // above is what the shell would run - but saying so here is what
-        // keeps the report honest about who would actually start it.
+        // An engine the binary cannot start is still worth resolving in a
+        // dry run: the report says which one it is and why it will not run,
+        // which is more use than refusing to answer.
         if let Some(reason) = &plan.via_launcher {
-            println!("[ .. ] {reason}");
+            let _ = writeln!(out, "[ .. ] {reason}");
         }
-        return Ok(Outcome::Started);
+        return Ok(());
     }
 
+    // Nothing to hand this engine back to any more: the shell launchers are
+    // gone, so an engine that installs itself is one this binary does not
+    // support, and saying that is the honest answer.
     if let Some(reason) = &plan.via_launcher {
-        return Ok(Outcome::NeedsLauncher(reason.clone()));
+        return Err(reason.clone());
     }
 
     let endpoint = engine::Endpoint::from_home(home);
@@ -188,14 +188,15 @@ pub fn up(home: &Path, dry_run: bool) -> Result<Outcome, String> {
     // (`Get-NetTCPConnection -State Listen`), and a server that is up but
     // still loading answers nothing while it holds the socket.
     if listening(endpoint.port) {
-        // The two launchers disagree here and the difference is visible:
-        // start-local-ai.sh calls a healthy server "already running" and
-        // exits 0, while start-windows.ps1 refuses outright. Keeping both
-        // means `up` on a running engine stays a no-op on Linux and a
-        // mistake on Windows, which is what it is today.
-        if plan.mode != "windows" && healthy(&endpoint) {
-            println!("[ OK ] Local AI server is already running");
-            return Ok(Outcome::Started);
+        // Two cases, and they are not the same answer. Something that is *our*
+        // engine, already answering, makes `up` a no-op that succeeds - which
+        // is what a script wants from `up && bench`, and what a service that
+        // already has the engine up needs. Something else holding the port is
+        // a mistake worth refusing, because the alternative is a server that
+        // starts, reports a healthy pid, and answers nothing.
+        if healthy(&endpoint) {
+            let _ = writeln!(out, "[ OK ] Local AI server is already running");
+            return Ok(());
         }
         return Err(format!(
             "port {} is already in use. Stop the other server first: golem down",
@@ -204,7 +205,7 @@ pub fn up(home: &Path, dry_run: bool) -> Result<Outcome, String> {
     }
 
     if !plan.program.is_file() {
-        let installed = release::ensure(home, &plan.pinned())?;
+        let installed = release::ensure(home, &plan.pinned(), out)?;
         // The plan resolved a directory from what the configuration asked
         // for, and `latest` is not a directory name - the tag is. `ensure`
         // is the only thing that knows it, so the plan is corrected here
@@ -217,9 +218,9 @@ pub fn up(home: &Path, dry_run: bool) -> Result<Outcome, String> {
 
     // After the engine is on disk and before anything is spawned, which is
     // where `start-windows.ps1` does it.
-    ensure_models(home, &plan)?;
+    ensure_models(home, &plan, out)?;
 
-    start(home, &plan, &endpoint)
+    start(home, &plan, &endpoint, out)
 }
 
 /// `golem restart`: down, then up.
@@ -227,9 +228,49 @@ pub fn up(home: &Path, dry_run: bool) -> Result<Outcome, String> {
 /// `cmd_restart`'s two lines, and its `|| true` is the point: a restart is
 /// asked for exactly when the engine may not be running, so a stop that
 /// found nothing is not a failure to stop.
-pub fn restart(home: &Path) -> Result<Outcome, String> {
-    down(home);
-    up(home, false)
+pub fn restart(home: &Path, out: &mut dyn Write) -> Result<(), String> {
+    down(home, out);
+    up(home, false, out)
+}
+
+/// `golem status`: up or down, on what port, with what the engine lists.
+///
+/// Exit code follows the shell's health check: 0 when the engine answers,
+/// 1 when it does not, so a script can branch on it.
+pub fn status(home: &Path, out: &mut dyn Write) -> i32 {
+    let endpoint = engine::Endpoint::from_home(home);
+    let status = engine::status(home);
+
+    if !status.up {
+        let _ = writeln!(out, "[ .. ] engine down - no answer on http://127.0.0.1:{}", endpoint.port);
+        match status.pid {
+            // A pid file that outlived its process is worth saying out loud:
+            // it is what leaves an engine looking running when it is not.
+            Some(pid) => {
+                let _ = writeln!(out, "        a pid file still records {pid} (start it, or the launcher clears it)");
+            }
+            None => {
+                let _ = writeln!(out, "        start it with: golem up");
+            }
+        }
+        return 1;
+    }
+
+    match status.pid {
+        Some(pid) => {
+            let _ = writeln!(out, "[ OK ] engine up on http://127.0.0.1:{} (pid {pid})", status.port);
+        }
+        None => {
+            let _ = writeln!(out, "[ OK ] engine up on http://127.0.0.1:{}", status.port);
+        }
+    }
+    let models = engine::models(&endpoint);
+    if models.is_empty() {
+        let _ = writeln!(out, "       no models listed");
+    } else {
+        let _ = writeln!(out, "       serving: {}", models.join(", "));
+    }
+    0
 }
 
 /// The model files the preset needs and `data/models` lacks, in the order the
@@ -238,7 +279,7 @@ pub fn restart(home: &Path) -> Result<Outcome, String> {
 /// Pure: it reads the preset and decides, and fetches nothing. That is what
 /// lets a dry run say what a real one would download - and what lets the rules
 /// below be tested without a 20 GB file.
-fn model_jobs(home: &Path, plan: &Startup) -> Result<Vec<(String, String)>, String> {
+fn model_jobs(home: &Path, plan: &Startup, out: &mut dyn Write) -> Result<Vec<(String, String)>, String> {
     let models = home.join("data/models");
     let Some(preset_rel) = &plan.preset else {
         // No preset: `.env` names the model, and `pull`'s no-argument list is
@@ -271,7 +312,8 @@ fn model_jobs(home: &Path, plan: &Startup) -> Result<Vec<(String, String)>, Stri
             if all || section.name == plan.alias {
                 jobs.push((download.repo.clone(), download.file.clone()));
             } else {
-                println!(
+                let _ = writeln!(
+                    out,
                     "[WARN] preset [{}] is missing {} - fetch it with: golem pull {}",
                     section.name, download.file, section.name
                 );
@@ -298,7 +340,8 @@ fn model_jobs(home: &Path, plan: &Startup) -> Result<Vec<(String, String)>, Stri
             if section.name == plan.alias {
                 fatal.push(file);
             } else {
-                println!(
+                let _ = writeln!(
+                    out,
                     "[WARN] preset [{}] has no Download source for {file} - it will fail if requested",
                     section.name
                 );
@@ -323,17 +366,17 @@ fn model_jobs(home: &Path, plan: &Startup) -> Result<Vec<(String, String)>, Stri
 /// starts healthy and fails at the first request, which is the worst place to
 /// find out. A fresh machine's first `up` is therefore a download and then a
 /// working server, as the launchers promise.
-fn ensure_models(home: &Path, plan: &Startup) -> Result<(), String> {
-    let jobs = model_jobs(home, plan)?;
+fn ensure_models(home: &Path, plan: &Startup, out: &mut dyn Write) -> Result<(), String> {
+    let jobs = model_jobs(home, plan, out)?;
     if jobs.is_empty() {
         return Ok(());
     }
-    println!("[ .. ] fetching {} model file(s) the preset needs", jobs.len());
-    pull::fetch_all(home, &jobs)
+    let _ = writeln!(out, "[ .. ] fetching {} model file(s) the preset needs", jobs.len());
+    pull::fetch_all(home, &jobs, out)
 }
 
 /// Spawn the server, record its pid, and wait for it to answer.
-fn start(home: &Path, plan: &Startup, endpoint: &engine::Endpoint) -> Result<Outcome, String> {
+fn start(home: &Path, plan: &Startup, endpoint: &engine::Endpoint, out: &mut dyn Write) -> Result<(), String> {
     let mut command = Command::new(&plan.program);
     command
         .args(&plan.args)
@@ -383,37 +426,55 @@ fn start(home: &Path, plan: &Startup, endpoint: &engine::Endpoint) -> Result<Out
         // The server is up and the model is about to load; a pid file we
         // cannot write is worth saying and not worth killing that over.
         // `down` copes without one - it clears what it cannot use.
-        eprintln!("[WARN] cannot write {}: {e}", plan.pid_file.display());
+        let _ = writeln!(out, "[WARN] cannot write {}: {e}", plan.pid_file.display());
     }
 
-    println!("[ OK ] {} {} started, PID {pid}", plan.engine, plan.build);
-    println!("       logs: {}", plan.log.display());
-    println!("[ .. ] waiting for the model to load (first boot includes GPU warmup)...");
+    let _ = writeln!(out, "[ OK ] {} {} started, PID {pid}", plan.engine, plan.build);
+    let _ = writeln!(out, "       logs: {}", plan.log.display());
+    let _ = writeln!(out, "[ .. ] waiting for the model to load (first boot includes GPU warmup)...");
 
-    wait_healthy(plan, &mut child, endpoint)?;
+    wait_healthy(plan, &mut child, endpoint, out)?;
+
+    // The parent outlives the engine - the service is long-lived - so someone
+    // must reap the child or it sits as a zombie on Unix, where `kill -0`
+    // still answers for it and `down` polls a corpse. One blocked thread per
+    // engine, for the engine's lifetime.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 
     // The launcher's two closing lines, one per mode: a router loads its
     // models on demand, so what is healthy is the router and not a model.
     match &plan.preset {
-        Some(preset) => println!(
-            "[ OK ] router healthy on http://{}:{} (presets: {preset}; models load on first request)",
-            plan.host, endpoint.port
-        ),
-        None => println!(
-            "[ OK ] healthy on http://{}:{} (model: {})",
-            plan.host, endpoint.port, plan.served
-        ),
+        Some(preset) => {
+            let _ = writeln!(
+                out,
+                "[ OK ] router healthy on http://{}:{} (presets: {preset}; models load on first request)",
+                plan.host, endpoint.port
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "[ OK ] healthy on http://{}:{} (model: {})",
+                plan.host, endpoint.port, plan.served
+            );
+        }
     }
-    println!();
-    print!(
+    let _ = writeln!(out);
+    // The shell that typed this reads one of these two: `$env:` on Windows,
+    // `export` everywhere else. That is a fact about the platform, not a mode
+    // somebody chose.
+    let _ = write!(
+        out,
         "{}",
-        if plan.mode == "windows" {
+        if cfg!(windows) {
             client::powershell_exports(home)
         } else {
             client::exports(home)
         }
     );
-    Ok(Outcome::Started)
+    Ok(())
 }
 
 /// Poll `/health` until it answers, until the child exits, or until the
@@ -422,6 +483,7 @@ fn wait_healthy(
     plan: &Startup,
     child: &mut Child,
     endpoint: &engine::Endpoint,
+    out: &mut dyn Write,
 ) -> Result<(), String> {
     let deadline = Instant::now() + LOAD_DEADLINE;
     loop {
@@ -434,7 +496,7 @@ fn wait_healthy(
         {
             let tail = tail(&plan.log, LOG_TAIL);
             if !tail.is_empty() {
-                println!("{tail}");
+                let _ = writeln!(out, "{tail}");
             }
             return Err(format!(
                 "{} server exited during startup ({})",
@@ -577,8 +639,8 @@ fn used_mib() -> Option<u64> {
 /// Everything needed to start the engine, resolved from the home.
 ///
 /// Pure: it reads files and decides, and spawns nothing. That seam is what
-/// makes the port checkable without a GPU - the same home gives the same plan,
-/// and the plan is the thing worth diffing against `start-windows.ps1 --dry-run`.
+/// makes the start checkable without a GPU - the same home gives the same
+/// plan, and `up --dry-run` is what prints it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Startup {
     pub program: PathBuf,
@@ -600,11 +662,10 @@ pub struct Startup {
     /// - and the executable's name inside it.
     pub bin: PathBuf,
     pub server: String,
-    /// The address the server is told to bind and the mode it is being
-    /// started in: the closing banner and the export block differ per mode,
-    /// because the launcher's do.
+    /// The address the server is told to bind. The closing banner names it,
+    /// and the export block that follows is the shell's own syntax for the
+    /// platform this is running on.
     pub host: String,
-    pub mode: String,
     /// The preset, in router mode: what the closing line names as the thing
     /// that was served. `None` means a single model, and `served` names it.
     pub preset: Option<String>,
@@ -674,13 +735,18 @@ pub fn plan(home: &Path) -> Result<Startup, String> {
     let backend = resolve_backend(home, adapter.global("backend").unwrap_or("cuda"));
     let build = engine_build(home, &engine, &adapter)?;
     let bin = home.join(".local").join("engines").join(&engine).join(format!("{build}-{backend}"));
-    let server = adapter.global("server").map(str::to_string).unwrap_or_else(|| {
-        if cfg!(windows) { "llama-server.exe".to_string() } else { "llama-server".to_string() }
-    });
+    let server = server_name(&adapter);
 
     let port = state::env_value(home, "LOCAL_AI_PORT").unwrap_or_else(|| "8000".to_string());
     let key = state::env_value(home, "LOCAL_AI_API_KEY").unwrap_or_else(|| "local-ai-key".to_string());
-    let host = state::env_value(home, "LOCAL_AI_HOST").unwrap_or_else(|| "127.0.0.1".to_string());
+    // `LOCAL_AI_HOST` through the override, because a container is the one
+    // caller that must *not* take it from the file: the file is a host-side
+    // setting (127.0.0.1 keeps the LAN out), while a container's port is
+    // published and its engine has to bind 0.0.0.0 whatever the mounted
+    // `.env` says. Same idiom as the three above, same reason: the
+    // environment of the process that starts the engine is the per-run word.
+    let host = state::override_value(home, "GOLEM_LOCAL_AI_HOST", "LOCAL_AI_HOST")
+        .unwrap_or_else(|| "127.0.0.1".to_string());
     let alias = state::override_value(home, "GOLEM_MODEL_ALIAS", "MODEL_ALIAS")
         .unwrap_or_else(|| "local-model".to_string());
     let sleep_idle = state::env_value(home, "SLEEP_IDLE_SECONDS").unwrap_or_default();
@@ -708,7 +774,7 @@ pub fn plan(home: &Path) -> Result<Startup, String> {
     flags.push(("api-key".to_string(), key.clone()));
     flags.push(("log-colors".to_string(), "off".to_string()));
     // The server writes its own log, and this is the file the console tails.
-    let log = home.join("logs/llama-server-windows.log");
+    let log = home.join("logs").join(LOG_NAME);
     flags.push(("log-file".to_string(), log.to_string_lossy().into_owned()));
     if !sleep_idle.is_empty() {
         flags.push(("sleep-idle-seconds".to_string(), sleep_idle));
@@ -794,15 +860,17 @@ pub fn plan(home: &Path) -> Result<Startup, String> {
     // The engines the binary cannot install itself. Strata's adapter says
     // `launcher = strata`, and that launcher is a git clone, a Python venv
     // and its own `setup.py` - a port of its own, not a corner of this one.
-    // Saying so is what keeps `up` from breaking an engine it does not
-    // cover: the caller runs the shell launcher instead.
+    // The adapter key stays because it is how an engine says so, but there is
+    // nothing behind it now: the shell launchers are gone, so `up` refuses
+    // this engine instead of handing it back.
     let via_launcher = adapter
         .global("launcher")
         .filter(|launcher| !launcher.is_empty())
         .map(|launcher| {
             format!(
                 "engine {engine} installs itself with the {launcher} launcher, which the binary \
-                 does not speak yet - running the shell launcher for it"
+                 does not speak - and the shell launchers it used to be handed back to are gone, \
+                 so this engine cannot be started by golem"
             )
         });
 
@@ -834,7 +902,6 @@ pub fn plan(home: &Path) -> Result<Startup, String> {
         bin,
         server,
         host,
-        mode: state::deploy_mode(home),
         preset: router.then(|| preset_rel.clone()),
         router,
         alias,
@@ -858,14 +925,40 @@ fn pid_name() -> &'static str {
     if cfg!(windows) { "llama-server-windows.pid" } else { "llama-server.pid" }
 }
 
-/// `GPU_BACKEND`, with `auto` resolved from the toolchain that is installed.
+/// `GPU_BACKEND`, with `auto` resolved from what this machine has.
+///
+/// A backend is a fact about the card, so `auto` reads it: `nvidia-smi` for
+/// CUDA, `rocminfo` for ROCm, and on macOS the answer is Metal whatever is
+/// installed. The adapter's `backend` key is the last fallback, for a machine
+/// where nothing answers and the adapter still knows what it wants.
 fn resolve_backend(home: &Path, fallback: &str) -> String {
     let configured = state::env_value(home, "GPU_BACKEND").unwrap_or_else(|| "auto".to_string());
     match configured.as_str() {
-        "cuda" | "rocm" => configured,
+        "cuda" | "rocm" | "metal" => configured,
+        _ if cfg!(target_os = "macos") => "metal".to_string(),
         _ if which("nvidia-smi") => "cuda".to_string(),
         _ if which("rocminfo") => "rocm".to_string(),
         _ => fallback.to_string(),
+    }
+}
+
+/// The server executable's name on this platform.
+///
+/// The adapter names the binary and the platform supplies the extension: a
+/// release carries `llama-server.exe` on Windows and `llama-server` on Linux,
+/// and that is a fact about the platform rather than about the engine. A
+/// `.exe` written into the adapter is accepted and normalised, so an adapter
+/// written before this rule still works.
+fn server_name(adapter: &ini::Document) -> String {
+    let base = adapter
+        .global("server")
+        .unwrap_or("llama-server")
+        .trim_end_matches(".exe")
+        .to_string();
+    if cfg!(windows) {
+        format!("{base}.exe")
+    } else {
+        base
     }
 }
 
@@ -910,7 +1003,7 @@ mod tests {
     #[test]
     fn a_home_with_no_pid_file_is_already_stopped() {
         let dir = home("none");
-        assert_eq!(down(&dir), 0, "stopping nothing is not a failure");
+        assert_eq!(down(&dir, &mut std::io::sink()), 0, "stopping nothing is not a failure");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -919,7 +1012,7 @@ mod tests {
         // A pid that cannot be running: 0 is not a process any OS hands out.
         let dir = home("stale");
         std::fs::write(dir.join(".local/llama-server-windows.pid"), "0\n").expect("write");
-        assert_eq!(down(&dir), 0);
+        assert_eq!(down(&dir, &mut std::io::sink()), 0);
         assert!(
             !dir.join(".local/llama-server-windows.pid").exists(),
             "the stale pid file is gone"
@@ -1107,28 +1200,41 @@ mod tests {
     }
 
     #[test]
-    fn a_port_someone_already_holds_refuses_on_windows_and_is_a_no_op_when_healthy() {
-        // The two launchers disagree and the difference is visible:
-        // start-windows.ps1 throws on any listener, start-local-ai.sh calls a
-        // healthy server "already running" and exits 0.
+    fn a_port_our_engine_already_answers_on_is_a_no_op() {
+        // One rule for every platform now that there is one engine path: an
+        // engine of ours that is already answering makes `up` succeed, which
+        // is what `up && bench` needs from a script and what a service that
+        // already has the engine up needs from a client.
         let port = health_server().to_string();
-        let windows = up_home("up-busy-windows", "windows", &port);
-        let err = up(&windows, false).expect_err("the port is held");
+        let dir = up_home("up-busy", "windows", &port);
+        assert_eq!(up(&dir, false, &mut std::io::sink()), Ok(()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_port_something_else_holds_is_refused() {
+        // Listening, but not our engine: a start here would report a healthy
+        // pid and answer nothing, because the first listener owns the socket.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port().to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                // Accept and hang up: a port that is taken but not answering.
+                drop(stream);
+            }
+        });
+        let dir = up_home("up-busy-other", "windows", &port);
+        let err = up(&dir, false, &mut std::io::sink()).expect_err("the port is held");
         assert!(err.contains("already in use"), "{err}");
-
-        let native = up_home("up-busy-native", "native", &port);
-        assert_eq!(up(&native, false), Ok(Outcome::Started));
-
-        std::fs::remove_dir_all(&windows).ok();
-        std::fs::remove_dir_all(&native).ok();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn a_dry_run_resolves_the_whole_line_and_starts_nothing() {
-        // The check a port of `up` needs: the command line is the thing worth
-        // diffing against `start-windows.ps1 -DryRun`, not the banner.
+        // The command line is the thing worth reading, not the banner, and a
+        // dry run is the only way to see it without starting anything.
         let dir = up_home("up-dry", "windows", "1");
-        assert_eq!(up(&dir, true), Ok(Outcome::Started));
+        assert_eq!(up(&dir, true, &mut std::io::sink()), Ok(()));
         // Nothing was installed, nothing was started, no pid was written.
         assert!(!dir.join(".local/llama-server-windows.pid").exists());
         assert!(!dir.join(".local/engines/llama.cpp/b11379-cuda").exists());
@@ -1136,11 +1242,11 @@ mod tests {
     }
 
     #[test]
-    fn an_engine_that_installs_itself_falls_back_to_the_launcher() {
+    fn an_engine_that_installs_itself_is_refused_not_handed_back() {
         // Strata's adapter says `launcher = strata`: a git clone and a Python
-        // setup, which is a port of its own. The fallback is per engine, not
-        // per mode, and it is what keeps `up` from breaking an engine it does
-        // not cover.
+        // setup, which the binary does not speak. It used to be handed back to
+        // the shell launcher; the launchers are gone, so this is a refusal
+        // that names the engine and the reason.
         let dir = up_home("up-strata", "windows", "1");
         std::fs::write(
             dir.join("engines/llama.cpp/engine.ini"),
@@ -1148,12 +1254,10 @@ mod tests {
              launcher = strata\n",
         )
         .expect("adapter");
-        match up(&dir, false) {
-            Ok(Outcome::NeedsLauncher(why)) => assert!(why.contains("strata"), "{why}"),
-            other => panic!("expected the launcher fallback, got {other:?}"),
-        }
-        // A dry run still resolves it: it reports, it does not decide who runs.
-        assert_eq!(up(&dir, true), Ok(Outcome::Started));
+        let err = up(&dir, false, &mut std::io::sink()).expect_err("the binary cannot start it");
+        assert!(err.contains("strata"), "{err}");
+        // A dry run still resolves it: it reports, it does not refuse to say.
+        assert_eq!(up(&dir, true, &mut std::io::sink()), Ok(()));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1179,10 +1283,9 @@ mod tests {
     }
 
     #[test]
-    fn the_plan_carries_the_mode_the_preset_and_the_host_the_banner_needs() {
+    fn the_plan_carries_the_preset_and_the_host_the_banner_needs() {
         let dir = up_home("plan-banner", "windows", "1");
         let plan = plan(&dir).expect("plan");
-        assert_eq!(plan.mode, "windows");
         assert_eq!(plan.host, "127.0.0.1");
         assert_eq!(plan.preset.as_deref(), Some("config/models.ini"));
         assert_eq!(plan.via_launcher, None);
@@ -1219,7 +1322,7 @@ mod tests {
         // The rule that keeps a first start from pulling 20 GB nobody asked
         // for: the section being served is fetched, the others wait.
         let dir = preset_home("jobs-served", "model-a", TWO_SECTIONS, &[]);
-        let jobs = model_jobs(&dir, &plan(&dir).expect("plan")).expect("jobs");
+        let jobs = model_jobs(&dir, &plan(&dir).expect("plan"), &mut std::io::sink()).expect("jobs");
         assert_eq!(jobs, vec![("org/a".to_string(), "a.gguf".to_string())]);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1227,7 +1330,7 @@ mod tests {
     #[test]
     fn a_model_already_on_disk_is_not_a_job() {
         let dir = preset_home("jobs-present", "model-a", TWO_SECTIONS, &["a.gguf"]);
-        let jobs = model_jobs(&dir, &plan(&dir).expect("plan")).expect("jobs");
+        let jobs = model_jobs(&dir, &plan(&dir).expect("plan"), &mut std::io::sink()).expect("jobs");
         assert!(jobs.is_empty(), "{jobs:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1237,7 +1340,7 @@ mod tests {
         // A preset this machine has not seen: the alias names no section, so
         // there is no "the one being served" to be conservative about.
         let dir = preset_home("jobs-new", "not-a-section", TWO_SECTIONS, &[]);
-        let jobs = model_jobs(&dir, &plan(&dir).expect("plan")).expect("jobs");
+        let jobs = model_jobs(&dir, &plan(&dir).expect("plan"), &mut std::io::sink()).expect("jobs");
         assert_eq!(
             jobs,
             vec![
@@ -1253,7 +1356,7 @@ mod tests {
         // It can never appear on its own, and the failure without this check
         // is at the first request rather than at the start.
         let dir = preset_home("jobs-nosource", "model-a", "[model-a]\nmodel = a.gguf\n", &[]);
-        let err = model_jobs(&dir, &plan(&dir).expect("plan")).expect_err("no source");
+        let err = model_jobs(&dir, &plan(&dir).expect("plan"), &mut std::io::sink()).expect_err("no source");
         assert_eq!(
             err,
             "Preset models without a \"; Download:\" source (add one per file in \
@@ -1271,7 +1374,7 @@ mod tests {
             "; Download: org/a -> a.gguf\n[model-a]\nmodel = a.gguf\n\n[model-b]\nmodel = b.gguf\n",
             &[],
         );
-        let jobs = model_jobs(&dir, &plan(&dir).expect("plan")).expect("jobs");
+        let jobs = model_jobs(&dir, &plan(&dir).expect("plan"), &mut std::io::sink()).expect("jobs");
         assert_eq!(jobs, vec![("org/a".to_string(), "a.gguf".to_string())]);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1286,7 +1389,7 @@ mod tests {
             "; Download: org/a -> a.gguf\n[model-a]\nmodel = a.gguf\nspec-draft-model = d.gguf\n",
             &[],
         );
-        let err = model_jobs(&dir, &plan(&dir).expect("plan")).expect_err("no source");
+        let err = model_jobs(&dir, &plan(&dir).expect("plan"), &mut std::io::sink()).expect_err("no source");
         assert!(err.ends_with("d.gguf"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1366,13 +1469,13 @@ mod tests {
         );
         let resolved = plan(&dir).expect("plan");
         assert_eq!(
-            model_jobs(&dir, &resolved).expect("jobs"),
+            model_jobs(&dir, &resolved, &mut std::io::sink()).expect("jobs"),
             vec![("unsloth/Qwen3.6-35B-A3B-GGUF".to_string(), "only.gguf".to_string())]
         );
         // And the file being there takes it off the list.
         std::fs::create_dir_all(dir.join("data/models")).expect("models");
         std::fs::write(dir.join("data/models/only.gguf"), "x").expect("model");
-        assert!(model_jobs(&dir, &resolved).expect("jobs").is_empty());
+        assert!(model_jobs(&dir, &resolved, &mut std::io::sink()).expect("jobs").is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1394,7 +1497,6 @@ mod tests {
             bin: dir.join(".local/engines/fake/b0-cuda"),
             server: "fake.exe".to_string(),
             host: "127.0.0.1".to_string(),
-            mode: "windows".to_string(),
             preset: None,
             router: false,
             alias: "fake".to_string(),
@@ -1413,7 +1515,7 @@ mod tests {
         let args = if cfg!(windows) { vec!["/c", "exit", "3"] } else { vec!["-c", "exit 3"] };
         let plan = fake_plan(&dir, args);
         let endpoint = engine::Endpoint { port: 1, api_key: String::new() };
-        let err = start(&dir, &plan, &endpoint).expect_err("the child exited at once");
+        let err = start(&dir, &plan, &endpoint, &mut std::io::sink()).expect_err("the child exited at once");
         assert!(err.contains("exit code 3"), "{err}");
         // The pid was written before the wait, as the launcher's is.
         let pid = std::fs::read_to_string(dir.join(".local/llama-server.pid")).expect("pid");

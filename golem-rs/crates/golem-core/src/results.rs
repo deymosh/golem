@@ -20,9 +20,9 @@ use crate::json::{self, Value};
 /// What produced a row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// `./golem bench`, or one point of a tune sweep.
+    /// `golem bench`, or one point of a tune sweep.
     Bench,
-    /// `./golem eval`, including the tuner's gate.
+    /// `golem eval`, including the tuner's gate.
     Eval,
     /// A measured rejection, with the reason in the note.
     Reject,

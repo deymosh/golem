@@ -4,7 +4,7 @@
 
 | Service | Container | Listens | Protocol | Config |
 |---|---|---|---|---|
-| inference | `golem-inference` (docker) or `llama-server.exe` (windows mode) | `0.0.0.0:8000` | **Anthropic** Messages API (`/v1/messages`) **and** OpenAI API (`/v1/chat/completions`, `/v1/models`) | `.env` runtime vars → compose `command` / `scripts/start-windows.ps1` (same flags) |
+| inference | `llama-server` (native) or the same engine inside `golem-inference` | `0.0.0.0:8000` | **Anthropic** Messages API (`/v1/messages`) **and** OpenAI API (`/v1/chat/completions`, `/v1/models`) | `golem.toml` runtime keys → the command line `golem up` resolves |
 
 There is **no translation layer**: llama.cpp serves the Anthropic Messages API natively, so
 agents connect straight to `:8000`. Both APIs are served by the same process, model and KV
@@ -16,7 +16,7 @@ cache — a request through either protocol hits the same weights and the same p
 (`:8000`), auth `x-api-key` (or Bearer) = `LOCAL_AI_API_KEY`. llama-server runs the GGUF and
 streams Anthropic SSE events back (`message_start` → `content_block_delta` → `message_stop`),
 including `thinking` and `tool_use` blocks. OpenAI clients hit `/v1/chat/completions` with
-`Authorization: Bearer` = the same key. Tool calling needs `--jinja` (enabled in compose).
+`Authorization: Bearer` = the same key. Tool calling needs `--jinja`, which the preset and the single-model command line both set.
 
 Verified empirically against this stack (2026-09-20): non-streamed and streamed Anthropic
 responses, Bearer auth, and a tool-use round trip (`stop_reason: "tool_use"`) all behave as the
@@ -35,7 +35,7 @@ secret in `LOCAL_AI_API_KEY` and firewall if the LAN is not trusted.
 
 ## Memory timeline
 
-Two regimes, chosen by `EXTRA_ARGS` in `.env` (details and measured numbers:
+Two regimes, chosen by `EXTRA_ARGS` in `golem.toml` (details and measured numbers:
 [models.md](models.md)):
 
 - **Dense model, all weights in VRAM** — weights are resident from boot; the KV cache is

@@ -44,7 +44,7 @@ use golem_core::results::Kind;
 use golem_core::time;
 use golem_core::tune::{self, Floor, Point, Rung, RungOutcome};
 
-use crate::driver::{self, Driver};
+use crate::runner;
 use crate::engine;
 use crate::state;
 
@@ -457,7 +457,6 @@ pub struct Verdict {
 /// Everything a run needs to remember while it sweeps.
 struct Tuner<'a> {
     home: &'a Path,
-    driver: &'a Driver,
     opts: Options,
     machine: Machine,
     /// The preset file, as `.env` names it (relative to the home), and its
@@ -475,9 +474,6 @@ struct Tuner<'a> {
     ctx_seed: u64,
     ctx_ceiling: u64,
     ubatch: String,
-    /// The deploy mode this run is in, for the plan's `(windows mode)` tag:
-    /// the front door's `--native`/`--docker`/`--windows` first, then `.env`.
-    deploy_mode: String,
     port: u16,
     points: Vec<Measured>,
     /// Where the narration goes: stdout for `golem tune`, the per-preset log
@@ -520,16 +516,12 @@ pub fn sweep(home: &Path, args: &[String], out: Box<dyn Write>) -> Result<Verdic
 }
 
 fn sweep_with(home: &Path, opts: Options, out: Box<dyn Write>) -> Result<Verdict, String> {
-    let driver = Driver::find(home).ok_or_else(|| {
-        format!("no launcher in {} - the tuner drives the shell launchers", home.display())
-    })?;
-    Tuner::new(home, &driver, opts, out)?.sweep()
+    Tuner::new(home, opts, out)?.sweep()
 }
 
 impl<'a> Tuner<'a> {
     fn new(
         home: &'a Path,
-        driver: &'a Driver,
         opts: Options,
         out: Box<dyn Write>,
     ) -> Result<Tuner<'a>, String> {
@@ -563,7 +555,6 @@ impl<'a> Tuner<'a> {
         let ubatch = doc.value(&opts.target, "ubatch-size").unwrap_or_default().to_string();
         Ok(Tuner {
             home,
-            driver,
             opts,
             machine,
             preset_rel,
@@ -574,9 +565,6 @@ impl<'a> Tuner<'a> {
             ctx_seed,
             ctx_ceiling: facts.n_ctx_train,
             ubatch,
-            deploy_mode: state::override_value(home, "GOLEM_DEPLOY_MODE", "DEPLOY_MODE")
-                .filter(|mode| !mode.is_empty())
-                .unwrap_or_else(|| "native".to_string()),
             port,
             points: Vec::new(),
             out: RefCell::new(out),
@@ -737,11 +725,7 @@ impl<'a> Tuner<'a> {
             self.model_file,
             self.model_gb()
         ));
-        self.emit(format_args!(
-            "  engines    {}  ({} mode)",
-            engines.join(" "),
-            self.deploy_mode
-        ));
+        self.emit(format_args!("  engines    {}", engines.join(" ")));
         self.emit(format_args!(
             "  vram       {} MiB total, {} MiB in use by the desktop",
             m.vram_total_mib, m.vram_used_mib
@@ -1219,26 +1203,37 @@ impl<'a> Tuner<'a> {
         Some(())
     }
 
-    /// Restart the engine on `preset`, with the environment that points the
-    /// launcher at it.
+    /// Restart the engine on `preset`, pointed there by the request's
+    /// `GOLEM_*` overrides.
     ///
-    /// `GOLEM_*` and not plain names: `./golem` re-sources `.env`, so
-    /// `MODELS_PRESET` set here would be overwritten. That indirection is
-    /// also the bug this port exists to kill - the eval harness used to lose
-    /// exactly these variables on the way into WSL and gate the wrong model.
-    /// `lock` says whether this restart will pin the weights into RAM - the
-    /// gate does, a sweep point does not - and only a locked load waits for
-    /// the previous one's memory to come back.
+    /// The service is the only process that starts engines now, so the
+    /// candidate's environment travels inside the request rather than in a
+    /// child process's - which is also the one road it cannot be lost on. The
+    /// old indirection existed because `./golem` re-sourced `.env`, and a plain
+    /// `MODELS_PRESET` set here would have been overwritten; `GOLEM_*` names
+    /// survive that, and now they ride the protocol. `lock` says whether this
+    /// restart will pin the weights into RAM - the gate does, a sweep point
+    /// does not - and only a locked load waits for the previous one's memory
+    /// to come back.
     fn restart(&self, engine: &str, preset: &str, log: &str, lock: bool) -> std::io::Result<i32> {
         if lock {
             self.wait_for_ram();
         }
-        let mut command = self.driver.command_with("restart", &[]);
-        command
-            .env("GOLEM_ENGINE", engine)
-            .env("GOLEM_MODEL_ALIAS", &self.opts.target)
-            .env("GOLEM_MODELS_PRESET", preset);
-        driver::run_command(command, &self.home.join(log))
+        let overrides = vec![
+            ("GOLEM_ENGINE".to_string(), engine.to_string()),
+            ("GOLEM_MODEL_ALIAS".to_string(), self.opts.target.clone()),
+            ("GOLEM_MODELS_PRESET".to_string(), preset.to_string()),
+        ];
+        let log_path = self.home.join(log);
+        if let Some(dir) = log_path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut out = std::fs::File::options().create(true).append(true).open(&log_path)?;
+        if !crate::service::running(self.home) {
+            crate::service::ensure_running(self.home, &mut out)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        }
+        Ok(crate::service::send_env(self.home, "restart", &overrides, &mut out).unwrap_or(1))
     }
 
     /// Wait until the machine can hold another copy of the model, bounded.
@@ -1509,12 +1504,21 @@ impl<'a> Tuner<'a> {
         Ok(effective_rel)
     }
 
-    /// `./golem eval --long N`, read through the RESULT-line contract.
+    /// `eval --long N`, read through the RESULT-line contract.
     fn gate(&self, tokens: u64) -> Option<evalparse::Eval> {
         let out_file = self.out_dir.join(format!("eval-{}.txt", self.opts.target));
-        let mut command = self.driver.command_with("eval", &["--long".to_string(), tokens.to_string()]);
-        command.env("GOLEM_MODEL_ALIAS", &self.opts.target);
-        driver::run_command(command, &out_file).ok()?;
+        // This binary's own verb, a child of the tuner - the measurement and the
+        // thing it measures stay in one process tree, and the alias rides the
+        // child's environment the way it always has.
+        let exe = std::env::current_exe()
+            .map_err(|e| format!("cannot find this binary to run the gate: {e}"))
+            .ok()?;
+        let mut command = std::process::Command::new(exe);
+        command
+            .args(["eval".to_string(), "--long".to_string(), tokens.to_string()])
+            .env("GOLEM_MODEL_ALIAS", &self.opts.target)
+            .env("GOLEM_HOME", self.home);
+        runner::run_command(command, &out_file).ok()?;
         let text = std::fs::read_to_string(&out_file).unwrap_or_default();
         for line in text.lines().rev().filter(|l| l.trim_start().starts_with("RESULT")) {
             self.emit(format_args!("    {line}"));
@@ -1760,11 +1764,6 @@ mod tests {
     fn tuner_at(home: &'static Path, cores: u32, physical: u32) -> Tuner<'static> {
         Tuner {
             home,
-            driver: Box::leak(Box::new(Driver {
-                program: PathBuf::from("launcher"),
-                prefix: Vec::new(),
-                shell: driver::Shell::Bash,
-            })),
             opts: Options::default(),
             machine: Machine {
                 gpu: String::new(),
@@ -1784,7 +1783,6 @@ mod tests {
             ctx_seed: 4096,
             ctx_ceiling: 262144,
             ubatch: String::new(),
-            deploy_mode: "native".into(),
             port: 8000,
             points: Vec::new(),
             out: RefCell::new(Box::new(std::io::sink())),

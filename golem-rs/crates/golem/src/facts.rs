@@ -76,8 +76,10 @@ pub fn collect(
         host_slug,
         gpu,
         os: os_name(),
-        mode: state::override_value(home, "GOLEM_DEPLOY_MODE", "DEPLOY_MODE")
-            .unwrap_or_else(|| "native".to_string()),
+        // No deploy mode any more: one engine path serves every platform, so
+        // a row says which OS it was measured on (the `os` column) and that
+        // is the whole story.
+        mode: None,
         engine: engine.to_string(),
         engine_build,
         model: model.to_string(),

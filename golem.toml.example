@@ -1,0 +1,180 @@
+# ============================================================
+# Golem - configuration
+# ============================================================
+#
+# This is the template. The binary writes a `golem.toml` beside itself from
+# this file the first time it runs without one, and reads that; an existing
+# `golem.toml` is never overwritten, so an edit always wins.
+#
+# Every setting lives here now. `.env` was the shell's file - the launchers
+# sourced it, so a key had to stay there while a driver read it - and with the
+# launchers gone the binary is every key's only reader, which is what moved
+# them here.
+#
+# The comments are the documentation, which is why this is TOML and not JSON.
+# The keys keep the names they had in `.env`, so a move is a move and not a
+# rename: a setting someone already knows is still spelled the same way. They
+# are read with `.env`'s own semantics - every value is a string the reader
+# parses - so `TUNE_RUNS = 3` and `TUNE_RUNS = "3"` mean the same thing.
+# ============================================================
+
+# ------------------------------------------------------------
+# Generation defaults (used by `golem bench` and `golem eval`)
+# ------------------------------------------------------------
+
+# Sampling for the eval's throughput runs. Not the server's own defaults:
+# these are what the gate measures with, so they travel with the numbers.
+TEMPERATURE = 0.15
+TOP_P = 0.95
+
+# ------------------------------------------------------------
+# Tuning floors (`golem tune`)
+# ------------------------------------------------------------
+
+# `./golem tune` sweeps a model's offload split and keeps the fastest setup
+# that is not spilling VRAM, but "fastest here" is not the same as "usable":
+# a candidate under one of these floors is dropped from the ranking however
+# good it looks next to a worse one. The defaults are what real sessions
+# settled on - 30 t/s at full depth felt fine, 23 was sluggish, 16.7 was
+# rejected - and every one has a per-run flag (`--min-decode`, `--min-prefill`,
+# `--min-depth-decode`) so a single run can move it without editing this file.
+# See docs/plan-tune-model-context.md for where the numbers come from.
+TUNE_MIN_DECODE = 25          # median decode, tokens/s
+TUNE_MIN_PREFILL = 350        # prompt processing, tokens/s
+TUNE_MIN_DEPTH_DECODE = 15    # decode at full context, tokens/s
+
+# How far the tuner grows the context: "max" climbs until the card or the
+# decode floor stops it, and stops at the model's trained context unless a
+# number here (or `--ctx N`) asks for more. Extrapolating past the trained
+# context works per model rather than in general, so it has to be asked for.
+TUNE_CTX_POLICY = "max"
+
+# How much a sweep spends per point. `TUNE_RUNS` is the bench's best-of-N and
+# `TUNE_PREFILL` the prompt size it measures; both are `golem bench`'s own
+# flags with the same meaning, and `tune --runs N` / `--prefill N` override
+# them. `GATE_TOKENS` is the gate's own ceiling: the tuner asks for a needle
+# at 90% of each candidate's tuned context, capped here. 200000 is the number
+# Claude Code assumes, so a setup that clears it is one an agent session can
+# use.
+TUNE_RUNS = 3
+TUNE_PREFILL = 8000
+GATE_TOKENS = 200000
+
+# ------------------------------------------------------------
+# Engine
+# ------------------------------------------------------------
+
+# Which adapter under `engines/<name>/` starts the model. Only llama.cpp is
+# eval-gated and serves `/v1/messages` (which `golem claude` needs) plus
+# router mode. Strata is not supported: its adapter says it installs itself
+# with its own shell launcher, and the shell is gone.
+ENGINE = "llama.cpp"
+
+# GPU vendor. `auto` (the default) detects it - NVIDIA to cuda, AMD to rocm,
+# macOS to metal - so most machines need nothing here. Set it when detection
+# cannot work or guesses wrong (a headless box, a remote host, two GPUs).
+GPU_BACKEND = "auto"
+
+# Pin a different engine build than the adapter names. "latest" follows
+# upstream, ungated - the adapter's `build` is the one the 200K gate adopted.
+#ENGINE_BUILD = "latest"
+
+# ------------------------------------------------------------
+# Inference server (OpenAI AND Anthropic compatible)
+# ------------------------------------------------------------
+
+# Where the engine listens. 0.0.0.0 = reachable from the LAN, which is what a
+# client on another machine needs; 127.0.0.1 keeps it local. A container
+# publishes its port, so compose sets GOLEM_LOCAL_AI_HOST=0.0.0.0 there
+# rather than changing this file.
+LOCAL_AI_HOST = "127.0.0.1"
+LOCAL_AI_PORT = "8000"
+
+# The engine's own shared secret (`llama-server --api-key`). OpenAI clients
+# send it as a Bearer token, Anthropic clients as ANTHROPIC_AUTH_TOKEN or
+# x-api-key. Change it before exposing the port.
+LOCAL_AI_API_KEY = "local-ai-key"
+
+# The OpenAI-compatible base URL. `golem` derives it from HOST/PORT; set it
+# to point the measuring commands at another backend (Ollama :11434/v1,
+# vLLM :8000/v1, LM Studio :1234/v1).
+#LOCAL_AI_BASE_URL = "http://127.0.0.1:8000/v1"
+
+# ------------------------------------------------------------
+# Model
+# ------------------------------------------------------------
+
+# Hugging Face repo and GGUF filename `golem pull` downloads, and the pair
+# `golem up` fetches when there is no preset.
+HF_REPO = "unsloth/Qwen3.6-35B-A3B-GGUF"
+MODEL_FILE = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+
+# Speculative decoding. `draft-mtp` uses the model's Multi-Token Prediction
+# head as a free draft (~2x decode, identical output). DRAFT_FILE is a
+# standalone MTP head, fetched from DRAFT_HF_REPO; leave it empty when
+# MODEL_FILE embeds its own MTP layers. SPEC_TYPE = "" disables it.
+SPEC_TYPE = "draft-mtp"
+DRAFT_HF_REPO = "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF"
+DRAFT_FILE = "mtp-Qwen_Qwen3.6-35B-A3B-Q4_0.gguf"
+
+# The stable name the engine advertises in /v1/models and /v1/messages. Keep
+# it constant when MODEL_FILE changes so clients never need editing. In
+# router mode it names the preset section clients use by default.
+MODEL_ALIAS = "local-model"
+
+# Router mode: serve several models from one engine, each loaded on its first
+# request and swapped out when another is asked for (one resident at a time).
+# Models and their flags live in the preset file; a request's "model" field
+# picks the section. When set, MODEL_FILE, DRAFT_FILE, SPEC_TYPE,
+# CONTEXT_SIZE, GPU_LAYERS, CACHE_TYPE_*, LOAD_MODE and EXTRA_ARGS are not
+# used for serving. Relative to the home.
+#MODELS_PRESET = "config/models.ini"
+
+# Unload the model (VRAM, RAM and the KV cache) after this many seconds
+# without requests; the next request reloads it. Empty = stay loaded.
+#/health and /models do not count as activity.
+#SLEEP_IDLE_SECONDS = "600"
+
+# A Hugging Face token, for a gated or private repo.
+#HF_TOKEN = ""
+
+# ------------------------------------------------------------
+# Runtime
+# ------------------------------------------------------------
+
+# Context: 236544 (231K) is Claude Code's 200K window plus slack - the engine
+# tokenizes differently, and the last turn plus the output must fit before
+# auto-compact. The default model's ceiling is 262144. Dense models are
+# VRAM-limited instead: a 9B Q4 caps near ~100K with q8_0 KV.
+CONTEXT_SIZE = "236544"
+
+# CPU threads: the experts offloaded to RAM run here. On a 12700KF
+# (8P+4E, 20 threads) 16 beat 20 by ~8%. Worth a sweep on other CPUs.
+CPU_THREADS = "16"
+
+# Must stay 1 for single-agent use: the engine splits --ctx-size across
+# slots, so PARALLEL = 4 on a 262144 context yields four 64K slots, not one
+# 256K conversation.
+PARALLEL = "1"
+
+# Layers to offload. 99 = every layer on the GPU.
+GPU_LAYERS = "99"
+
+# KV cache quantization. q8_0 balances quality and VRAM; q4_0 trades a little
+# recall for roughly half the KV footprint.
+#CACHE_TYPE_K = "q8_0"
+#CACHE_TYPE_V = "q8_0"
+
+# How the weights are loaded. `mlock` pins the whole model into RAM at start
+# (best for 24/7 serving); `mmap` reads on demand, which is what a sweep
+# wants because it restarts the engine per candidate.
+LOAD_MODE = "mlock"
+
+# Extra engine flags, verbatim, appended to the command line. MoE models:
+# `--n-cpu-moe N` keeps only the first N layers' experts in RAM and the rest
+# on the GPU - raise N when VRAM is short. `-b/-ub 2048` is the big prefill
+# lever for an offloaded MoE (each ubatch streams the RAM experts over PCIe
+# once). Dense models that barely overflow VRAM: `--n-cpu-ffn N`.
+# --temp/--top-k/--min-p are the sampling defaults, used when the client
+# does not send its own.
+EXTRA_ARGS = "--n-cpu-moe 36 -b 2048 -ub 2048 --temp 0.6 --top-k 20 --min-p 0"

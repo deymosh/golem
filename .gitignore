@@ -192,3 +192,8 @@ golem-rs/.cargo/config.toml
 # checkout's own bench/, data/ and logs/ (a release has the same shape).
 /golem.exe
 /golem-bin
+
+# The binary owns this file now: it is created from golem.toml.example on
+# first run and holds the machine own values, so it stays out of the tree the
+# way .env and .local/ do.
+golem.toml

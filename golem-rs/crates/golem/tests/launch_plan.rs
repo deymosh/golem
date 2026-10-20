@@ -1,7 +1,8 @@
 //! What `up --dry-run` resolves, run as the real binary in its own process.
 //!
 //! The per-run overrides - `GOLEM_ENGINE`, `GOLEM_MODELS_PRESET`,
-//! `GOLEM_MODEL_ALIAS` - are read from the *process environment*, and the unit
+//! `GOLEM_MODEL_ALIAS`, `GOLEM_LOCAL_AI_HOST` - are read from the *process
+//! environment*, and the unit
 //! tests share one process: a test that set them would change what every other
 //! test sees, which is exactly what happened when this was first written as a
 //! unit test. A child process is the only honest way to test them, and it is
@@ -57,7 +58,7 @@ fn home(tag: &str) -> PathBuf {
 fn dry_run(dir: &Path, overrides: &[(&str, &str)]) -> String {
     let mut command = Command::new(env!("CARGO_BIN_EXE_golem"));
     command.env("GOLEM_HOME", dir).args(["up", "--dry-run"]);
-    for key in ["GOLEM_ENGINE", "GOLEM_MODELS_PRESET", "GOLEM_MODEL_ALIAS"] {
+    for key in ["GOLEM_ENGINE", "GOLEM_MODELS_PRESET", "GOLEM_MODEL_ALIAS", "GOLEM_LOCAL_AI_HOST"] {
         command.env_remove(key);
     }
     for (key, value) in overrides {
@@ -117,6 +118,21 @@ fn a_per_run_alias_override_reaches_the_command_line() {
     assert!(out.contains("serving: model-b"), "{out}");
     assert!(out.contains("b.gguf"), "the overridden section's model: {out}");
     assert!(!out.contains("a.gguf"), "{out}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_per_run_host_override_reaches_the_command_line() {
+    // The container's case: the mounted `.env` carries a host-side
+    // `LOCAL_AI_HOST` (127.0.0.1 keeps the LAN out), but a container's port
+    // is published, so its engine has to bind 0.0.0.0 whatever the file
+    // says - compose sets this override in the process environment.
+    let dir = home("host-override");
+    let plain = dry_run(&dir, &[]);
+    assert!(plain.contains("--host 127.0.0.1"), "the file's host by default: {plain}");
+    let out = dry_run(&dir, &[("GOLEM_LOCAL_AI_HOST", "0.0.0.0")]);
+    assert!(out.contains("--host 0.0.0.0"), "the override's host: {out}");
+    assert!(!out.contains("--host 127.0.0.1"), "and not the file's: {out}");
     std::fs::remove_dir_all(&dir).ok();
 }
 

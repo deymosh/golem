@@ -1,10 +1,55 @@
 # Plan: the deploy mode goes away
 
-Status: **direction, 2026-10-20, from the user**, not started. Two halves: the key itself,
-and docker, which was one of its three values. The docker half depends on
-[plan-service.md](plan-service.md), and the reason is at the bottom.
+Status: **done** (2026-10-20). The key is gone from the binary, and the image
+is built and verified: one `Dockerfile` carries the binary, the pinned engine
+(baked in by `golem install`) and `golem service --up` as PID 1, and
+`compose.yml`'s ~70-line shell entrypoint and its digest pin are retired with
+it. `DEPLOY_MODE` stays in `.env.example` only because the shell launchers
+still read it - it leaves with them (the deletion pass,
+[plan-launchers.md](plan-launchers.md)).
 
-## What the key is today
+## As built, and what the container forced
+
+The Dockerfile is a builder stage (plain `cargo build --release`, as CI does
+it) and two runtime stages - `nvidia/cuda:13.4.1-runtime-ubuntu24.04` and
+`rocm/dev-ubuntu-24.04` - with `FROM runtime-${GPU_BACKEND}` picking between
+them. `GOLEM_HOME=/golem`, a baked `.env` (`LOCAL_AI_HOST=0.0.0.0`,
+`GPU_BACKEND` from the build arg, router mode), the adapter and presets
+copied in, `RUN golem install` baking the engine, and volumes for
+`data/models`, `bench/`, `logs/` and `data/tuned` - `.local` stays with the
+image, because the image is the engine's home.
+
+Four things the container made real, all fixed on the way:
+
+- **`golem service` now stops on SIGTERM**, not only Ctrl+C: `docker stop`
+  sends SIGTERM to PID 1, and a Linux PID 1 with no handler ignores it, so
+  every stop would have burned the grace period to a SIGKILL that never ran
+  `down`. Measured: `docker stop` returns in 1s with the service's own
+  shutdown lines and exit code 0.
+- **The engine child is reaped once healthy**: the parent outlives it now,
+  and a dropped handle meant a zombie - one `kill -0` still answers for, so
+  `down` would poll a corpse. One blocked thread waits on the engine for its
+  lifetime.
+- **`GOLEM_LOCAL_AI_HOST`** overrides the file's bind host: the mounted
+  `.env` is a host-side setting (`127.0.0.1` keeps the LAN out), but a
+  container publishes its port and its engine must bind `0.0.0.0`. compose
+  sets the override in the process environment, the same idiom the tuner's
+  three overrides use.
+- **`linux_runtime_cuda` matched nothing**: the Linux cudart archive carries
+  the build tag (`cudart-llama-b11379-bin-ubuntu-...`) where the Windows one
+  does not. And the CUDA base image lacks `libgomp1`, the one library the
+  llama.cpp release needs that neither base carries - without it the server
+  dies with exit 127 before it can log.
+
+Verified on the box (Docker 29.8.2): the build installs b11379-cuda from the
+two ubuntu archives; a container with the models mounted starts the router
+and `/health` answers through the published port with **no model loaded**
+(the cheap check); the 0.5B (`qwen2.5-0.5b-instruct`) serves both
+`/v1/chat/completions` and `/v1/messages` at 0.5B speeds; `golem status`
+inside the container sees the engine and the service; the card is back at
+desktop after the stop.
+
+## What the key was
 
 `DEPLOY_MODE` takes three values, and they are not three of the same kind of thing:
 
@@ -36,17 +81,20 @@ Linux host the pair reads as nonsense: `native` is the only one implemented ther
 ## The shape that replaces it
 
 `DEPLOY_MODE` disappears, and with it `--windows` / `--native` / `--docker` on the front
-door. `up` uses the pinned release when the adapter names assets for this platform, and
-builds when it does not; a single escape hatch - `ENGINE_SOURCE="build"`, say - forces the
-build for the machine the release cannot serve. Everything else is detection plus adapter
-data, which is where it belonged.
+door. `up` and `install` take the pinned release for the platform they are on, and the
+adapter names the assets per platform. Everything is detection plus adapter data, which is
+where it belonged.
+
+**Releases only, on purpose.** A source build needs git, cmake and a compiler, and the pin
+is the artifact the 200K gate was adopted on - a build from today's upstream is a different
+binary that the gate does not describe. `golem install` therefore means "put the pinned
+build on this machine", which is also what a container image needs to bake the engine in.
 
 `ENGINE` stays as it is: it picks which adapter, and an adapter is a real choice.
 
-**This lands last, for the reason every other key does**: the shell launchers still read
-`DEPLOY_MODE`, and the binary hands those flags through to them. The key moves when nothing
-reads it - the docker change below removes one of its three readers, and the handover
-removes the rest.
+**Both halves have landed in the binary** (2026-10-20). The shell launchers still read
+`DEPLOY_MODE` themselves, so the key stays in `.env.example` until they are deleted - the
+rule is unchanged: a key moves when the binary owns every reader.
 
 ## Docker is packaging, not a mode
 

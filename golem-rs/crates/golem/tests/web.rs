@@ -15,12 +15,22 @@
 // `main.rs` and `Cargo.toml` out of the test's way while still exercising the
 // real code. (Moving the crate to bin+lib would make this unnecessary; until
 // then every module the console touches has to be named here.)
-#[path = "../src/driver.rs"]
-mod driver;
+#[path = "../src/client.rs"]
+mod client;
 #[path = "../src/engine.rs"]
 mod engine;
+#[path = "../src/launch.rs"]
+mod launch;
 #[path = "../src/models.rs"]
 mod models;
+#[path = "../src/pull.rs"]
+mod pull;
+#[path = "../src/release.rs"]
+mod release;
+#[path = "../src/runner.rs"]
+mod runner;
+#[path = "../src/service.rs"]
+mod service;
 #[path = "../src/state.rs"]
 mod state;
 #[path = "../src/web.rs"]
@@ -491,95 +501,32 @@ fn the_alias_and_engine_settings_rewrite_the_env_without_a_launcher() {
     assert!(!std::fs::read_to_string(dir.join(".env")).expect("read").contains("ENGINE=\"nope\""));
 }
 
-// ---- what the launcher is actually asked to run ------------------------
-
-/// A launcher that records what it was asked to do.
-///
-/// Both spellings are written so the test says the same thing on every
-/// platform: Windows drives `golem.cmd`, everywhere else the `golem` script.
-fn launcher_fixture(dir: &PathBuf) {
-    std::fs::write(
-        dir.join("golem.cmd"),
-        "@echo off\r\necho args: %* > \"%~dp0launcher-args.txt\"\r\n",
-    )
-    .expect("cmd launcher");
-    std::fs::write(
-        dir.join("golem"),
-        "#!/usr/bin/env bash\necho \"args: $*\" > \"$(dirname \"$0\")/launcher-args.txt\"\n",
-    )
-    .expect("bash launcher");
-}
-
-/// Wait for the launcher's record of its own arguments.
-///
-/// `api/run` answers before the job it started has run - that is the point
-/// of it - so the file is the only way to see what the launcher got.
-fn launched(dir: &PathBuf) -> String {
-    let path = dir.join("launcher-args.txt");
-    for _ in 0..100 {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if !text.trim().is_empty() {
-                return text.trim().to_string();
-            }
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    panic!("the launcher was never asked to do anything");
-}
-
-fn clear_launch(dir: &PathBuf) {
-    let _ = std::fs::remove_file(dir.join("launcher-args.txt"));
-}
+// ---- a folder with no launcher ----------------------------------------
 
 #[test]
-fn a_console_action_reaches_the_launcher_in_its_own_words() {
-    let (dir, cfg) = models_fixture("launch");
-    launcher_fixture(&dir);
-    let addr = spawn(router(cfg));
-
-    // Start: the page says `start`, and `./golem` is the launcher that calls
-    // it `up` - `golem.cmd` does not know that word at all.
-    post(addr, "/api/run", "action=start");
-    let expected = if cfg!(windows) { "args: start" } else { "args: up" };
-    assert_eq!(launched(&dir), expected);
-
-    clear_launch(&dir);
-    post(addr, "/api/run", "action=stop");
-    let expected = if cfg!(windows) { "args: stop" } else { "args: down" };
-    assert_eq!(launched(&dir), expected);
-
-    // The Eval button means the 200K gate, and says so in its arguments.
-    clear_launch(&dir);
-    post(addr, "/api/run", "action=eval");
-    assert_eq!(launched(&dir), "args: eval --long 200000");
-
-    // A preset name travels with the two actions that take one.
-    clear_launch(&dir);
-    post(addr, "/api/run", "action=pull&arg=tiny");
-    assert_eq!(launched(&dir), "args: pull tiny");
-
-    clear_launch(&dir);
-    post(addr, "/api/run", "action=tune&arg=ornith-1.5-35b");
-    assert_eq!(launched(&dir), "args: tune ornith-1.5-35b");
-
-    // An argument is never handed to an action that does not take one.
-    clear_launch(&dir);
-    post(addr, "/api/run", "action=bench&arg=sneaky");
-    assert_eq!(launched(&dir), "args: bench");
-}
-
-#[test]
-fn the_controls_say_so_when_this_folder_has_no_launcher() {
-    // A release has no shell scripts yet: rather than pretending, the
-    // control reports that it cannot run anything here.
+fn a_folder_with_no_launcher_runs_actions_anyway() {
+    // The engine verbs go to the service and the rest run as this binary's
+    // own verbs, so the controls no longer need the shell scripts - a
+    // release folder is enough. The job still has to run and release the
+    // slot, or the page would show a job running forever.
     let (_dir, cfg) = fixture("no-launcher");
     let addr = spawn(router(cfg));
 
-    let response = post(addr, "/api/run", "action=status");
+    let response = post(addr, "/api/run", "action=report");
     assert!(
-        response.starts_with("HTTP/1.1 503"),
-        "expected 503, got: {}",
+        response.starts_with("HTTP/1.1 200"),
+        "expected 200, got: {}",
         response.lines().next().unwrap_or("")
     );
-    assert!(response.contains("no launcher"), "{response}");
+    assert!(response.contains("report started"), "{response}");
+
+    // api/run answers before the job it started has run - that is the point
+    // of it - so the slot is the only way to see that the job finished.
+    for _ in 0..200 {
+        if request(addr, "/api/state").contains("\"job_running\": false") {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("the job never ran or never released the slot");
 }

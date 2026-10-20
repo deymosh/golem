@@ -5,9 +5,9 @@ this repo, written by the tools themselves so a number never travels without wha
 
 | Command | Writes |
 |---|---|
-| `./golem bench` | decode best/median, MTP acceptance, prefill, VRAM, RAM |
-| `./golem eval --long N` | tool calls, needle verdict, prefill and decode at depth |
-| `./golem tune [preset]` | one row per sweep point (offload split, batch, threads, spec) |
+| `golem bench` | decode best/median, MTP acceptance, prefill, VRAM, RAM |
+| `golem eval --long N` | tool calls, needle verdict, prefill and decode at depth |
+| `golem tune [preset]` | one row per sweep point (offload split, batch, threads, spec) |
 
 The file is **append-only**: a correction is a new row with a `note`, never an edit. Rows taken
 while something was downloading or building carry `"quiet": false` and the page greys them out.
@@ -20,9 +20,9 @@ while something was downloading or building carry `"quiet": false` and the page 
 | `engine`, `engine_build` | `llama.cpp b11379-1537a0a8b`, `ik_llama.cpp main-b5483…`, `strata v0.1.45` |
 | `model`, `model_file` | the preset (or alias) and the GGUF it served |
 | `ctx` | context actually served |
-| `threads` | CPU threads the engine ran with (the preset's `threads`, else `CPU_THREADS` from `.env`) — a tuned parameter like the offload split, so it travels with the number it produced |
+| `threads` | CPU threads the engine ran with (the preset's `threads`, else `CPU_THREADS` from `golem.toml`) — a tuned parameter like the offload split, so it travels with the number it produced |
 | `params_b`, `params_active_b` | total and **active** parameters — a 35B-A3B is 35.5B of weights but 3.5B of work per token |
-| `moe`, `experts`, `n_layer`, `ctx_train` | model shape, from the GGUF header (`scripts/gguf-info.sh`) |
+| `moe`, `experts`, `n_layer`, `ctx_train` | model shape, from the GGUF header (`golem_core::gguf`) |
 | `flags` | the preset section's effective flags (`[*]` merged with the model's own) |
 | `decode_best`, `decode_median`, `draft_accept` | tok/s; speculative acceptance 0-1 |
 | `prefill` | tok/s reading a ~28.6K-token prompt |
@@ -53,9 +53,9 @@ while something was downloading or building carry `"quiet": false` and the page 
 
 | What | How |
 |---|---|
-| Server page, always current | `./golem web` → http://127.0.0.1:8787 (live from `results.jsonl`, controls, models, engine log) |
-| Static page for sharing | `./golem report` → `bench/report.html`, one self-contained file (no server, no CDN) |
-| Markdown for GitHub | `./golem.exe report --md` → `bench/RESULTS.md`: a section per machine, a block per model, a row per context |
+| Server page, always current | `golem web` → http://127.0.0.1:8787 (live from `results.jsonl`, controls, models, engine log) |
+| Static page for sharing | `golem report` → `bench/report.html`, one self-contained file (no server, no CDN) |
+| Markdown for GitHub | `golem report --md` → `bench/RESULTS.md`: a section per machine, a block per model, a row per context |
 
 GitHub does not render HTML or JavaScript inside a `.md` file (it strips it), so the interactive
 page cannot be embedded in a README: the Markdown summary is the GitHub-friendly view, and the
@@ -64,6 +64,6 @@ static HTML is for sharing a file or GitHub Pages.
 ## Model facts in every row
 
 `ctx`, `params_b`, `params_active_b`, `moe`, `experts`, `n_layer` and `ctx_train` are read from
-the model's GGUF header by [scripts/gguf-info.sh](../scripts/gguf-info.sh) — no model load,
+the model's GGUF header by `golem_core::gguf` — no model load,
 cached under `data/cache/`. They are recorded automatically; rows from before 2026-10-20 were
 filled in with the same tool.

@@ -12,10 +12,9 @@
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::state;
+use crate::launch;
 
 /// How many lines `--no-follow` (and the first screenful of a follow) shows.
 const DEFAULT_LINES: usize = 40;
@@ -33,12 +32,7 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
             return 2;
         }
     };
-    let mode = state::override_value(home, "GOLEM_DEPLOY_MODE", "DEPLOY_MODE")
-        .unwrap_or_else(|| "native".to_string());
-    let Some(path) = log_file(home, &mode) else {
-        return docker_logs(home);
-    };
-    follow(&path, options.lines, options.follow)
+    follow(&log_file(home), options.lines, options.follow)
 }
 
 /// The parsed command line.
@@ -80,38 +74,8 @@ fn parse_lines(value: &str) -> Result<usize, String> {
 /// The match is the shell's: `windows` names the pinned llama-server's log,
 /// `docker` is the compose service, and everything else - `native`, or a mode
 /// a future `.env` invents - is the native log the shell's `else` tails.
-fn log_file(home: &Path, mode: &str) -> Option<PathBuf> {
-    match mode {
-        "docker" => None,
-        "windows" => Some(home.join("logs/llama-server-windows.log")),
-        _ => Some(home.join("logs/local-ai.log")),
-    }
-}
-
-/// `docker compose logs -f`, with the child owning the terminal.
-///
-/// The service is split cuda/rocm by compose profile. `auto` is the shell's
-/// own detector's job, which this port does not carry, so it falls back to
-/// the common case rather than handing compose a profile that does not exist.
-fn docker_logs(home: &Path) -> i32 {
-    let profile = state::override_value(home, "GOLEM_GPU_BACKEND", "GPU_BACKEND")
-        .filter(|p| p != "auto" && !p.is_empty())
-        .unwrap_or_else(|| "cuda".to_string());
-    let mut command = Command::new("docker");
-    command
-        .args(["compose", "-f", "compose.yml", "--env-file", ".env", "logs", "-f"])
-        .env("COMPOSE_PROFILES", profile)
-        .current_dir(home)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    match command.status() {
-        Ok(status) => status.code().unwrap_or(-1),
-        Err(e) => {
-            eprintln!("[FAIL] logs: cannot run docker compose: {e}");
-            1
-        }
-    }
+fn log_file(home: &Path) -> PathBuf {
+    home.join("logs").join(launch::LOG_NAME)
 }
 
 /// Print the tail of `path`, then keep printing what is appended to it.
@@ -256,13 +220,13 @@ mod tests {
     }
 
     #[test]
-    fn the_log_file_follows_the_deploy_mode() {
+    fn there_is_one_engine_log_and_it_is_where_up_writes_it() {
+        // It used to depend on the deploy mode, which meant `golem logs` and
+        // the engine could disagree about which file to look at. One name now,
+        // and the constant is shared so they cannot drift again.
         let home = Path::new("/tmp/golem-home");
-        assert_eq!(log_file(home, "windows"), Some(home.join("logs/llama-server-windows.log")));
-        assert_eq!(log_file(home, "native"), Some(home.join("logs/local-ai.log")));
-        assert_eq!(log_file(home, "docker"), None, "docker has no file to tail");
-        // Anything else is the shell's `else`: the native log.
-        assert_eq!(log_file(home, "something"), Some(home.join("logs/local-ai.log")));
+        assert_eq!(log_file(home), home.join("logs").join(launch::LOG_NAME));
+        assert_eq!(launch::LOG_NAME, "llama-server.log", "and it is not named after a mode");
     }
 
     #[test]

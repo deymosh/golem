@@ -55,7 +55,10 @@ pub struct Facts {
     pub host_slug: String,
     pub gpu: String,
     pub os: String,
-    pub mode: String,
+    /// The deploy mode a row was measured in, when it had one. There is no
+    /// longer a mode - one engine path serves every platform - so new rows
+    /// leave it out and the report prints the OS alone.
+    pub mode: Option<String>,
     pub engine: String,
     pub engine_build: String,
     pub model: String,
@@ -88,7 +91,7 @@ impl Default for Facts {
             host_slug: String::new(),
             gpu: String::new(),
             os: String::new(),
-            mode: String::new(),
+            mode: None,
             engine: String::new(),
             engine_build: String::new(),
             model: String::new(),
@@ -167,7 +170,10 @@ fn row_with(facts: &Facts, captured: &str, metrics: Metrics) -> Result<String, S
     members.push(format!("\"host\": {}", json::quote(&facts.host_slug)));
     members.push(format!("\"gpu\": {}", json::quote(&facts.gpu)));
     members.push(format!("\"os\": \"{}\"", facts.os));
-    members.push(format!("\"mode\": \"{}\"", facts.mode));
+    match &facts.mode {
+        Some(mode) => members.push(format!("\"mode\": {}", json::quote(mode))),
+        None => {}
+    }
     members.push(format!("\"engine\": {}", json::quote(&facts.engine)));
     members.push(format!("\"engine_build\": {}", json::quote(&facts.engine_build)));
     members.push(format!("\"model\": {}", json::quote(&facts.model)));
@@ -555,7 +561,7 @@ mod tests {
             host_slug: "rtx-3060_12g_32g_i7-12700kf".into(),
             gpu: "NVIDIA GeForce RTX 3060".into(),
             os: "windows".into(),
-            mode: "native".into(),
+            mode: Some("native".to_string()),
             engine: "llama.cpp".into(),
             engine_build: "b11379-1537a0a8b".into(),
             model: "ornith-1.5-35b".into(),

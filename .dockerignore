@@ -1,18 +1,12 @@
-# The build context is the repo root; keep it tiny.
+# Keep the build context small: the model files alone are tens of GB, and
+# nothing that is mounted at runtime belongs in the image.
 .git
+.github
 .local
 data
 logs
-docs
-*.md
-!docker/**/*.md
-
-# models / weights (also under data/, listed again for safety)
-*.gguf
-*.gguf.part
-*.safetensors
-*.bin
-
+bench/*
+!bench/report.template.html
+golem-rs/target
+golem.exe
 .env
-.env.*
-!.env.example

@@ -121,7 +121,7 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
         report.blank();
         report.line("Run it as your normal Linux user:");
         report.blank();
-        report.line("  ./scripts/setup-ai.sh");
+        report.line("  golem setup");
         return 1;
     }
     report.ok(&format!("Running as user: {}", user_name()));
@@ -471,11 +471,11 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
     report.line(&format!("  {}", log_path.display()));
     report.blank();
     report.line("Next steps:");
-    report.line("  1. cp .env.example .env   (and edit)");
-    report.line("  2. ./scripts/install-llama-cpp.sh");
-    report.line("  3. ./scripts/download-model.sh");
-    report.line("  4. ./scripts/start-local-ai.sh");
-    report.line("  See README.md and docs/ for pointing Claude Code at the stack.");
+    report.line("  1. golem install        (the pinned engine build, ~600 MB)");
+    report.line("  2. golem pull           (the model's GGUF, ~20 GB)");
+    report.line("  3. golem up             (start it; the model loads on first request)");
+    report.line("  Settings live in golem.toml beside the binary; see README.md and");
+    report.line("  docs/ for pointing Claude Code at the stack.");
     report.complete();
 
     0
