@@ -42,6 +42,13 @@ PORT="${LOCAL_AI_PORT:-8000}"
 API_KEY="${LOCAL_AI_API_KEY:-local-key}"
 # RECORD_MODEL: record for another preset than MODEL_ALIAS (backfills).
 MODEL_ALIAS="${RECORD_MODEL:-${GOLEM_MODEL_ALIAS:-${MODEL_ALIAS:-local-model}}}"
+# GOLEM_MODELS_PRESET: the file that was actually *served* for this run.
+# The tuner measures one candidate preset per point, so recording the flags
+# from .env's MODELS_PRESET would describe a configuration that was never
+# measured - every sweep point would claim the preset's own n-cpu-moe,
+# ubatch and threads. Same convention as the launchers, and for the same
+# reason: .env is re-sourced above and would otherwise win.
+MODELS_PRESET="${GOLEM_MODELS_PRESET:-${MODELS_PRESET:-}}"
 RESULTS="${ROOT_DIR}/bench/results.jsonl"
 
 json_str() {

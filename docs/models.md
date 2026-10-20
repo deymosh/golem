@@ -47,6 +47,17 @@ gate but its bundled MTP head is weak (32% acceptance) and costs a third of deco
 only win is prefill (less of the model in RAM). Qwen3.6 stays in `config/models.ini` as
 the fallback and remains the single-model default below.
 
+**Tuned 2026-10-20** (`./golem tune ornith-1.5-35b --adopt`, both engines swept): the
+preset's hand-tuned `n-cpu-moe 36` at 236544 ctx was not the best this card can do. The
+sweep found **`n-cpu-moe 35`** and the context ladder grew it to **249344** - 262144 did
+not fit and the midpoint probe did - for **62.8 t/s decode and 878 t/s prefill** against
+59.5 / 835, with the 200K needle passing at 35.8 t/s at depth. `.env` now names
+`ENGINE="llama.cpp"` and `MODELS_PRESET="data/tuned/models.effective.ini"`, so the served
+flags are the overlay in `data/tuned/<host>/`, and `config/models.ini` stays the seed.
+The sweep also shows why the split has to be measured: `ub1024` decoded at 62.3 t/s but
+prefilled at 560 against its own engine's 878 - the sysmem cliff, caught by the prefill
+collapse rather than by a VRAM number.
+
 ## How the scripts pick a model
 
 `scripts/download-model.sh` reads two variables from `.env`:

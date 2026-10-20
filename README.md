@@ -111,7 +111,7 @@ Three deploy modes (`DEPLOY_MODE` in `.env`, or `--docker` / `--native` / `--win
 | `logs` | follow the inference logs |
 | `bench [--runs N] [--prefill TOKENS]` | speed: decode best/median + MTP acceptance, prefill on a ~30K prompt (curl + awk only) |
 | `eval [--long TOKENS]` | quality gate: arithmetic, tool calls, throughput, needle + decode at depth (python3; via WSL on Windows) |
-| `report [--no-open]` | build `bench/report.html` (self-contained) from the recorded runs |
+| `report [--no-open] [--md]` | build `bench/report.html` (self-contained) from the recorded runs; `--md` writes `bench/RESULTS.md` for GitHub instead |
 | `web [--port N]` | console on `127.0.0.1:8787`: live results, models, controls, engine log |
 | `tune [preset] [--adopt] [--engine NAME] [--dry-run]` | best engine + flags for this model on this machine |
 | `claude [args…]` | `exec claude` with `ANTHROPIC_*` already set |
@@ -185,6 +185,8 @@ from single-model serving (measured: 62.6 tok/s decode, 840 tok/s prefill on the
 ```
 .
 ├── golem                     Control script — the front door
+├── golem.cmd                 Windows launcher (no Git Bash needed)
+├── golem-rs/                 The portable Rust binary (see its README)
 ├── compose.yml               inference
 ├── .env.example              Canonical config; copy to .env
 ├── config/models.ini         Model presets for router mode (MODELS_PRESET)
@@ -194,12 +196,22 @@ from single-model serving (measured: 62.6 tok/s decode, 840 tok/s prefill on the
 │   ├── backends.md           Swapping llama.cpp for Ollama/vLLM/…
 │   ├── models.md             Model choice, memory regimes, benchmarks per setup
 │   ├── amd-rocm.md           AMD GPUs: ROCm in all three deploy modes
-│   └── windows-native.md     Windows mode: llama-server.exe without Docker
+│   ├── windows-native.md     Windows mode: llama-server.exe without Docker
+│   └── plan-portable-binary.md  The port, phase by phase, and its status block
 ├── scripts/                  Building blocks the control script calls
 ├── data/models/              GGUF files (git-ignored)
 ├── data/cache/               Download / HF cache (git-ignored)
+├── data/tuned/               Tuner output per machine (git-ignored)
 └── logs/                     Run logs (git-ignored)
 ```
+
+**The portable binary.** `golem-rs/` builds one `golem` executable (no bash, no
+PowerShell, no WSL) that owns the results database, both report views, the console,
+the full-screen TUI and the tuner. `./golem` and `golem.cmd` hand it the commands it
+has taken over — `report`, `status`, `tui`, `web`, `tune` — whenever it sits next to
+them; `GOLEM_NO_BINARY=1` forces the shell. `bench`, `eval`, `logs`, `pull`, `menu`
+and `tune --auto` are still the scripts'. The scripts stay the engine drivers either
+way: the binary starts models by running them.
 
 ## Troubleshooting
 

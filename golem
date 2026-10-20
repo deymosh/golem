@@ -26,6 +26,13 @@
 #   env               Print the env exports for Claude Code
 #   help              This message
 #
+# Commands this script no longer owns are handed to the portable binary
+# (golem-rs/) when it sits next to this script: report, status, tune (with
+# --auto), tui, menu, logs, pull, bench, eval, claude, env, setup and install.
+# `up`, `down` and `restart` stay here - the binary starts engines by running
+# this script - and so do `web` and `web status`/`web stop`, which read the
+# console's pid file. GOLEM_NO_BINARY=1 runs the shell everywhere.
+#
 # Mode:
 #   DEPLOY_MODE in .env (docker|native|windows), overridden by
 #   --docker / --native / --windows. windows = llama-server.exe run by
@@ -71,6 +78,58 @@ GPU_BACKEND="${GPU_BACKEND:-auto}"
 # GOLEM_MODELS_PRESET overrides the preset file for one invocation (the
 # auto-tuner sweeps candidate files with it; .env is left untouched).
 MODELS_PRESET="${GOLEM_MODELS_PRESET:-${MODELS_PRESET:-}}"
+
+# ------------------------------------------------------------
+# Phase 6: the commands the portable binary has taken over
+# ------------------------------------------------------------
+#
+# Per command, never wholesale (docs/plan-portable-binary.md): a command is
+# handed over only when the binary implements it *and* running it there
+# cannot come back here.
+#
+# `up`, `down` and `restart` are deliberately not in the list. The binary
+# starts engines by running this script - that is the whole phase-3 design -
+# so handing those over would be a loop on Linux, where this script is the
+# only launcher there is, and a pointless extra hop on Windows.
+#
+# `tune --auto` is not either: that is scripts/tune-auto.sh, a driver with
+# the per-preset sweep as its worker, and the binary does not have it.
+# `web status` and `web stop` read the console's pid file, which this script
+# still owns.
+GOLEM_BIN=""
+if [[ -z "${GOLEM_NO_BINARY:-}" ]]; then
+    for _candidate in "${ROOT_DIR}/golem-bin" "${ROOT_DIR}/golem.exe"; do
+        [[ -x "${_candidate}" ]] && { GOLEM_BIN="${_candidate}"; break; }
+    done
+fi
+
+# hand_over <command> [args...]: exec the binary, or return 1 to say this
+# script still owns the command.
+#
+# The list is per command, never wholesale: a command is here once the
+# binary implements it *and* running it there cannot come back here.
+#
+# GOLEM_DEPLOY_MODE and GOLEM_GPU_BACKEND carry the mode this script already
+# resolved - the `--native` / `--docker` / `--windows` flags were consumed by
+# the argument loop above, and `GPU_BACKEND=auto` was turned into a vendor -
+# so the binary answers for the mode the user asked for rather than for
+# whatever `.env` happens to say. Without them `./golem install --native`
+# reached the binary as a bare `install` and got the windows-mode refusal.
+hand_over() {
+    local cmd="$1"; shift
+    [[ -n "${GOLEM_BIN}" ]] || return 1
+    case "${cmd}" in
+        # Implemented in golem-rs/. `tune` includes `--auto`, which is
+        # `auto_tune.rs` now rather than scripts/tune-auto.sh.
+        report|status|tui|menu|logs|pull|bench|eval|env|claude|install|setup|tune) ;;
+        # `web` is only the console: `web status` and `web stop` read the
+        # pid file this script writes.
+        web)  [[ -n "${1:-}" ]] && return 1 ;;
+        *) return 1 ;;
+    esac
+    GOLEM_DEPLOY_MODE="${DEPLOY_MODE}" GOLEM_GPU_BACKEND="${GPU_BACKEND}" \
+        exec "${GOLEM_BIN}" "${cmd}" "$@"
+}
 
 # ------------------------------------------------------------
 # Args: pull out --native / --docker anywhere in the line
@@ -389,22 +448,22 @@ cmd_help() {
 }
 
 case "${CMD}" in
-    setup)    cmd_setup ;;
-    install)  cmd_install ;;
-    pull)     cmd_pull "$@" ;;
+    setup)    hand_over setup "$@" || cmd_setup ;;
+    install)  hand_over install "$@" || cmd_install ;;
+    pull)     hand_over pull "$@" || cmd_pull "$@" ;;
     up)       cmd_up ;;
     down)     cmd_down ;;
     restart)  cmd_restart ;;
-    status)   cmd_status ;;
-    logs)     cmd_logs "${1:-}" ;;
-    bench)    cmd_bench "$@" ;;
-    report)   "${SCRIPTS}/report.sh" "$@" ;;
-    web)      cmd_web "$@" ;;
-    tui)      exec "${SCRIPTS}/tui.sh" ;;
-    tune)     "${SCRIPTS}/tune.sh" "$@" ;;
-    eval)     cmd_eval "$@" ;;
-    claude)   cmd_claude "$@" ;;
-    env)      cmd_env ;;
+    status)   hand_over status "$@" || cmd_status ;;
+    logs)     hand_over logs "$@" || cmd_logs "${1:-}" ;;
+    bench)    hand_over bench "$@" || cmd_bench "$@" ;;
+    report)   hand_over report "$@" || die "report is the portable binary's (golem-rs/): build it with ./scripts/cargo.sh build" ;;
+    web)      hand_over web "$@" || cmd_web "$@" ;;
+    tui|menu) hand_over "${CMD}" "$@" || exec "${SCRIPTS}/tui.sh" ;;
+    tune)     hand_over tune "$@" || "${SCRIPTS}/tune.sh" "$@" ;;
+    eval)     hand_over eval "$@" || cmd_eval "$@" ;;
+    claude)   hand_over claude "$@" || cmd_claude "$@" ;;
+    env)      hand_over env || cmd_env ;;
     help|-h|--help) cmd_help ;;
     *) echo "[ERROR] unknown command: ${CMD}"; echo; cmd_help; exit 1 ;;
 esac

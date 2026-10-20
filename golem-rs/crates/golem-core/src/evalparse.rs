@@ -30,13 +30,22 @@ fn get<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str> {
     fields.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
 }
 
-/// A number, ignoring a trailing `%` and treating `-` as "not measured".
+/// A number, with whatever unit the line hangs off it, and `-` as
+/// "not measured".
+///
+/// The scripts read these fields with `grep -o 'vram=[0-9.]*'`, which stops
+/// at the first character that is not a digit or a dot - so the value is the
+/// leading run, and the rest of the token is a unit: the bench prints
+/// `vram=1209MiB` and `draft_accept=66%`. Parsing the whole token instead
+/// rejects both, and a rejected `vram` reads as "the bench produced no
+/// usable result" on a bench that measured perfectly well.
 fn num(s: Option<&str>) -> Option<f64> {
-    let s = s?.trim().trim_end_matches('%').trim();
+    let s = s?.trim();
     if s.is_empty() || s == "-" {
         return None;
     }
-    s.parse().ok()
+    let end = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
+    s[..end].parse().ok()
 }
 
 /// One `./golem bench` measurement.
@@ -138,6 +147,20 @@ mod tests {
         assert_eq!(b.draft_accept, Some(0.66));
         assert_eq!(b.prefill, Some(832.0));
         assert_eq!(b.vram_mib, Some(11000.0));
+    }
+
+    #[test]
+    fn a_unit_hanging_off_a_value_does_not_hide_it() {
+        // The bench prints the VRAM in MiB and the acceptance as a
+        // percentage; both are the digits, and the scripts' greps say so.
+        let b = Bench::parse("RESULT decode_best=338.2 decode_median=338.2 draft_accept=- prefill=- vram=1209MiB");
+        assert_eq!(b.vram_mib, Some(1209.0));
+        assert_eq!(b.prefill, None, "a skipped prefill is still not measured");
+        assert_eq!(b.decode_median, Some(338.2));
+
+        let b = Bench::parse("RESULT decode_median=59.3 draft_accept=66% prefill=832 vram=11000");
+        assert_eq!(b.draft_accept, Some(0.66));
+        assert_eq!(b.prefill, Some(832.0));
     }
 
     #[test]

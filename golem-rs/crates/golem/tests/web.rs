@@ -19,6 +19,8 @@
 mod driver;
 #[path = "../src/engine.rs"]
 mod engine;
+#[path = "../src/models.rs"]
+mod models;
 #[path = "../src/state.rs"]
 mod state;
 #[path = "../src/web.rs"]
@@ -319,6 +321,251 @@ fn an_unknown_action_is_refused() {
         "an unknown action must be refused, got: {}",
         response.lines().next().unwrap_or("")
     );
+}
+
+// ---- the Models tab (api/models and the three edits) -------------------
+
+const PRESET: &str = "\
+version = 1
+
+[*]
+jinja = true
+
+; Coder - the default.
+; Download: someone/model-GGUF -> model-Q4_K_M.gguf
+; Quality: 79
+[model-a]
+model = model-Q4_K_M.gguf
+ctx-size = 236544
+n-cpu-moe = 36
+
+; A tiny one for smoke tests.
+; Download: tiny/tiny-GGUF -> tiny.gguf
+[tiny]
+ctx-size = 8192
+";
+
+/// A home with the preset file and an `.env`, and no launcher: the Models
+/// tab has to work in a folder the console can serve but not drive.
+fn models_fixture(tag: &str) -> (PathBuf, Config) {
+    let (dir, cfg) = fixture(tag);
+    std::fs::create_dir_all(dir.join("config")).expect("config");
+    std::fs::create_dir_all(dir.join("data/models")).expect("models");
+    std::fs::write(dir.join("config/models.ini"), PRESET).expect("preset");
+    std::fs::write(dir.join(".env"), "LOCAL_AI_PORT=1\nMODEL_ALIAS=\"model-a\"\n").expect("env");
+    (dir, cfg)
+}
+
+#[test]
+fn models_reports_every_preset_the_page_draws_a_row_for() {
+    let (_dir, cfg) = models_fixture("models");
+    let addr = spawn(router(cfg));
+
+    let response = request(addr, "/api/models");
+    assert!(response.starts_with("HTTP/1.1 200"), "{}", response.lines().next().unwrap_or(""));
+    assert!(response.contains("application/json"), "{response}");
+    // The field names are the page's own (`m.Present`, `m.NcMoe`, ...).
+    for field in [
+        "\"Name\": \"model-a\"",
+        "\"File\": \"model-Q4_K_M.gguf\"",
+        "\"Repo\": \"someone/model-GGUF\"",
+        "\"Ctx\": 236544",
+        "\"NcMoe\": 36",
+        "\"Present\": false",
+        "\"Default\": true",
+        "\"Mtp\": false",
+        "\"Moe\": false",
+        "\"Experts\": \"\"",
+        "\"CtxTrain\": 0",
+    ] {
+        assert!(response.contains(field), "{field} missing from:\n{response}");
+    }
+    // A section with no `model` key still knows its file and its source, so
+    // the page can offer to fetch it.
+    assert!(response.contains("\"Name\": \"tiny\""), "{response}");
+    assert!(response.contains("\"File\": \"tiny.gguf\""), "{response}");
+    assert!(response.contains("\"NcMoe\": -1"), "absent is not zero:\n{response}");
+    // The shared section is not a model.
+    assert!(!response.contains("\"Name\": \"*\""), "{response}");
+}
+
+#[test]
+fn adding_a_model_appends_a_preset_the_page_can_then_fetch() {
+    let (dir, cfg) = models_fixture("addmodel");
+    let addr = spawn(router(cfg));
+
+    let response = post(
+        addr,
+        "/api/addmodel",
+        "name=My+Model&repo=unsloth%2FThing-GGUF&file=Thing-Q4_K_M.gguf&ctx=65536&ncpu=20&mtp=on",
+    );
+    assert!(response.starts_with("HTTP/1.1 200"), "{}", response.lines().next().unwrap_or(""));
+    assert!(response.contains("\"result\": \"added\""), "{response}");
+
+    // The section is in the file, with the name sanitised and the comment
+    // that says where it came from.
+    let text = std::fs::read_to_string(dir.join("config/models.ini")).expect("read");
+    assert!(text.contains("[my-model]"), "{text}");
+    assert!(text.contains("model = Thing-Q4_K_M.gguf"), "{text}");
+    assert!(text.contains("; Download: unsloth/Thing-GGUF -> Thing-Q4_K_M.gguf"), "{text}");
+    assert!(dir.join("config/models.ini.bak").is_file(), "the edit is reversible");
+    // And the page sees it on the next poll, marked as not fetched yet.
+    let listed = request(addr, "/api/models");
+    assert!(listed.contains("\"Name\": \"my-model\""), "{listed}");
+    assert!(listed.contains("\"Repo\": \"unsloth/Thing-GGUF\""), "{listed}");
+}
+
+#[test]
+fn an_edit_that_would_break_the_setup_is_refused() {
+    let (dir, cfg) = models_fixture("models-refuse");
+    let addr = spawn(router(cfg));
+
+    // The default preset cannot be removed, and neither can one that is not
+    // there; the file it names is refused for the same reason.
+    for body in ["arg=model-a", "arg=nope", "arg="] {
+        let response = post(addr, "/api/delpreset", body);
+        assert!(response.contains("\"result\": \"bad-input\""), "{body} -> {response}");
+    }
+    assert!(post(addr, "/api/delmodel", "arg=model-a").contains("\"result\": \"bad-input\""));
+    assert!(
+        std::fs::read_to_string(dir.join("config/models.ini")).expect("read") == PRESET,
+        "a refusal must not touch the file"
+    );
+    assert!(!dir.join("config/models.ini.bak").exists(), "and must not leave a backup");
+
+    // A model name that is not owner/repo, or a file that is not a .gguf.
+    let response = post(addr, "/api/addmodel", "name=x&repo=just-a-name&file=x.gguf");
+    assert!(response.contains("\"result\": \"bad-input\""), "{response}");
+}
+
+#[test]
+fn removing_a_preset_and_deleting_its_file_are_two_separate_clicks() {
+    let (dir, cfg) = models_fixture("models-delete");
+    std::fs::write(dir.join("data/models/model-Q4_K_M.gguf"), b"weights").expect("write");
+    let addr = spawn(router(cfg));
+
+    // The default's file is refused; pointing the default elsewhere first -
+    // the page's "Set default" - is what unlocks it.
+    assert!(post(addr, "/api/delmodel", "arg=model-a").contains("\"result\": \"bad-input\""));
+    assert!(post(addr, "/api/run", "action=alias&arg=tiny").contains("\"result\": \"applied\""));
+    assert!(post(addr, "/api/delmodel", "arg=model-a").contains("\"result\": \"deleted\""));
+    assert!(!dir.join("data/models/model-Q4_K_M.gguf").exists());
+    assert!(dir.join("config/models.ini").is_file(), "the preset stays");
+
+    // And the other way round: the default preset cannot be removed either,
+    // so the model file goes while the section that names it remains.
+    assert!(post(addr, "/api/delpreset", "arg=tiny").contains("\"result\": \"bad-input\""));
+    assert!(post(addr, "/api/run", "action=alias&arg=model-a").contains("\"result\": \"applied\""));
+    assert!(post(addr, "/api/delpreset", "arg=tiny").contains("\"result\": \"removed\""));
+    let text = std::fs::read_to_string(dir.join("config/models.ini")).expect("read");
+    assert!(!text.contains("[tiny]"), "{text}");
+    assert!(!text.contains("A tiny one for smoke tests"), "its comment went too:\n{text}");
+    assert!(text.contains("; Quality: 79"), "the other section's comment stays:\n{text}");
+}
+
+#[test]
+fn the_alias_and_engine_settings_rewrite_the_env_without_a_launcher() {
+    let (dir, cfg) = models_fixture("settings");
+    std::fs::create_dir_all(dir.join("engines/llama.cpp")).expect("mkdir");
+    std::fs::create_dir_all(dir.join("engines/ik_llama.cpp")).expect("mkdir");
+    let addr = spawn(router(cfg));
+
+    // The dropdown's Set button: the value is one of the presets the page
+    // was offered, and it lands in .env.
+    let response = post(addr, "/api/run", "action=alias&arg=tiny");
+    assert!(response.contains("\"result\": \"applied\""), "{response}");
+    let env = std::fs::read_to_string(dir.join(".env")).expect("read");
+    assert!(env.contains("MODEL_ALIAS=\"tiny\""), "{env}");
+    assert!(env.contains("LOCAL_AI_PORT=1"), "the rest of the file is untouched:\n{env}");
+    // The status strip reads the new default back.
+    assert!(request(addr, "/api/state").contains("\"alias\": \"tiny\""));
+
+    let response = post(addr, "/api/run", "action=engine&arg=ik_llama.cpp");
+    assert!(response.contains("\"result\": \"applied\""), "{response}");
+    assert!(std::fs::read_to_string(dir.join(".env")).expect("read")
+        .contains("ENGINE=\"ik_llama.cpp\""));
+
+    // Something that is not installed is refused rather than written.
+    assert!(post(addr, "/api/run", "action=engine&arg=nope").contains("\"result\": \"bad-input\""));
+    assert!(post(addr, "/api/run", "action=alias&arg=nope").contains("\"result\": \"bad-input\""));
+    assert!(!std::fs::read_to_string(dir.join(".env")).expect("read").contains("ENGINE=\"nope\""));
+}
+
+// ---- what the launcher is actually asked to run ------------------------
+
+/// A launcher that records what it was asked to do.
+///
+/// Both spellings are written so the test says the same thing on every
+/// platform: Windows drives `golem.cmd`, everywhere else the `golem` script.
+fn launcher_fixture(dir: &PathBuf) {
+    std::fs::write(
+        dir.join("golem.cmd"),
+        "@echo off\r\necho args: %* > \"%~dp0launcher-args.txt\"\r\n",
+    )
+    .expect("cmd launcher");
+    std::fs::write(
+        dir.join("golem"),
+        "#!/usr/bin/env bash\necho \"args: $*\" > \"$(dirname \"$0\")/launcher-args.txt\"\n",
+    )
+    .expect("bash launcher");
+}
+
+/// Wait for the launcher's record of its own arguments.
+///
+/// `api/run` answers before the job it started has run - that is the point
+/// of it - so the file is the only way to see what the launcher got.
+fn launched(dir: &PathBuf) -> String {
+    let path = dir.join("launcher-args.txt");
+    for _ in 0..100 {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if !text.trim().is_empty() {
+                return text.trim().to_string();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("the launcher was never asked to do anything");
+}
+
+fn clear_launch(dir: &PathBuf) {
+    let _ = std::fs::remove_file(dir.join("launcher-args.txt"));
+}
+
+#[test]
+fn a_console_action_reaches_the_launcher_in_its_own_words() {
+    let (dir, cfg) = models_fixture("launch");
+    launcher_fixture(&dir);
+    let addr = spawn(router(cfg));
+
+    // Start: the page says `start`, and `./golem` is the launcher that calls
+    // it `up` - `golem.cmd` does not know that word at all.
+    post(addr, "/api/run", "action=start");
+    let expected = if cfg!(windows) { "args: start" } else { "args: up" };
+    assert_eq!(launched(&dir), expected);
+
+    clear_launch(&dir);
+    post(addr, "/api/run", "action=stop");
+    let expected = if cfg!(windows) { "args: stop" } else { "args: down" };
+    assert_eq!(launched(&dir), expected);
+
+    // The Eval button means the 200K gate, and says so in its arguments.
+    clear_launch(&dir);
+    post(addr, "/api/run", "action=eval");
+    assert_eq!(launched(&dir), "args: eval --long 200000");
+
+    // A preset name travels with the two actions that take one.
+    clear_launch(&dir);
+    post(addr, "/api/run", "action=pull&arg=tiny");
+    assert_eq!(launched(&dir), "args: pull tiny");
+
+    clear_launch(&dir);
+    post(addr, "/api/run", "action=tune&arg=ornith-1.5-35b");
+    assert_eq!(launched(&dir), "args: tune ornith-1.5-35b");
+
+    // An argument is never handed to an action that does not take one.
+    clear_launch(&dir);
+    post(addr, "/api/run", "action=bench&arg=sneaky");
+    assert_eq!(launched(&dir), "args: bench");
 }
 
 #[test]

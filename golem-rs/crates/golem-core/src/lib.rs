@@ -4,7 +4,8 @@
 //! each with unit tests before the binary is allowed to replace its script
 //! (the migration gate in docs/plan-portable-binary.md).
 
-/// A small dependency-free JSON reader (the rows are our own known shape).
+/// A small dependency-free JSON reader, plus the string escaper the console
+/// writes its payloads with.
 pub mod json;
 
 /// Append-only reader/writer for `bench/results.jsonl`.
@@ -12,11 +13,6 @@ pub mod results;
 
 /// INI engine: model presets, engine adapters, and the section-override
 /// merge behind `write_candidate` / `write_overlay` in scripts/tune.sh.
-///
-/// **Not written yet.** Only the `Entry` shape is here; the reader and the
-/// merge are phase-1 work that nothing needs until phase 4, which is why
-/// they were skipped. `golem`'s own `state.rs` reads the preset file with a
-/// small scanner in the meantime, and the shell's awk still owns the merge.
 pub mod ini;
 
 /// GGUF header reader, golden-tested against scripts/gguf-info.sh.
@@ -28,11 +24,20 @@ pub mod evalparse;
 /// The Markdown results table (`report --md`).
 ///
 /// It started as a byte-for-byte port of `scripts/report.sh` and has since
-/// moved past it - the shell's version still prints the old flat table - so
-/// `scripts/report.sh --md` must not be run against `bench/RESULTS.md`.
+/// moved past it - the shell's version printed the old flat table - so the
+/// script was deleted on 2026-10-20 and this is the only writer of
+/// `bench/RESULTS.md`.
 pub mod report;
 
 pub mod tune;
+
+/// The row builder behind `scripts/record-result.sh`: a captured bench or
+/// eval output, plus what was measured on, becomes one line of
+/// `bench/results.jsonl`.
+pub mod record;
+
+/// The date stamps a preset comment and a tuned overlay carry.
+pub mod time;
 
 /// The schema version this build understands (bumped on breaking changes
 /// to a row's fields; old rows keep parsing).

@@ -13,7 +13,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 /// How long any single status exchange may take.
@@ -157,11 +157,6 @@ pub fn models(endpoint: &Endpoint) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
-}
-
-/// Where a pid file would be, for messages.
-pub fn pid_file_hint(home: &Path) -> PathBuf {
-    home.join(".local").join("llama-server.pid")
 }
 
 #[cfg(test)]

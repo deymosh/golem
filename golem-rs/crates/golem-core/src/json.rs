@@ -10,8 +10,40 @@
 //! Objects keep their key order (`Vec`, not a map): the row's order is part
 //! of what makes the file readable, and rows are small enough that a linear
 //! lookup costs nothing.
+//!
+//! [`quote`] is the other direction, and the only writer here: the console
+//! serves a handful of small objects built by hand, and the one thing it
+//! cannot hand-roll is the escaping - a Windows path or a model name with a
+//! quote in it would otherwise produce a payload the browser refuses.
 
 use std::fmt;
+
+/// `value` as a JSON string literal, quotes included.
+///
+/// Control characters are escaped rather than passed through: a raw newline
+/// inside a string is the one thing `JSON.parse` rejects outright
+/// ("bad control character in string literal"), and a log tail - which the
+/// console serves - is mostly newlines.
+pub fn quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
 
 /// A parsed JSON value.
 #[derive(Debug, Clone, PartialEq)]
@@ -332,6 +364,24 @@ mod tests {
 
     fn obj(input: &str) -> Value {
         parse(input).expect("should parse")
+    }
+
+    #[test]
+    fn quoting_escapes_what_a_browser_would_refuse() {
+        assert_eq!(quote("plain"), "\"plain\"");
+        assert_eq!(quote("a\"b\\c"), "\"a\\\"b\\\\c\"");
+        // A raw newline is what JSON.parse rejects outright; a log tail is
+        // nothing but newlines.
+        assert_eq!(quote("one\ntwo\r\n\t"), "\"one\\ntwo\\r\\n\\t\"");
+        assert_eq!(quote("\u{7}"), "\"\\u0007\"");
+        // A path's backslashes survive as an escaped pair.
+        assert_eq!(quote(r"C:\data\models\a.gguf"), r#""C:\\data\\models\\a.gguf""#);
+    }
+
+    #[test]
+    fn a_quoted_string_parses_back_to_what_went_in() {
+        let value = "a \"quoted\" name\twith\na newline \\ and a C:\\path";
+        assert_eq!(parse(&quote(value)).expect("round trip"), Value::String(value.to_string()));
     }
 
     #[test]

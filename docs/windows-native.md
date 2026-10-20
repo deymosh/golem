@@ -110,7 +110,10 @@ When a CUDA allocation exceeds dedicated VRAM, the Windows driver does not fail:
 into shared system memory over PCIe, silently. Symptom: prefill drops ~40% (820 → ~500 t/s)
 with VRAM reading ~11.8-11.9 of 12 GB. The desktop's own VRAM use drifts (0.5-1.6 GB idle
 measured the same day; browsers and video players add more), which is why the default keeps
-~0.7 GB headroom (`--n-cpu-moe 36`). If you see the symptom, raise `--n-cpu-moe` by 1-2.
+headroom - the single-model path asks for `--n-cpu-moe 36`, and the router's tuned default
+(`data/tuned/models.effective.ini`, 2026-10-20) runs 35 at 11.2 GB. If you see the symptom,
+raise `--n-cpu-moe` by 1-2, or re-run `./golem tune` on a quiet desktop: the sweep measures
+the cliff as a prefill collapse and will not pick a split that crosses it.
 
 To make the cliff an error instead of a slowdown: NVIDIA Control Panel → Manage 3D settings →
 Program settings → `llama-server.exe` → **CUDA - Sysmem Fallback Policy: Prefer No Sysmem

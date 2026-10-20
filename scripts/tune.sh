@@ -398,7 +398,13 @@ measure() {
     # Every point is a measurement like any other: record it (the bench
     # script alone does not - recording lives in the ./golem wrapper).
     printf '%s\n' "${out}" > "${CAND_DIR}/out-${TARGET}-${label}.txt"
-    GOLEM_ENGINE="${eng}" RECORD_MODEL="${TARGET}" "${ROOT_DIR}/scripts/record-result.sh" bench \
+    # GOLEM_MODELS_PRESET is the candidate this point actually served: the
+    # row's flags/ctx/threads are read from the preset file, so leaving it
+    # unset labelled every sweep point with .env's preset - nine splits, nine
+    # identical rows, none of them the setup that was measured.
+    GOLEM_ENGINE="${eng}" RECORD_MODEL="${TARGET}" \
+        GOLEM_MODELS_PRESET="data/tuned/candidates/${TARGET}-${label}.ini" \
+        "${ROOT_DIR}/scripts/record-result.sh" bench \
         "${CAND_DIR}/out-${TARGET}-${label}.txt" "tune ${TARGET} on ${eng}: ${label}" \
         >/dev/null 2>&1 || true
     return 0

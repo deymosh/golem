@@ -1,12 +1,14 @@
-//! The web console (phase 2 of docs/plan-portable-binary.md).
+//! The web console (phases 2 and 3 of docs/plan-portable-binary.md).
 //!
-//! It replaces the read-only surface of `scripts/web.ps1`: the results page,
-//! served live from `results.jsonl`, and the raw file the page polls so the
-//! jsonl stays the single source of truth. The controls (`/api/run`,
-//! `/api/state`, ...) are phase 3 and are not here.
+//! It replaces the surface of `scripts/web.ps1`: the results page, served
+//! live from `results.jsonl`, and the raw file the page polls so the jsonl
+//! stays the single source of truth; the controls (`/api/state`, `/api/logs`,
+//! `/api/run`); and the Models tab (`/api/models` and the three edits behind
+//! it). The page is the same file the shell console serves, so a bookmark, a
+//! poll and a button all keep working across the switch.
 //!
 //! The page is the template with the records inlined, exactly as
-//! `scripts/report.sh` and `./golem report` do it: the file's own lines, not a
+//! `./golem report` does it: the file's own lines, not a
 //! re-serialization, so the page can never disagree with the data it shows.
 //!
 //! The two pure helpers (`inline_records`, `render_page`) are free of I/O and
@@ -22,7 +24,10 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 
+use golem_core::json;
+
 use crate::driver;
+use crate::models;
 use crate::state::{self, Job, SharedJob};
 
 /// Where the console reads from and how it binds.
@@ -105,6 +110,10 @@ pub fn router(cfg: Config) -> axum::Router {
         .route("/api/state", get(api_state))
         .route("/api/logs", get(api_logs))
         .route("/api/run", post(api_run))
+        .route("/api/models", get(api_models))
+        .route("/api/addmodel", post(api_addmodel))
+        .route("/api/delmodel", post(api_delmodel))
+        .route("/api/delpreset", post(api_delpreset))
         .fallback(not_found)
         .with_state(app(cfg))
 }
@@ -212,27 +221,6 @@ fn json(status: StatusCode, body: String) -> Response {
         .into_response()
 }
 
-/// A JSON string literal. The values here are names and paths from the
-/// user's own files, so quotes and backslashes are the only things that
-/// need escaping, plus the control characters a note could carry.
-fn json_str(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for c in value.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// `GET /api/state`: what the page's status strip shows.
 async fn api_state(State(app): State<Arc<App>>) -> Response {
     let home = app.cfg.home.clone();
@@ -245,7 +233,7 @@ async fn api_state(State(app): State<Arc<App>>) -> Response {
     // `job_tail` are as load-bearing as the rest: without them the engine
     // dropdown comes up empty and the running job's log never appears.
     let quoted = |values: &[String]| -> String {
-        values.iter().map(|v| json_str(v)).collect::<Vec<_>>().join(", ")
+        values.iter().map(|v| json::quote(v)).collect::<Vec<_>>().join(", ")
     };
     let vram = snapshot.vram_mib.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string());
     json(
@@ -255,13 +243,13 @@ async fn api_state(State(app): State<Arc<App>>) -> Response {
              \"engines\": [{}], \"job_running\": {}, \"job_action\": {}, \"job_tail\": {}}}",
             snapshot.up,
             vram,
-            json_str(&snapshot.alias),
-            json_str(&snapshot.engine),
+            json::quote(&snapshot.alias),
+            json::quote(&snapshot.engine),
             quoted(&snapshot.presets),
             quoted(&snapshot.engines),
             snapshot.job_running,
-            json_str(&snapshot.job_action),
-            json_str(&snapshot.job_tail),
+            json::quote(&snapshot.job_action),
+            json::quote(&snapshot.job_tail),
         ),
     )
 }
@@ -275,8 +263,72 @@ async fn api_logs(State(app): State<Arc<App>>) -> Response {
     };
     json(
         StatusCode::OK,
-        format!("{{\"file\": {}, \"text\": {}}}", json_str(&file), json_str(&text)),
+        format!("{{\"file\": {}, \"text\": {}}}", json::quote(&file), json::quote(&text)),
     )
+}
+
+/// `GET /api/models`: every preset, for the page's Models tab.
+///
+/// Reads the preset file, stats each model file and parses the GGUF headers
+/// of the ones that are here, so it is off the async runtime - a header read
+/// is instant, but there are several of them and a request thread should not
+/// be the one waiting.
+async fn api_models(State(app): State<Arc<App>>) -> Response {
+    let home = app.cfg.home.clone();
+    match tokio::task::spawn_blocking(move || models::list(&home)).await {
+        Ok(list) => json(StatusCode::OK, models::to_json(&list)),
+        Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "models unavailable"),
+    }
+}
+
+/// `POST /api/addmodel`: append a preset for a model that is not here yet.
+async fn api_addmodel(State(app): State<Arc<App>>, body: Bytes) -> Response {
+    let form = parse_form(&body);
+    let new = models::NewModel {
+        name: form.get("name").cloned().unwrap_or_default(),
+        repo: form.get("repo").cloned().unwrap_or_default(),
+        file: form.get("file").cloned().unwrap_or_default(),
+        ctx: form.get("ctx").cloned().unwrap_or_default(),
+        ncpu: form.get("ncpu").cloned().unwrap_or_default(),
+        mtp: form.get("mtp").map(String::as_str) == Some("on"),
+    };
+    edit(app, move |home| models::add(home, &new)).await
+}
+
+/// `POST /api/delmodel`: delete a preset's model file, keeping the preset.
+async fn api_delmodel(State(app): State<Arc<App>>, body: Bytes) -> Response {
+    let name = parse_form(&body).get("arg").cloned().unwrap_or_default();
+    edit(app, move |home| models::delete_file(home, &name)).await
+}
+
+/// `POST /api/delpreset`: remove a preset, keeping its model file.
+async fn api_delpreset(State(app): State<Arc<App>>, body: Bytes) -> Response {
+    let name = parse_form(&body).get("arg").cloned().unwrap_or_default();
+    edit(app, move |home| models::delete_preset(home, &name)).await
+}
+
+/// One of the preset edits, off the async runtime.
+///
+/// All three answer the page the same way - `{"result": "..."}`, with the
+/// script's own words (`added`, `deleted`, `removed`, `bad-input`) because
+/// that is what the page's JavaScript tests for. A failure to write is a
+/// 500: the page cannot tell one from a refusal, but a person reading the
+/// response can.
+async fn edit<F>(app: Arc<App>, change: F) -> Response
+where
+    F: FnOnce(&std::path::Path) -> std::io::Result<&'static str> + Send + 'static,
+{
+    let home = app.cfg.home.clone();
+    match tokio::task::spawn_blocking(move || change(&home)).await {
+        Ok(Ok(result)) => json(StatusCode::OK, result_json(result)),
+        Ok(Err(e)) => plain(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")),
+        Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "the edit did not run"),
+    }
+}
+
+/// The reply every console action gives: `{"result": "..."}`.
+fn result_json(result: &str) -> String {
+    format!("{{\"result\": {}}}", json::quote(result))
 }
 
 /// `POST /api/run` with `action=<verb>&arg=<...>`.
@@ -284,9 +336,17 @@ async fn api_logs(State(app): State<Arc<App>>) -> Response {
 /// One job at a time, the same rule the shell console has: the engine is a
 /// single resource and two benchmarks at once measure each other. The reply
 /// comes back immediately; the page follows the job through `api/state`.
+///
+/// Two actions never reach a launcher: `alias` and `engine` rewrite `.env`,
+/// which the shell console also answers in-process. That also makes them the
+/// only controls that work in a folder with no scripts in it.
 async fn api_run(State(app): State<Arc<App>>, body: Bytes) -> Response {
     let form = parse_form(&body);
     let action = form.get("action").cloned().unwrap_or_default();
+    let arg = form.get("arg").cloned().unwrap_or_default();
+    if driver::is_setting(&action) {
+        return apply_setting(&app, &action, &arg).await;
+    }
     if !driver::is_action(&action) {
         return plain(StatusCode::BAD_REQUEST, format!("unknown action: {action:?}"));
     }
@@ -315,7 +375,7 @@ async fn api_run(State(app): State<Arc<App>>, body: Bytes) -> Response {
     let job = app.job.clone();
     let started = action.clone();
     tokio::task::spawn_blocking(move || {
-        let outcome = driver::run(&launcher, &started, &log);
+        let outcome = driver::run(&launcher, &started, &arg, &log);
         if let Ok(mut job) = job.lock() {
             job.finish();
         }
@@ -323,6 +383,35 @@ async fn api_run(State(app): State<Arc<App>>, body: Bytes) -> Response {
     });
 
     plain(StatusCode::OK, format!("{action} started (log: logs/web-job.log)"))
+}
+
+/// `action=alias` / `action=engine`: point the setup at another preset or
+/// another engine, by rewriting `.env`.
+///
+/// The value is checked against what is actually there first - the same two
+/// lists the page's dropdowns are filled from - so a hand-made request
+/// cannot leave the configuration pointing at a model or an engine that does
+/// not exist. Answers the shell console's own `applied` / `bad-input`.
+async fn apply_setting(app: &Arc<App>, action: &str, arg: &str) -> Response {
+    let home = app.cfg.home.clone();
+    let action = action.to_string();
+    let arg = arg.to_string();
+    let outcome = tokio::task::spawn_blocking(move || {
+        let (key, installed) = match action.as_str() {
+            "alias" => ("MODEL_ALIAS", state::presets(&home)),
+            _ => ("ENGINE", state::engines(&home)),
+        };
+        if !installed.iter().any(|name| name == &arg) {
+            return Ok("bad-input");
+        }
+        state::env_set(&home, key, &arg).map(|()| "applied")
+    })
+    .await;
+    match outcome {
+        Ok(Ok(result)) => json(StatusCode::OK, result_json(result)),
+        Ok(Err(e)) => plain(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")),
+        Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "the setting did not run"),
+    }
 }
 
 /// `a=b&c=d` into a map, with `+` as space and `%XX` decoded: the page sends
@@ -373,12 +462,6 @@ fn url_decode(value: &str) -> String {
 #[cfg(test)]
 mod unit {
     use super::*;
-
-    #[test]
-    fn json_strings_escape_what_they_must() {
-        assert_eq!(json_str("plain"), "\"plain\"");
-        assert_eq!(json_str("a\"b\\c\nd"), "\"a\\\"b\\\\c\\nd\"");
-    }
 
     #[test]
     fn forms_decode_plus_and_percent() {

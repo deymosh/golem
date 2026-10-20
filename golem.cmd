@@ -41,9 +41,36 @@ rem %* is EMPTY, so `call :tune` alone made `golem.cmd tune <preset>` silently
 rem tune the default model instead - which loaded a 35B nobody asked for.
 rem %2..%9 is the tail without the command word; the labels then hand %* to
 rem the bash bridge.
-for %%c in (start stop restart status logs report web tune bench eval tui menu) do if /i "%~1"=="%%c" (call :%%c %2 %3 %4 %5 %6 %7 %8 %9 & exit /b)
-echo Usage: golem.cmd [start^|stop^|restart^|status^|logs^|report^|web^|tune^|bench^|eval^|tui]
+rem Phase 6: the commands the portable binary has taken over are handed to
+rem it when it sits alongside. Per command, never wholesale.
+rem
+rem start/stop/restart are NOT here on purpose: the binary drives those by
+rem running this launcher, so handing them back to it would be a loop.
+rem setup is still scripts\setup-ai.sh's, and web status / web stop read the
+rem console pid file this script owns.
+set "BIN="
+if not defined GOLEM_NO_BINARY if exist "%ROOT%golem.exe" set "BIN=%ROOT%golem.exe"
+if defined BIN (
+    rem This launcher IS windows mode, so say so: the binary would otherwise
+    rem answer for whatever .env names, and `golem.cmd install` would try to
+    rem build llama.cpp on a machine that fetches a pinned release instead.
+    set "GOLEM_DEPLOY_MODE=windows"
+    for %%c in (report status tui menu logs pull bench eval env claude install setup tune) do if /i "%~1"=="%%c" (call :hand %* & exit /b)
+    if /i "%~1"=="web" if "%~2"=="" (call :hand web & exit /b)
+)
+
+rem pull is in this list because the console's "Fetch" button posts it:
+rem without a label here that verb had no Windows path at all, and the
+rem button answered "unknown action".
+for %%c in (start stop restart status logs report web tune bench eval pull tui menu) do if /i "%~1"=="%%c" (call :%%c %2 %3 %4 %5 %6 %7 %8 %9 & exit /b)
+echo Usage: golem.cmd [start^|stop^|restart^|status^|logs^|report^|web^|tune^|bench^|eval^|pull^|tui]
 exit /b 1
+
+:hand
+rem %1 is the command word and the rest are its arguments: the binary takes
+rem the same words this launcher does.
+"%BIN%" %*
+exit /b %errorlevel%
 
 :menu
 echo.
@@ -114,6 +141,11 @@ exit /b 0
 rem tune is a bash script like bench/eval: hand over to Git Bash through the
 rem same bridge (scripts\tune.cmd never existed - this path was broken).
 call "%ROOT%scripts\golem-bash.cmd" tune %*
+exit /b 0
+:pull
+rem Fetch a preset's model file(s). In router mode this names the section;
+rem with no name ./golem pull falls back to the .env model.
+call "%ROOT%scripts\golem-bash.cmd" pull %*
 exit /b 0
 :bench
 call "%ROOT%scripts\golem-bash.cmd" bench %*

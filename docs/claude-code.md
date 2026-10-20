@@ -2,9 +2,11 @@
 
 Prerequisite: `./golem up` and `./golem status` green.
 
-Context: the server runs 236544 tokens (231K). Claude Code assumes a 200K window and
-auto-compacts before it; the extra ~31K absorbs tokenizer differences (the server counts
-with Qwen's tokenizer) and the final turn's output, so requests never overflow.
+Context: the router default serves 249344 tokens (244K), tuned on 2026-10-20 - the preset
+asks for 236544 and `./golem tune --adopt` grew it to what the card actually holds. Claude
+Code assumes a 200K window and auto-compacts before it; the extra ~44K absorbs tokenizer
+differences (the server counts with Qwen's tokenizer) and the final turn's output, so
+requests never overflow.
 
 ## Option A — `./golem claude` (on the Golem machine)
 

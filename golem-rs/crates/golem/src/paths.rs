@@ -19,8 +19,8 @@
 use std::path::{Path, PathBuf};
 
 /// The page template, compiled in so a release is a single file and still
-/// has a console. `scripts/report.sh` has the same file in the repository;
-/// this copy is what a downloaded binary uses.
+/// has a console. The repository has the same file under `bench/`; this copy
+/// is what a downloaded binary uses.
 const EMBEDDED_TEMPLATE: &str = include_str!("../../../../bench/report.template.html");
 
 /// The directories the binary expects under the home. Created on demand.

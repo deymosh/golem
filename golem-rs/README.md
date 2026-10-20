@@ -61,15 +61,35 @@ sitting next to them.
 
 ## Status
 
-Phases 0-3 and the console of phase 5, per
-[docs/plan-portable-binary.md](../docs/plan-portable-binary.md): the scaffold and CI; the
-read-only core (JSON, `results.jsonl` with its size classes and best-per-configuration
-reduction, the `RESULT`-line contract, the GGUF header, both report views); the controls
-(`golem status`, `up`/`down`/`restart`, and `golem web`'s `api/state`, `api/logs`,
-`api/run` driving the shell launchers); and `golem tui`, the full-screen console, whose
-menu entries run those same verbs.
+Phases 0-6, per [docs/plan-portable-binary.md](../docs/plan-portable-binary.md): the
+scaffold and CI; the read-only core (JSON, `results.jsonl` with its size classes and
+best-per-configuration reduction, the `RESULT`-line contract, the GGUF header, the INI
+reader and merge, both report views); the console (`golem web`'s page, `results.jsonl`,
+`api/state`, `api/logs`, `api/run`, and the Models tab's `api/models`,
+`api/addmodel`, `api/delmodel`, `api/delpreset`); the controls (`golem status`,
+`up`/`down`/`restart`) driving the shell launchers; `golem tune <preset>`, which
+measures through those same launchers and decides with `golem-core`'s tuner; `golem
+tui`; and the switchover, where `./golem` and `golem.cmd` hand it every command it
+owns.
 
-145 tests, all runnable locally. Not done yet: the console's `api/models` (and the
-add/delete behind it), the phase-4 tuner, and the phase-6 switchover that lets `./golem`
-hand a command to this binary. `golem-core::ini` is still only a placeholder - nothing
-needed it until phase 4.
+Every command the shell used to have is the binary's now - `logs`, `pull`, `bench`,
+`eval`, `claude`, `env`, `menu`, `setup`, `install` and `tune --auto` alongside the
+phases above. What is left of the shell is the engine drivers (`up` / `down` /
+`restart`, which the binary runs *through* the launchers, so they cannot be handed
+back), `web status` / `web stop`, and the scripts those launchers run.
+
+The recorder is `golem-core::record` plus `src/facts.rs`: the row a bench or an eval
+writes to `bench/results.jsonl`, verified byte-identical to what
+`scripts/record-result.sh` wrote for the same capture against the same live engine -
+which is what `golem bench --replay <capture>` is for.
+
+The two things worth knowing before changing it: the binary **orchestrates** (the
+scripts stay the engine drivers, and phase 3's rule is that a script is deleted only
+when the binary replaces its gate), and `golem` is a bin-only crate, so a module a
+tested module uses has to be declared in `tests/*.rs` as well - see the `#[path]`
+block at the top of each.
+
+What the clean-machine walk found, and what the next plan is: a fresh clone has no
+`golem.exe` (the binary is git-ignored), so the missing piece is a **release asset**;
+and `bench` / `eval` / `tune` still reach Git Bash through `scripts/benchmark-ai.sh`
+and `scripts/eval-model.sh`, so **those two scripts are the last port**.

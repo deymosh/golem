@@ -288,7 +288,7 @@ impl SizeClass {
         }
     }
 
-    /// The heading the report prints, identical to scripts/report.sh.
+    /// The heading the report prints, the shell report's own word.
     pub fn label(&self) -> &'static str {
         match self {
             SizeClass::Unknown => "unknown",
@@ -346,11 +346,13 @@ pub fn read(path: &Path) -> std::io::Result<(Vec<Row>, Vec<(usize, String)>)> {
 }
 
 /// One line of the report: the best decode measured for a
-/// model x engine build x context, with the eval verdict for that model.
+/// model x engine build x context, with the eval verdict for that model on
+/// that engine.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Best {
     pub row: Row,
-    /// The model's needle verdict, taken from any eval row for it.
+    /// The needle verdict for this model *and engine*, from the last eval row
+    /// that measured both. `None` when nothing gated this pair.
     pub needle: Option<String>,
 }
 
@@ -367,15 +369,23 @@ pub struct Best {
 pub fn best_per_configuration(rows: &[Row]) -> Vec<Best> {
     // The shell takes the last verdict a model has (later rows overwrite
     // earlier ones), so a re-run corrects the report without an edit.
-    let mut needles: Vec<(String, String)> = Vec::new();
+    //
+    // Keyed by model *and engine*, not by model alone: the needle is the
+    // model's quality gate, but it is measured on one engine, and an engine
+    // that was never gated must not inherit the winner's PASS. On the
+    // reference box the tuner sweeps ik_llama.cpp and llama.cpp and gates
+    // only the winner - so a PASS on the ik_llama.cpp row would be a claim
+    // nothing measured.
+    let mut needles: Vec<((String, String), String)> = Vec::new();
     for row in rows {
         if row.kind != Kind::Eval {
             continue;
         }
         if let Some(n) = row.eval.as_ref().and_then(|e| e.needle.clone()) {
-            match needles.iter_mut().find(|(m, _)| m == &row.model) {
+            let key = (row.model.clone(), row.engine.clone());
+            match needles.iter_mut().find(|(k, _)| k == &key) {
                 Some((_, existing)) => *existing = n,
-                None => needles.push((row.model.clone(), n)),
+                None => needles.push((key, n)),
             }
         }
     }
@@ -401,10 +411,8 @@ pub fn best_per_configuration(rows: &[Row]) -> Vec<Best> {
     let mut out: Vec<Best> = best
         .into_iter()
         .map(|(_, _, row)| {
-            let needle = needles
-                .iter()
-                .find(|(m, _)| m == &row.model)
-                .map(|(_, n)| n.clone());
+            let key = (row.model.clone(), row.engine.clone());
+            let needle = needles.iter().find(|(k, _)| k == &key).map(|(_, n)| n.clone());
             Best { row, needle }
         })
         .collect();
@@ -585,6 +593,25 @@ mod tests {
         assert_eq!(best.len(), 1, "same model, engine, build and ctx is one line");
         assert_eq!(best[0].row.decode_median.as_ref().map(|n| n.value), Some(59.3));
         assert_eq!(best[0].needle.as_deref(), Some("PASS"));
+    }
+
+    #[test]
+    fn a_needle_verdict_does_not_cross_engines() {
+        // The gate runs on the winner. An engine that was swept and lost was
+        // never gated, so its rows must not borrow the winner's PASS.
+        let other = BENCH.replace(r#""engine": "llama.cpp""#, r#""engine": "ik_llama.cpp""#);
+        assert_ne!(other, BENCH, "the fixture should have changed");
+        let rows: Vec<Row> = [BENCH, &other, EVAL]
+            .iter()
+            .map(|l| Row::parse(l).expect("should parse"))
+            .collect();
+        let best = best_per_configuration(&rows);
+        assert_eq!(best.len(), 2, "two engines, two lines");
+
+        let llama = best.iter().find(|b| b.row.engine == "llama.cpp").expect("llama.cpp");
+        assert_eq!(llama.needle.as_deref(), Some("PASS"));
+        let ik = best.iter().find(|b| b.row.engine == "ik_llama.cpp").expect("ik_llama.cpp");
+        assert_eq!(ik.needle, None, "never gated, so nothing to claim");
     }
 
     #[test]

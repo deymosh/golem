@@ -21,7 +21,10 @@
 use std::io;
 use std::path::Path;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseEventKind,
+};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -71,7 +74,7 @@ const ITEMS: &[(&str, Action)] = &[
 ];
 
 /// The message line before anything has run.
-const HINT: &str = "up/down move   enter run   r refresh   q quit";
+const HINT: &str = "up/down move   enter run   mouse wheel scroll   r refresh   q quit";
 
 /// The mark in the header, the same one the shell screen opens with.
 const MARK: &str = "\u{259f}\u{2588}\u{2599}"; // ▟█▙
@@ -278,14 +281,28 @@ pub fn draw(app: &App, frame: &mut Frame) {
 /// clips it).
 fn screen(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
     let w = width as usize;
-    let mut out = Vec::with_capacity(height as usize);
+    let h = height as usize;
+    let mut out = Vec::with_capacity(h);
 
-    out.push(bar('=', w));
-    out.push(header(app, w));
-    out.push(bar('-', w));
+    // What a small window keeps, in the order it matters: the menu first,
+    // then the hint, then the header, then the panes. The shell clamps its
+    // own size to 10x40 and lets the terminal clip, so a three-row window
+    // shows a header and two rules - and the menu, the one thing the screen
+    // is *for*, is not on it at all. The bounds here are where this port is
+    // allowed to be better than the screen it ports.
+    let header_rows = if h >= 8 { 3 } else { 0 };
+    let hint_rows = if h >= 3 { 2 } else { 0 };
+
+    if header_rows > 0 {
+        out.push(bar('=', w));
+        out.push(header(app, w));
+        out.push(bar('-', w));
+    }
 
     let count = app.items.len();
-    let room = (height as i32 - 6).max(3) as usize;
+    // The menu takes what is left after the chrome, and at least one row: a
+    // selection the user cannot see is worse than a clipped one.
+    let room = h.saturating_sub(header_rows + hint_rows).max(1);
     let (start, shown) = window(app.selected, count, room);
     for i in start..start + shown {
         let (label, _) = app.items[i];
@@ -302,12 +319,11 @@ fn screen(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
     if marker {
         out.push(Line::from(Span::styled(format!("    {MORE}"), dim())));
     }
-    out.push(bar('-', w));
 
-    // What is left after the menu and the chrome - four bars, the header and
+    // What is left after the menu and the chrome - the bars, the header and
     // the hint - is the panes'. Each costs a heading line plus its rows.
     let menu_rows = shown + usize::from(marker);
-    let mut avail = (height as i32 - (4 + menu_rows as i32) - 2).max(0) as usize;
+    let mut avail = h.saturating_sub(header_rows + hint_rows + menu_rows + 1);
 
     let run_rows = if avail >= 3 { (avail - 1).min(RUNS_MAX) } else { 0 };
     if run_rows > 0 {
@@ -315,18 +331,25 @@ fn screen(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
     }
     let log_rows = if avail >= 3 { (avail - 1).min(LOG_MAX) } else { 0 };
 
-    if run_rows > 0 {
-        out.push(section("recent runs"));
-        out.extend(tail(&app.runs, run_rows));
-    }
-    if log_rows > 0 {
-        out.push(section("engine log"));
-        out.extend(tail(&app.log, log_rows));
+    // The rule that closes the menu only when something is drawn under it: an
+    // empty window is better off with the row.
+    if run_rows > 0 || log_rows > 0 {
+        out.push(bar('-', w));
+        if run_rows > 0 {
+            out.push(section("recent runs"));
+            out.extend(tail(&app.runs, run_rows));
+        }
+        if log_rows > 0 {
+            out.push(section("engine log"));
+            out.extend(tail(&app.log, log_rows));
+        }
     }
 
-    out.push(bar('-', w));
-    // The last line is the hint until an action replaces it with its result.
-    out.push(Line::from(Span::styled(format!("  {}", app.message), dim())));
+    if hint_rows > 0 {
+        out.push(bar('-', w));
+        // The last line is the hint until an action replaces it with its result.
+        out.push(Line::from(Span::styled(format!("  {}", app.message), dim())));
+    }
     out
 }
 
@@ -430,7 +453,11 @@ impl RawTerminal {
         enable_raw_mode()?;
         // Past this point raw mode is on. If the screen switch fails the
         // guard does not exist yet, so undo raw mode here by hand.
-        if let Err(e) = execute!(io::stdout(), EnterAlternateScreen, cursor::Hide) {
+        // Mouse capture is what makes the wheel arrive at all - the shell's
+        // screen turns on the same two modes (`?1000h ?1006h`).
+        if let Err(e) =
+            execute!(io::stdout(), EnterAlternateScreen, cursor::Hide, EnableMouseCapture)
+        {
             let _ = disable_raw_mode();
             return Err(e);
         }
@@ -441,7 +468,9 @@ impl RawTerminal {
 impl Drop for RawTerminal {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, cursor::Show);
+        // Capture off before the screen goes back: a terminal left reporting
+        // the mouse turns every later click into escape codes at the prompt.
+        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen, cursor::Show);
     }
 }
 
@@ -458,9 +487,25 @@ pub fn run(home: &Path, mut act: impl FnMut(Action) -> String) -> io::Result<()>
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
     loop {
+        // Every turn of the loop draws, which is also what makes a resize
+        // work: the event is not interesting in itself, the redraw is, and
+        // ratatui reads the new size on the way through.
         terminal.draw(|frame| draw(&app, frame))?;
 
-        let Event::Key(key) = event::read()? else { continue };
+        let key = match event::read()? {
+            Event::Key(key) => key,
+            // One notch of the wheel moves one row, like an arrow key. The
+            // shell's screen scrolls the same way.
+            Event::Mouse(mouse) => {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => app.previous(),
+                    MouseEventKind::ScrollDown => app.next(),
+                    _ => {}
+                }
+                continue;
+            }
+            _ => continue,
+        };
         // Windows reports a key's press and its release; acting on both would
         // run every action twice.
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {

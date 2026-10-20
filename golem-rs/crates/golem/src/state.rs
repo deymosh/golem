@@ -8,7 +8,8 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+
+use golem_core::ini;
 
 use crate::engine;
 
@@ -29,6 +30,85 @@ pub fn env_value(home: &Path, key: &str) -> Option<String> {
     None
 }
 
+/// The shell's `${GOLEM_X:-${X:-default}}` idiom, in one place.
+///
+/// `GOLEM_*` names are *per-invocation overrides a caller sets in the
+/// environment* - the tuner points a launcher at one candidate preset with
+/// them, and the console's job runner does the same - and they are
+/// deliberately never keys in `.env`. The plain name is the `.env` value.
+///
+/// Reading the override out of `.env` instead is not a harmless
+/// simplification: it is the shape of a bug this repository already paid for
+/// once, when `GOLEM_MODEL_ALIAS` did not survive a Windows-to-WSL hop and a
+/// 0.5B candidate was gated against the 35B coder's numbers.
+pub fn override_value(home: &Path, override_key: &str, key: &str) -> Option<String> {
+    if let Ok(value) = std::env::var(override_key) {
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    env_value(home, key)
+}
+
+/// Write `key="value"` into the home's `.env`.
+///
+/// Every line that assigns `key` is replaced - including a commented-out one,
+/// which is how `scripts/web.ps1`'s `Env-Set` behaves, and how `.env.example`
+/// ships the optional keys - and the key is appended when the file has none.
+/// The line ending the file already uses is kept.
+pub fn env_set(home: &Path, key: &str, value: &str) -> std::io::Result<()> {
+    env_write(home, key, value, true)
+}
+
+/// Write `key="value"` over an *active* assignment only, appending when
+/// there is none.
+///
+/// This is the other half of the shell's two rules, and it is not a
+/// simplification to merge them: `tune.sh --adopt` rewrites `.env` with
+/// `sed 's|^ENGINE=.*|...|'`, which leaves a commented `#ENGINE=` where it
+/// is, while the console's `Env-Set` uncomments it. Adoption is the one that
+/// must not resurrect a line the user deliberately turned off.
+pub fn env_adopt(home: &Path, key: &str, value: &str) -> std::io::Result<()> {
+    env_write(home, key, value, false)
+}
+
+fn env_write(home: &Path, key: &str, value: &str, commented: bool) -> std::io::Result<()> {
+    let path = home.join(".env");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut out = String::new();
+    let mut replaced = false;
+    for line in text.lines() {
+        if assigns(line, key, commented) {
+            out.push_str(&format!("{key}=\"{value}\""));
+            replaced = true;
+        } else {
+            out.push_str(line);
+        }
+        out.push_str(eol);
+    }
+    if !replaced {
+        out.push_str(&format!("{key}=\"{value}\"{eol}"));
+    }
+    std::fs::write(path, out)
+}
+
+/// Whether a `.env` line assigns `key`.
+///
+/// With `commented`, a commented-out assignment counts too.
+fn assigns(line: &str, key: &str, commented: bool) -> bool {
+    let rest = line.trim_start();
+    let rest = match rest.strip_prefix('#') {
+        Some(rest) if commented => rest.trim_start(),
+        Some(_) => return false,
+        None => rest,
+    };
+    match rest.split_once('=') {
+        Some((name, _)) => name.trim() == key,
+        None => false,
+    }
+}
+
 /// The preset file, as the home refers to it.
 pub fn preset_path(home: &Path) -> PathBuf {
     let configured = env_value(home, "MODELS_PRESET").unwrap_or_else(|| "config/models.ini".to_string());
@@ -36,42 +116,12 @@ pub fn preset_path(home: &Path) -> PathBuf {
 }
 
 /// The preset sections, in file order, without the shared `[*]` one.
+///
+/// The parsing itself lives in `golem_core::ini`, which is what the console's
+/// Models tab and the tuner read the same file with; a second scanner here
+/// would be a second answer to "what is a section".
 pub fn presets(home: &Path) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(preset_path(home)) else { return Vec::new() };
-    let mut names = Vec::new();
-    for line in text.lines() {
-        if let Some(rest) = line.trim().strip_prefix('[') {
-            if let Some(name) = rest.split(']').next() {
-                let name = name.trim();
-                if !name.is_empty() && name != "*" {
-                    names.push(name.to_string());
-                }
-            }
-        }
-    }
-    names
-}
-
-/// One preset section's `key = value` pairs.
-pub fn preset_section(home: &Path, section: &str) -> Vec<(String, String)> {
-    let Ok(text) = std::fs::read_to_string(preset_path(home)) else { return Vec::new() };
-    let mut out = Vec::new();
-    let mut inside = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix('[') {
-            let name = rest.split(']').next().unwrap_or("").trim();
-            inside = name == section;
-            continue;
-        }
-        if !inside || trimmed.starts_with(';') || trimmed.starts_with('#') {
-            continue;
-        }
-        if let Some((k, v)) = trimmed.split_once('=') {
-            out.push((k.trim().to_string(), v.trim().to_string()));
-        }
-    }
-    out
+    ini::Document::read(&preset_path(home)).map(|doc| doc.preset_names()).unwrap_or_default()
 }
 
 /// The engine adapters installed under `engines/`, by directory name.
@@ -126,12 +176,21 @@ pub fn vram_mib() -> Option<u64> {
 /// `/proc/meminfo` on Linux, `Win32_OperatingSystem` on Windows - the two
 /// places `scripts/record-result.sh` reads, so a row and the screen agree
 /// about what the machine had free.
+///
+/// Both fallbacks matter and neither is theoretical. MSYS's `/proc/meminfo`
+/// exists but is a stub with no `MemAvailable` line at all, so on Windows
+/// the file is not the answer; and PowerShell prints numbers in the
+/// machine's own locale, where this box's separator is a comma - which
+/// `f64::from_str` rejects, so an unguarded parse reads a working counter as
+/// "no answer" and the screen says 0.0 GB free on a machine with 20 GB.
 pub fn ram_free_gb() -> Option<f64> {
     if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
         for line in text.lines() {
             if let Some(rest) = line.strip_prefix("MemAvailable:") {
-                let kb: f64 = rest.split_whitespace().next()?.parse().ok()?;
-                return Some(kb / 1_048_576.0);
+                if let Some(kb) = rest.split_whitespace().next().and_then(|v| v.parse::<f64>().ok())
+                {
+                    return Some(kb / 1_048_576.0);
+                }
             }
         }
     }
@@ -148,7 +207,7 @@ pub fn ram_free_gb() -> Option<f64> {
     if !out.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    String::from_utf8_lossy(&out.stdout).trim().replace(',', ".").parse().ok()
 }
 
 /// Whether a console answers on `port`.
@@ -166,7 +225,6 @@ pub fn web_up(port: u16) -> bool {
 pub struct Job {
     running: bool,
     action: String,
-    started: Option<Instant>,
 }
 
 impl Job {
@@ -178,10 +236,6 @@ impl Job {
         &self.action
     }
 
-    pub fn started(&self) -> Option<Instant> {
-        self.started
-    }
-
     /// Mark `action` as running, unless something already is. Returns false
     /// when a job was already in flight - one engine, one measurement.
     pub fn begin(&mut self, action: &str) -> bool {
@@ -190,13 +244,11 @@ impl Job {
         }
         self.running = true;
         self.action = action.to_string();
-        self.started = Some(Instant::now());
         true
     }
 
     pub fn finish(&mut self) {
         self.running = false;
-        self.started = None;
     }
 }
 
@@ -290,8 +342,71 @@ mod tests {
         )
         .expect("write");
         assert_eq!(presets(&dir), vec!["a".to_string(), "b".to_string()]);
-        let section = preset_section(&dir, "b");
-        assert_eq!(section, vec![("model".to_string(), "b.gguf".to_string())]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn setting_a_value_replaces_the_line_that_holds_it() {
+        let dir = home("env-set");
+        std::fs::write(
+            dir.join(".env"),
+            "LOCAL_AI_PORT=\"8000\"\nMODEL_ALIAS=\"old\"\n# MODEL_ALIAS=\"commented\"\n",
+        )
+        .expect("write");
+        env_set(&dir, "MODEL_ALIAS", "ornith-1.5-35b").expect("write");
+        let text = std::fs::read_to_string(dir.join(".env")).expect("read");
+        assert_eq!(
+            text,
+            "LOCAL_AI_PORT=\"8000\"\nMODEL_ALIAS=\"ornith-1.5-35b\"\nMODEL_ALIAS=\"ornith-1.5-35b\"\n"
+        );
+        // The value reads back the way the rest of the console reads it.
+        assert_eq!(env_value(&dir, "MODEL_ALIAS").as_deref(), Some("ornith-1.5-35b"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn setting_a_key_the_file_does_not_have_appends_it() {
+        let dir = home("env-add");
+        std::fs::write(dir.join(".env"), "ENGINE=\"llama.cpp\"\n").expect("write");
+        env_set(&dir, "MODEL_ALIAS", "tiny").expect("write");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".env")).expect("read"),
+            "ENGINE=\"llama.cpp\"\nMODEL_ALIAS=\"tiny\"\n"
+        );
+        // A `.env` that is not there yet gets one, rather than an error.
+        let fresh = home("env-new");
+        env_set(&fresh, "MODEL_ALIAS", "tiny").expect("write");
+        assert_eq!(env_value(&fresh, "MODEL_ALIAS").as_deref(), Some("tiny"));
+        std::fs::remove_dir_all(&fresh).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn adopting_replaces_an_active_line_and_leaves_a_commented_one_alone() {
+        let dir = home("env-adopt");
+        std::fs::write(
+            dir.join(".env"),
+            "ENGINE=\"llama.cpp\"\n#MODELS_PRESET=\"config/models.ini\"\n",
+        )
+        .expect("write");
+        env_adopt(&dir, "ENGINE", "ik_llama.cpp").expect("write");
+        env_adopt(&dir, "MODELS_PRESET", "data/tuned/models.effective.ini").expect("write");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".env")).expect("read"),
+            "ENGINE=\"ik_llama.cpp\"\n\
+             #MODELS_PRESET=\"config/models.ini\"\n\
+             MODELS_PRESET=\"data/tuned/models.effective.ini\"\n"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn setting_a_value_keeps_the_line_ending_the_file_uses() {
+        let dir = home("env-crlf");
+        std::fs::write(dir.join(".env"), "ENGINE=\"x\"\r\n").expect("write");
+        env_set(&dir, "MODEL_ALIAS", "tiny").expect("write");
+        let text = std::fs::read_to_string(dir.join(".env")).expect("read");
+        assert_eq!(text, "ENGINE=\"x\"\r\nMODEL_ALIAS=\"tiny\"\r\n");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -188,6 +188,30 @@ fn the_message_line_shows_what_set_message_was_given() {
 fn the_message_line_starts_with_a_hint() {
     let text = screen(&App::new());
     assert!(text.contains("enter run"), "the default hint should be drawn:\n{text}");
+    // The wheel is how the shell's screen scrolls, so the port's hint says so.
+    assert!(text.contains("mouse wheel"), "the hint names the wheel:\n{text}");
+}
+
+#[test]
+fn a_window_too_small_for_the_panes_still_shows_the_menu() {
+    // The checklist's "tiny windows": conhost opened at a corner, or a
+    // terminal split down to nothing. The menu is the one thing the screen is
+    // for, so it is what a small window keeps - the header gives way, and so
+    // do the panes.
+    for (w, h) in [(20u16, 6u16), (12, 5), (40, 3)] {
+        let text = screen_at(&App::new(), w, h);
+        assert_eq!(text.lines().count(), h as usize, "{w}x{h} should fill exactly {h} rows");
+        assert!(
+            text.contains("\u{25b8}"),
+            "the selection marker is still drawn at {w}x{h}:\n{text}"
+        );
+        assert!(!text.contains("GOLEM"), "the header gives way at {w}x{h}:\n{text}");
+    }
+    // A window with no room at all is not a panic. At one column there is
+    // nothing to say - the marker is the third character of its row - so the
+    // assertion is only that it draws one row and stops.
+    let text = screen_at(&App::new(), 1, 1);
+    assert_eq!(text.lines().count(), 1, "{text:?}");
 }
 
 // ---- the header --------------------------------------------------------

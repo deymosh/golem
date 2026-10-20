@@ -10,10 +10,20 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+mod auto_tune;
+mod client;
 mod driver;
 mod engine;
+mod facts;
+mod install;
+mod logs;
+mod measure;
+mod models;
 mod paths;
+mod pull;
+mod setup;
 mod state;
+mod tune;
 mod tui;
 mod web;
 
@@ -28,21 +38,28 @@ With no command at all the full-screen console opens - the same screen as
 Commands (phased in, docs/plan-portable-binary.md):
   version          Print the version
   results          List recorded bench/eval rows        (phase 1)
-  report [--md]    Results tables: Markdown for GitHub, or the page
+  report [--no-open|--md]  Static page for sharing, or RESULTS.md for GitHub
   web              Web console: results, controls, live  (phases 2-3)
   status           Is the engine up, and what is it serving
   up / down        Start / stop through the shell launchers
   restart          Down then up
-  tui              Full-screen console                  (phase 5)
-  tune             Sweep and gate engines and flags     (phase 4, not yet)
-
-Everything else still lives in ./golem and golem.cmd; this binary does not
-replace them until each phase passes its gate.
+  logs [--lines N] Follow the inference log
+  pull [preset]    Download the model's GGUF from Hugging Face
+  bench [--runs N] [--prefill N]   Speed: decode + prefill tok/s
+  eval [--long N]  Quality gate: sanity, tool calls, needle
+  tui / menu       Full-screen console                  (phase 5)
+  tune [preset]    Sweep, gate and adopt the best setup (phase 4)
+  tune --auto      Pick the best installed model, then tune it
+  claude [args]    Launch Claude Code pointed at this server
+  env              Print the exports for a shell
+  setup            Inspect the machine, install build deps, scaffold dirs
+  install          Build llama.cpp with CUDA/ROCm  (native mode only)
 ";
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let mode = take_mode_flags(&mut args);
     match args.first().map(String::as_str) {
         Some("--version" | "-V" | "version") => {
             println!("golem {}", env!("CARGO_PKG_VERSION"));
@@ -67,9 +84,28 @@ async fn main() -> ExitCode {
         Some("report") => cmd_report(&args[1..]),
         Some("results") => cmd_results(&args[1..]),
         Some("web") => cmd_web(&args[1..]).await,
-        Some("tui") => cmd_tui().await,
+        Some("tui" | "menu") => cmd_tui().await,
         Some("status") => cmd_status(),
-        Some(action @ ("up" | "down" | "restart")) => cmd_driver(action),
+        Some("bench") => code(measure::bench(&prepare_home(), &args[1..])),
+        Some("eval") => code(measure::eval(&prepare_home(), &args[1..])),
+        Some("logs") => code(logs::run(&prepare_home(), &args[1..])),
+        Some("pull") => code(pull::run(&prepare_home(), &args[1..])),
+        Some("setup") => code(setup::run(&prepare_home(), &args[1..])),
+        Some("install") => code(install::run(&prepare_home(), &args[1..])),
+        Some("env") => {
+            print!("{}", client::exports(&prepare_home()));
+            ExitCode::SUCCESS
+        }
+        Some("claude") => code(client::claude(&prepare_home(), &args[1..])),
+        // `tune --auto` is the driver, not the sweep: it picks the model and
+        // then hands each candidate to `tune::run`.
+        Some("tune") if args[1..].iter().any(|a| a == "--auto") => {
+            code(auto_tune::run(&prepare_home(), &args[1..]))
+        }
+        Some("tune") => cmd_tune(&args[1..]),
+        Some(action @ ("up" | "down" | "start" | "stop" | "restart")) => {
+            cmd_driver(action, mode.as_deref())
+        }
         Some(other) => {
             eprintln!("golem: '{other}' is not wired up yet; see docs/plan-portable-binary.md");
             ExitCode::from(2)
@@ -110,12 +146,67 @@ fn cmd_status() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `golem tune [preset]`: sweep, decide and gate (phase 4).
+///
+/// It measures through the same launcher and the same bench script the
+/// shell tuner uses - it is a front door, not a second engine - and decides
+/// with `golem_core::tune`. The exit code is the shell's: 0 when a setup was
+/// found, 1 when none was.
+fn cmd_tune(args: &[String]) -> ExitCode {
+    let home = prepare_home();
+    match tune::run(&home, args) {
+        0 => ExitCode::SUCCESS,
+        code => ExitCode::from(code as u8),
+    }
+}
+
+/// Pull the front door's global mode flags out of the command line.
+///
+/// `--native`, `--docker` and `--windows` belong to the front door, not to a
+/// command: `./golem up --docker` and `./golem logs --windows` both mean "run
+/// this in that mode", and the shell resolves them before it dispatches. The
+/// binary does the same, in two steps - the resolved mode goes into
+/// `GOLEM_DEPLOY_MODE`, which is the per-invocation override every mode-aware
+/// command already reads through [`state::override_value`], and the flag is
+/// taken out of the argument list so the command it belonged to is not handed
+/// an argument it never declared.
+///
+/// Returns the mode, or `None` when the line named none.
+fn take_mode_flags(args: &mut Vec<String>) -> Option<String> {
+    let mut mode = None;
+    args.retain(|arg| {
+        let resolved = match arg.as_str() {
+            "--native" => "native",
+            "--docker" => "docker",
+            "--windows" => "windows",
+            _ => return true,
+        };
+        // Last one wins, as the shell's loop does.
+        mode = Some(resolved.to_string());
+        false
+    });
+    if let Some(mode) = &mode {
+        std::env::set_var("GOLEM_DEPLOY_MODE", mode);
+    }
+    mode
+}
+
 /// `golem up|down|restart`: ask the launchers that already know how.
 ///
 /// Starting an engine is the riskiest code in the project - three deploy
 /// modes, a pinned build, a router preset - and it works; phase 3 reuses it
 /// rather than reimplementing it, and phase 6 decides what to own.
-fn cmd_driver(action: &str) -> ExitCode {
+///
+/// `up` and `down` are this binary's words and `start`/`stop` are
+/// `golem.cmd`'s; [`driver::Driver::verb`] translates whichever it is given,
+/// which is what makes `golem up` work on Windows at all - `golem.cmd` has
+/// no `up`, so the verb used to reach it as an unknown command.
+///
+/// A mode flag the user typed is handed to the launcher as the launcher's own
+/// flag: the launcher reads `DEPLOY_MODE` from `.env`, so a mode that lived
+/// only in this process's environment would be silently dropped - and
+/// `./golem up --docker` would start a native server.
+fn cmd_driver(action: &str, mode: Option<&str>) -> ExitCode {
     let home = prepare_home();
     let Some(launcher) = driver::Driver::find(&home) else {
         eprintln!(
@@ -124,9 +215,10 @@ fn cmd_driver(action: &str) -> ExitCode {
         );
         return ExitCode::from(1);
     };
+    let args: Vec<String> = mode.map(|mode| format!("--{mode}")).into_iter().collect();
     let log = home.join("logs/web-job.log");
     println!("[ .. ] {action}: running the launcher (its output goes to logs/web-job.log)");
-    match driver::run(&launcher, action, &log) {
+    match driver::run_command(launcher.command_with(action, &args), &log) {
         Ok(0) => {
             println!("[ OK ] {action} finished");
             ExitCode::SUCCESS
@@ -168,7 +260,7 @@ async fn cmd_tui() -> ExitCode {
         // it exists because the match has to be total.
         tui::Action::Quit => String::new(),
         other => match verb_of(other) {
-            Some(verb) => describe(verb, driver::run(&launcher, verb, &log)),
+            Some(verb) => describe(verb, driver::run(&launcher, verb, "", &log)),
             None => format!("{other:?} has no launcher verb"),
         },
     });
@@ -187,8 +279,10 @@ async fn cmd_tui() -> ExitCode {
 fn verb_of(action: tui::Action) -> Option<&'static str> {
     match action {
         tui::Action::Status => Some("status"),
-        tui::Action::Start => Some("up"),
-        tui::Action::Stop => Some("down"),
+        // The console's own words, which is what the page posts too; the
+        // launcher's spelling is the driver's business.
+        tui::Action::Start => Some("start"),
+        tui::Action::Stop => Some("stop"),
         tui::Action::Restart => Some("restart"),
         tui::Action::Bench => Some("bench"),
         tui::Action::Eval => Some("eval"),
@@ -254,6 +348,15 @@ impl Console {
             Err(e) => format!("console cannot start: {e}"),
         }
     }
+}
+
+/// A command's exit code as the `ExitCode` the match arms return.
+///
+/// The commands that shell out (bench, eval, pull, ...) speak in plain
+/// numbers, because their code is the child's; the arms that answer in
+/// process speak `ExitCode`. This is the one place the two meet.
+fn code(status: i32) -> ExitCode {
+    ExitCode::from(status.clamp(0, 255) as u8)
 }
 
 /// The value of `--flag value`, or None.
@@ -343,6 +446,36 @@ fn read_rows(results: &Path) -> Option<Vec<golem_core::results::Row>> {
     }
 }
 
+/// Open a file with the desktop's own handler, best effort.
+///
+/// Best effort on purpose: the page is written either way, and a machine
+/// with no opener - a server, a bare container, a session with no desktop -
+/// must not turn a written report into a failed command. The three branches
+/// are the shell report's three.
+fn open_in_browser(path: &Path) {
+    let mut command = if cfg!(windows) {
+        // `start` is a cmd.exe builtin and its first argument is the window
+        // title: without the empty one, a quoted path is taken as the title
+        // and nothing opens.
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/c", "start", ""]).arg(path);
+        command
+    } else if cfg!(target_os = "macos") {
+        let mut command = std::process::Command::new("open");
+        command.arg(path);
+        command
+    } else {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+    let _ = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 fn cmd_report(args: &[String]) -> ExitCode {
     let as_markdown = args.iter().any(|a| a == "--md");
     let home = prepare_home();
@@ -367,7 +500,7 @@ fn cmd_report(args: &[String]) -> ExitCode {
     }
 
     // The page is the template with the records inlined, exactly as
-    // scripts/report.sh does it: the raw lines, not a re-serialization, so
+    // the shell report did it: the raw lines, not a re-serialization, so
     // the page can never disagree with the file.
     let template_path = paths::template(&home);
     if !template_path.is_file() {
@@ -395,6 +528,11 @@ fn cmd_report(args: &[String]) -> ExitCode {
         return ExitCode::from(1);
     }
     println!("[ OK ] {} ({} runs)", out.display(), rows.len());
+    // The page is for looking at; --no-open is for a script (and for anyone
+    // who asked for it in a terminal they are already looking at).
+    if !args.iter().any(|a| a == "--no-open") {
+        open_in_browser(&out);
+    }
     ExitCode::SUCCESS
 }
 
