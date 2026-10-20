@@ -13,21 +13,24 @@ use golem_core::ini;
 
 use crate::engine;
 
-/// One value from the home's `.env`, quotes stripped.
+/// One value from the home's configuration: `golem.toml` first, then `.env`.
+///
+/// The rule itself lives in [`golem_core::config::value`], because it is the
+/// same rule every reader needs - including `engine::Endpoint`, which parses
+/// the port and the API key for itself. A reader with its own copy of the
+/// rule stops seeing a key on the day it moves, and that is the failure the
+/// split exists to avoid.
 pub fn env_value(home: &Path, key: &str) -> Option<String> {
-    let text = std::fs::read_to_string(home.join(".env")).ok()?;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('#') {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=') {
-            if k.trim() == key {
-                return Some(v.trim().trim_matches('"').trim_matches('\'').to_string());
-            }
-        }
-    }
-    None
+    golem_core::config::value(home, key)
+}
+
+/// One value from `golem.toml` alone, or `None`.
+///
+/// For the one question that needs to know *where* a value came from: the
+/// writers, which must put it back in the same file.
+pub fn config_value(home: &Path, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(home.join("golem.toml")).ok()?;
+    golem_core::config::Document::parse(&text).ok()?.get(key)
 }
 
 /// The shell's `${GOLEM_X:-${X:-default}}` idiom, in one place.
@@ -73,6 +76,12 @@ pub fn env_adopt(home: &Path, key: &str, value: &str) -> std::io::Result<()> {
 }
 
 fn env_write(home: &Path, key: &str, value: &str, commented: bool) -> std::io::Result<()> {
+    // A key `golem.toml` owns is written there, not into the shim. Writing
+    // `.env` for a key the reader takes from the TOML file would look like it
+    // worked and change nothing, which is the worst of both.
+    if config_value(home, key).is_some() {
+        return config_write(home, key, value);
+    }
     let path = home.join(".env");
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
@@ -93,8 +102,21 @@ fn env_write(home: &Path, key: &str, value: &str, commented: bool) -> std::io::R
     std::fs::write(path, out)
 }
 
-/// Whether a `.env` line assigns `key`.
+/// Set one key in the home's `golem.toml`, keeping every comment around it.
 ///
+/// The file is parsed and written back line by line, which is what keeps the
+/// documentation where the user put it - `Document::set` replaces the one line
+/// that assigns the key and touches nothing else.
+fn config_write(home: &Path, key: &str, value: &str) -> std::io::Result<()> {
+    let path = home.join("golem.toml");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut document = golem_core::config::Document::parse(&text)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    document.set(key, value);
+    std::fs::write(path, document.text())
+}
+
+/// Whether a `.env` line assigns `key`.///
 /// With `commented`, a commented-out assignment counts too.
 fn assigns(line: &str, key: &str, commented: bool) -> bool {
     let rest = line.trim_start();
@@ -323,8 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_env_values_without_their_quotes() {
-        let dir = home("env");
+    fn reads_env_values_without_their_quotes() {        let dir = home("env");
         std::fs::write(dir.join(".env"), "MODEL_ALIAS=\"moe-35b\"\n# ENGINE=x\nENGINE=llama.cpp\n")
             .expect("write");
         assert_eq!(env_value(&dir, "MODEL_ALIAS").as_deref(), Some("moe-35b"));
@@ -463,6 +484,70 @@ mod tests {
         let (file, text) = log_tail(&dir, 2);
         assert_eq!(file, "logs/llama-server-windows.log");
         assert_eq!(text, "two\nthree");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_value_comes_from_the_toml_file_when_it_has_one() {
+        let dir = home("config-first");
+        std::fs::write(dir.join(".env"), "MODEL_ALIAS=\"from-env\"\nLOCAL_AI_PORT=\"8000\"\n")
+            .expect("write");
+        std::fs::write(
+            dir.join("golem.toml"),
+            "# the binary's own surface\nTUNE_RUNS = 5\nTEMPERATURE = 0.2\n",
+        )
+        .expect("write");
+        // The key the TOML file owns answers from there...
+        assert_eq!(env_value(&dir, "TUNE_RUNS").as_deref(), Some("5"));
+        assert_eq!(env_value(&dir, "TEMPERATURE").as_deref(), Some("0.2"));
+        // ...and every key it does not own still comes from the shim.
+        assert_eq!(env_value(&dir, "MODEL_ALIAS").as_deref(), Some("from-env"));
+        assert_eq!(env_value(&dir, "LOCAL_AI_PORT").as_deref(), Some("8000"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn no_toml_file_leaves_the_env_file_in_charge() {
+        // The ordinary case on a checkout that predates the split.
+        let dir = home("config-none");
+        std::fs::write(dir.join(".env"), "TUNE_RUNS=\"7\"\n").expect("write");
+        assert_eq!(env_value(&dir, "TUNE_RUNS").as_deref(), Some("7"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn setting_a_toml_owned_key_writes_there_and_keeps_the_comments() {
+        // Writing `.env` for a key the reader takes from the TOML file would
+        // look like it worked and change nothing.
+        let dir = home("config-write");
+        std::fs::write(dir.join(".env"), "TUNE_RUNS=\"3\"\n").expect("write");
+        std::fs::write(
+            dir.join("golem.toml"),
+            "# the floors\nTUNE_RUNS = 3\nTUNE_MIN_DECODE = 25\n",
+        )
+        .expect("write");
+        env_set(&dir, "TUNE_RUNS", "9").expect("write");
+        let toml = std::fs::read_to_string(dir.join("golem.toml")).expect("read");
+        assert!(toml.contains("# the floors"), "{toml}");
+        assert!(toml.contains("TUNE_RUNS = 9"), "{toml}");
+        assert!(toml.contains("TUNE_MIN_DECODE = 25"), "the neighbour is untouched: {toml}");
+        // And the `.env` line it shadowed is left exactly as it was.
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".env")).expect("read"),
+            "TUNE_RUNS=\"3\"\n"
+        );
+        assert_eq!(env_value(&dir, "TUNE_RUNS").as_deref(), Some("9"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_key_neither_file_owns_is_written_to_the_env_file() {
+        let dir = home("config-write-env");
+        std::fs::write(dir.join("golem.toml"), "TUNE_RUNS = 3\n").expect("write");
+        env_set(&dir, "MODEL_ALIAS", "ornith-1.5-35b").expect("write");
+        assert_eq!(env_value(&dir, "MODEL_ALIAS").as_deref(), Some("ornith-1.5-35b"));
+        let env = std::fs::read_to_string(dir.join(".env")).expect("read");
+        assert!(env.contains("MODEL_ALIAS=\"ornith-1.5-35b\""), "{env}");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

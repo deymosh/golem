@@ -64,7 +64,7 @@ the preset — sweeping the expert offload for each, seeding from llama.cpp's ow
 — keeps the fastest engine + split that is not spilling VRAM into system memory, **grows the
 context** to the biggest the card can truly serve (up to the model's trained context; `--ctx N`
 pins it), holds every candidate to a **speed floor** (decode 25 / prefill 350 / at-depth 15 t/s
-by default; `TUNE_MIN_*` in `.env` or `--min-*` per run move it, and under-floor candidates are
+by default; `TUNE_MIN_*` in `golem.toml` or `--min-*` per run move it, and under-floor candidates are
 named in the output), gates the winner with the 200K eval, and writes the verdict (engine,
 flags, context, every measured point) to `data/tuned/`. The thread sweep probes the counts the
 CPU topology makes promising — on a hybrid P/E chip, P-cores, P-cores with hyperthreads, and

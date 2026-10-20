@@ -18,8 +18,8 @@ them keeps every OpenAI client working, but Claude Code will not connect to them
 
 To swap: set `LOCAL_AI_BASE_URL` + `MODEL_ALIAS` in `.env` and start that backend yourself.
 
-`health-check-ai.sh` and `eval-model.sh` (sanity, tool calls, needle) only use
+`golem status` and `golem eval` (sanity, tool calls, needle) only use
 `LOCAL_AI_PORT` + `LOCAL_AI_API_KEY` + `MODEL_ALIAS`, so they work against any
-OpenAI-compatible backend. The tok/s figures in `benchmark-ai.sh` and `eval-model.sh` read
+OpenAI-compatible backend. The tok/s figures in `golem bench` and `golem eval` read
 llama.cpp's per-request `timings` object and come out empty on backends that don't send it. `download-model.sh` / `install-llama-cpp.sh` /
 `start-local-ai.sh` are llama.cpp-specific and simply go unused with another backend.

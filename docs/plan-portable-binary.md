@@ -80,7 +80,7 @@ As of 2026-10-20 (`experiment/token-machine`):
   single-run benches differ by, the overlay is the shell's file line for line, and
   `models.effective.ini` differs from the preset in exactly the keys the tune moved. A
   full run with the gate passes the 7372-token needle at 277.9 t/s at depth.
-  **`--auto` is still `scripts/tune-auto.sh`** and the binary says so.
+  **`--auto` is `auto_tune.rs` now**, driving this binary's own sweep per installed preset.
 - **Phase 6 done (2026-10-20)**: `./golem` and `golem.cmd` hand `report`, `status`,
   `tui`, `web` and `tune` to the binary when it sits alongside; `up`/`down`/`restart`
   are deliberately not handed over (the binary drives those *through* these launchers,
@@ -99,10 +99,14 @@ As of 2026-10-20 (`experiment/token-machine`):
   `golem.cmd` hand all of them over. What is left of the shell is `up` / `down` / `restart`
   (deliberately: the binary starts engines *by running these launchers*), `web` and
   `web status|stop` (they read the console pid file), and the scripts those launchers run.
-  `scripts/report.sh` was deleted under the migration gate; `scripts/record-result.sh` has
-  no caller in the binary any more, but it stays on disk for the shell tuner, which is the
-  fallback when no binary is built - and it is the reference the recorder port was verified
-  against, so it goes only once `tune.sh` does.
+  `scripts/report.sh` was deleted under the migration gate, and on 2026-10-20 the whole
+  measurement cluster followed it - `scripts/benchmark-ai.sh`, `scripts/eval-model.sh`,
+  `scripts/record-result.sh`, `scripts/tune.sh` and `scripts/tune-auto.sh` - because every
+  one of their gates is the binary's now and no launcher runs any of them. `./golem
+  bench|eval|tune` say "build the binary" when there is none, the way `report` already did.
+  What stays on disk is the launchers' helpers (`download-model.sh`, `gguf-info.sh`,
+  `install-llama-cpp.sh`, `health-check-ai.sh`), the launchers themselves, and the
+  no-binary fallbacks (`tui.sh`, `web.ps1`, `report.ps1`, `setup-ai.sh`).
 - **The recorder is the binary's** (`golem-core::record` + `golem/src/facts.rs`), and it was
   verified the way a port has to be: `scripts/record-result.sh` and
   `golem.exe bench|eval --replay <capture>` were run back to back against the same live
@@ -118,8 +122,53 @@ As of 2026-10-20 (`experiment/token-machine`):
   line, the `(windows mode)` tag and the per-engine seed/candidate list, which the shell
   echoes even in a dry run. `./golem.exe tune <preset> --dry-run` and
   `./scripts/tune.sh <preset> --dry-run` now agree line for line.
-- **Next**: the clean-machine walk (phase 6's "done when"), which cannot pass yet - see
-  below - and then the configuration migration, which is blocked on it.
+- **The measurement is the binary's too (2026-10-20, late)**: `bench` and `eval` are ports of
+  `scripts/benchmark-ai.sh` and `scripts/eval-model.sh`, so the sweep measures itself in
+  process and nothing on the path "clone → one command → tuned, running model" reaches a
+  shell any more. The transport is a new shared one (`engine::{Base, post_json, get_json}`):
+  the status client's socket with the deadline and the address the caller asks for, bodies
+  de-framed (`Content-Length` truncates, chunked is unwrapped), and an `https://` base
+  refused rather than half-honoured because the client has no TLS. Verified against both
+  scripts on `qwen2.5-0.5b-instruct`, back to back on the same engine: `bench` prints the
+  same shape, the same 600 and 3610 token counts and the same `draft_accept=-`, with
+  346.7 vs 347.2 t/s decode and 20941 vs 20947 t/s prefill; `eval` is identical apart from
+  one deliberate line, `tool_call :`, where the script's `json_str` cannot cross an escaped
+  quote and prints `{\)` for the arguments while this prints them.
+- **The scripts whose gates the binary replaced are gone** (2026-10-20): `report.sh`,
+  `benchmark-ai.sh`, `eval-model.sh`, `record-result.sh`, `tune.sh`, `tune-auto.sh`. The
+  measurement cluster went together because `tune.sh` called the other three. What stays is
+  the launchers' helpers (`download-model.sh` is `./golem up`'s, `gguf-info.sh` is
+  web.ps1's, `install-llama-cpp.sh` is start-local-ai.sh's), the launchers themselves, and
+  the no-binary fallbacks (`tui.sh`, `web.ps1`, `report.ps1`, `setup-ai.sh`). Deleting those
+  means porting `up`/`down`/`restart`, which phase 6 deliberately does not do.
+- **`golem.toml` exists** and the binary reads it: nine keys whose only reader it is
+  (`TEMPERATURE`, `TOP_P`, the five `TUNE_*`, `GATE_TOKENS`). See the Configuration section.
+- **The two probes ran.** Strata refuses 236544 (recorded as a reject row, written up in
+  docs/strata-models.md); llama.cpp b11755 passes the 200K gate but is **not adopted** - it
+  buys prefill (1143 vs 871 t/s at 30K, 787 vs 672 at 200K) with decode (31.0 vs 35.2 t/s at
+  depth, acceptance 57% vs 72%), and decode at depth is what a long session pays on every
+  token. b11379 stays the pin; b11755 stays installed for a future paired retest.
+- **The clean-machine walk ran**: a scratch clone with the binary shipped and the models
+  already present starts and drives an engine with no shell at all. **The missing piece is a
+  release asset** - see the walk section.
+- **The launcher port has started** (2026-10-20, later): `golem down` kills the process
+  tree and waits for the card itself, `up --dry-run` resolves the whole command line and
+  agrees with `start-windows.ps1 -DryRun` flag for flag, and `golem_core::adapter` is the
+  flag translation `flag.*` / `map.*` describes. `docs/plan-launchers.md` has the rest:
+  install, spawn, restart, then the Linux and docker drivers.
+- **The direction after this page (2026-10-20, from the user)**: *the binary is the app* -
+  download, configure, tune and serve with no script behind any of it, because every script
+  is a place that needs Git Bash, or WSL, or a second implementation for the other OS. The
+  remaining work is one page each: [plan-launchers.md](plan-launchers.md) (`up` / `down` /
+  `restart` in the binary, which also takes PowerShell off the launch path and lets the last
+  `.env` keys move) and [plan-smart-tune.md](plan-smart-tune.md) (the tuner stops sweeping a
+  grid: the frontier is bisected, engines that cannot serve `/v1/messages` are not measured,
+  and refine spends one probe per knob). A **native UI** is a direction the user raised, not
+  a task: the page stays until something better exists, and `tui.rs` is the proof that the
+  console's data is a plain struct with actions as callbacks.
+- **Next**: the re-bench on a quiet desktop from an emptied database, then `./golem report`.
+- Worth borrowing when the console grows a LAN face: a `Host`-header check, since the
+  current console binds 127.0.0.1 only and that is the reason it needs none today.
 
 ### The clean-machine walk, as far as it goes without the GPU (2026-10-20)
 
@@ -135,17 +184,33 @@ anything. What a fresh clone has and has not:
 - **no `.env`** - bootstrapped from `.env.example` by both front doors, which is fine.
 - **no models** (`data/models/*` is git-ignored) and **no `.local/`** (no engine build, no
   toolchain), so the first `up` is a ~20 GB download and the first `install` a full build.
-- **the measurement harness is still bash.** `bench`, `eval` and therefore `tune` run
-  `scripts/benchmark-ai.sh` and `scripts/eval-model.sh` through `driver::bash()`. On Windows
-  that is Git Bash by name. So the *running* half of the walk - "a tuned, running model" -
-  needs Git Bash until those two scripts are the binary's too, or until they are rewritten
-  without bash. `up` itself does not: `golem.cmd` drives PowerShell and `curl.exe`, both of
-  which Windows 11 ships.
+- **the measurement harness was bash, and is not any more.** When this was first walked,
+  `bench`, `eval` and therefore `tune` ran `scripts/benchmark-ai.sh` and
+  `scripts/eval-model.sh` through `driver::bash()` - Git Bash, by name, on Windows. Both
+  are the binary's now (see the status block), so the *running* half of the walk no longer
+  needs a shell: `up` drove PowerShell and `curl.exe` already, and the measurement no
+  longer needs bash at all.
 
-That is the next plan, in one sentence: **ship the binary, and port the two measurement
-scripts.**
-- Worth borrowing when the console grows a LAN face: a `Host`-header check, since the
-  current console binds 127.0.0.1 only and that is the reason it needs none today.
+That leaves one thing: **ship the binary.**
+
+### The walk, run (2026-10-20)
+
+Cloned to `C:\workspaces\golem-walk`, put the built `golem.exe` and the checkout's `.env`
+in it, and junctioned `data/models`, `data/tuned` and `.local` at the real ones - which is
+what a machine that already has the models and the engine looks like, and the only way to
+test the launch path without a 20 GB download. Then, with no shell typed:
+
+- **`./golem.exe up` started the engine.** It drives `golem.cmd` → `cmd.exe` →
+  `powershell.exe -File start-windows.ps1`, and there is no bash anywhere on that path
+  (`golem.cmd`'s `golem-bash.cmd` bridge is only on the bench/eval/tune/pull labels, and
+  those are the binary's now). PowerShell **5.1** is what Windows 11 ships; 7 is not needed.
+- `status` reported the engine up and all six presets listed; `env` printed the exports;
+  `logs --no-follow` tailed the engine log; `pull ornith-1.5-35b` found the files already
+  present and finished; `down` stopped it. None of them reached a shell.
+
+So the answer to phase 6's question is: **the only thing missing is a release asset.** The
+walk's "tuned" half - `tune --auto` from the clone - is the re-bench the status block names
+as next: the same code path `up` just exercised, plus the sweep.
 
 ## Why
 
@@ -305,17 +370,19 @@ launcher). The binary should not inherit that.
   Until then: **no new keys in `.env`.** A setting only the binary owns goes straight
   into `golem.toml` from its first day, so the surface that has to migrate only ever
   shrinks.
-- **Where this stands after the ports (2026-10-20).** Every command is the binary's, and
-  the rule above still blocks the file: the *launchers* source `.env` for `ENGINE`,
-  `MODELS_PRESET`, `MODEL_ALIAS`, `LOCAL_AI_PORT` and `LOCAL_AI_API_KEY`, and they are
-  still the shell's because the binary starts engines by running them. `tune.sh` reads the
-  `TUNE_*` floors and `GATE_TOKENS`, and it is still the fallback for a checkout with no
-  binary built. So no key has *only* binary readers yet, and writing `golem.toml` now would
-  mean two sources of truth for every one of them - the failure this section exists to
-  avoid. The order is therefore unchanged: `up` (or the launchers' `.env` reads) first, then
-  the file. What has moved is the shape: every per-invocation override is `GOLEM_*` in the
-  process environment and is read through `state::override_value`, so a key's *source* is
-  already one function per reader rather than one `grep` per script.
+- **Where this stands after the ports (2026-10-20).** The migration has started, and the
+  rule above is what decided the first nine keys. `TEMPERATURE`, `TOP_P`,
+  `TUNE_MIN_DECODE`, `TUNE_MIN_PREFILL`, `TUNE_MIN_DEPTH_DECODE`, `TUNE_CTX_POLICY`,
+  `TUNE_RUNS`, `TUNE_PREFILL` and `GATE_TOKENS` are in `golem.toml` now: the shell drivers
+  never read any of them, and the scripts that did are the measurement harnesses the binary
+  is. `state::env_value` reads `golem.toml` first and `.env` second - one mechanism, so a
+  key is in one file and never both - and the writers route a TOML-owned key to the TOML
+  file, because writing `.env` for a key the reader takes from elsewhere looks like it
+  worked and changes nothing.
+  The rest still cannot move: the launchers source `.env` for `ENGINE`, `MODELS_PRESET`,
+  `MODEL_ALIAS`, `LOCAL_AI_PORT` and `LOCAL_AI_API_KEY`, and they are still the shell's
+  because the binary starts engines by running them. So the order is unchanged - `up` (or
+  the launchers' `.env` reads) first, then the rest of the file.
 - **Nothing about this is urgent.** It is written down so the shell is not extended
   with configuration work the binary will own (2026-10-20: "we don't want to add
   features with the scripting way if we will have to rebuild in rust").

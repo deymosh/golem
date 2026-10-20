@@ -1,54 +1,78 @@
 //! `golem bench` and `golem eval`: run the measurement, then record it.
 //!
 //! The port of `run_recorded` in the `golem` script. The measurement itself
-//! stays `scripts/benchmark-ai.sh` and `scripts/eval-model.sh` - they are the
-//! contract, the same way the launchers are the engine drivers - and what
-//! moves here is the wrapper: the arguments, the tee, and the recording.
-//!
-//! Recording is the part that had to move. `record-result.sh` was a third
-//! script in the chain (`./golem` → bench script → recorder), and the row it
-//! writes is what the report, the console and the tuner all read; the port of
-//! it is `golem_core::record`, and this module is what calls it.
+//! is the binary's too now - [`crate::bench`] and [`crate::eval`] are ports of
+//! `scripts/benchmark-ai.sh` and `scripts/eval-model.sh`, because a bash
+//! script on this path puts a shell back on the critical path of "clone, one
+//! command, a tuned running model". What lives here is the wrapper the shell
+//! had: the arguments, the tee, and the recording.
 //!
 //! ## The tee
 //!
 //! The shell's `"$@" 2>&1 | tee "${out}"` does two things at once: the run's
 //! output is shown *live* (a 200K needle takes minutes, and a silent terminal
-//! reads as a hung one) and captured for the recorder. Both are kept here.
-//! stdout and stderr are read on their own threads and merged into one
-//! buffer, which is not quite the shell's byte-level interleaving - the two
-//! streams arrive in order *within* themselves - and is exactly as good for
-//! what the capture is used for: the `RESULT` line and the `[ OK ] tool
-//! calling` marker are both written to stdout.
+//! reads as a hung one) and captured for the recorder. [`Tee`] is both - the
+//! harness writes to it, it echoes to stdout, and it keeps the text.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
 
 use golem_core::record;
 use golem_core::results::Kind;
 
-use crate::driver;
-use crate::facts;
 use crate::state;
+use crate::{bench, eval, facts};
 
 /// `golem bench [--runs N] [--prefill N]`.
 pub fn bench(home: &Path, args: &[String]) -> i32 {
-    run(home, Kind::Bench, "scripts/benchmark-ai.sh", args)
+    run(home, Kind::Bench, args, bench::run)
 }
 
 /// `golem eval [--long N]`.
 pub fn eval(home: &Path, args: &[String]) -> i32 {
-    run(home, Kind::Eval, "scripts/eval-model.sh", args)
+    run(home, Kind::Eval, args, eval::run)
 }
 
-/// Measure, then record what was measured.
-fn run(home: &Path, kind: Kind, script: &str, args: &[String]) -> i32 {
+/// Everything a run printed, and stdout as it printed it.
+///
+/// A `Write` so the harness does not know about terminals, and a buffer so
+/// the recorder gets exactly what the user saw.
+#[derive(Debug, Default)]
+pub struct Tee {
+    text: String,
+}
+
+impl Tee {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+impl Write for Tee {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.text.push_str(&String::from_utf8_lossy(buf));
+        let stdout = std::io::stdout();
+        let mut lock = stdout.lock();
+        lock.write_all(buf)?;
+        lock.flush()?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::stdout().flush()
+    }
+}
+
+/// Measure with `harness`, then record what was measured.
+fn run(
+    home: &Path,
+    kind: Kind,
+    args: &[String],
+    harness: fn(&Path, &[String], &mut dyn Write) -> i32,
+) -> i32 {
     // `--replay <file>` records a capture that already exists instead of
     // taking a new measurement. It is how the port of the recorder is checked
-    // against the shell's on the same output, and it is what a backfill needs
-    // (the shell reached the same place through `record-result.sh` by hand).
+    // against the shell's on the same output, and it is what a backfill needs.
     if let Some(file) = replay_path(args) {
         let captured = match std::fs::read_to_string(&file) {
             Ok(text) => text,
@@ -57,22 +81,20 @@ fn run(home: &Path, kind: Kind, script: &str, args: &[String]) -> i32 {
                 return 1;
             }
         };
+        if args.iter().any(|a| a == "--reject") {
+            return record_rejection(home, &captured, args);
+        }
         return record_capture(home, kind, &captured);
     }
 
-    let (status, captured) = match measure(home, script, args) {
-        Ok(outcome) => outcome,
-        Err(e) => {
-            eprintln!("[FAIL] cannot run {script}: {e}");
-            return 1;
-        }
-    };
+    let mut tee = Tee::default();
+    let status = harness(home, args, &mut tee);
     // The shell's `[[ "${status}" == 0 && "${RECORD:-1}" != 0 ]]`: a run that
     // failed is not a measurement, however much it printed.
     if status != 0 {
         return status;
     }
-    record_capture(home, kind, &captured)
+    record_capture(home, kind, tee.text())
 }
 
 /// The file named by `--replay`, if the flag is there.
@@ -81,67 +103,63 @@ fn replay_path(args: &[String]) -> Option<PathBuf> {
     args.get(at + 1).map(PathBuf::from)
 }
 
-/// Run `script` with `args`, showing the output as it arrives and returning
-/// both the exit code and everything that was printed.
-fn measure(home: &Path, script: &str, args: &[String]) -> std::io::Result<(i32, String)> {
-    let mut command = Command::new(driver::bash());
-    command
-        .current_dir(home)
-        .arg(script)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-
-    let captured = Arc::new(Mutex::new(String::new()));
-    let mut readers = Vec::new();
-    if let Some(out) = child.stdout.take() {
-        readers.push(spawn_reader(out, Arc::clone(&captured), false));
-    }
-    if let Some(err) = child.stderr.take() {
-        readers.push(spawn_reader(err, Arc::clone(&captured), true));
-    }
-
-    let status = child.wait()?;
-    for reader in readers {
-        let _ = reader.join();
-    }
-    let text = captured.lock().map(|text| text.clone()).unwrap_or_default();
-    Ok((status.code().unwrap_or(-1), text))
+/// The value of `--flag value`, or None.
+fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    let at = args.iter().position(|a| a == flag)?;
+    args.get(at + 1).map(String::as_str)
 }
 
-/// A thread that echoes one of the child's streams and appends it to the
-/// capture.
+/// Record a rejection: `golem bench --replay <capture> --reject [--note ...]`.
 ///
-/// stderr goes to *stdout* here, which is the shell's `2>&1`: the two streams
-/// are one stream by the time anything reads them.
-fn spawn_reader<R: std::io::Read + Send + 'static>(
-    stream: R,
-    captured: Arc<Mutex<String>>,
-    _is_stderr: bool,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        let stdout = std::io::stdout();
-        let mut reader = BufReader::new(stream);
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            match reader.read_until(b'\n', &mut line) {
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(_) => break,
-            }
-            {
-                let mut lock = stdout.lock();
-                let _ = lock.write_all(&line);
-                let _ = lock.flush();
-            }
-            if let Ok(mut text) = captured.lock() {
-                text.push_str(&String::from_utf8_lossy(&line));
-            }
-        }
-    })
+/// A rejection is a candidate the project measured and will not adopt, or one
+/// it could not measure at all - and the second kind is the one worth having a
+/// tool for, because "Strata refuses 236544 on this card" is a fact the report
+/// should show next to the engine's own numbers. The capture is the evidence
+/// (for a refusal, the engine's last lines) and the note is the reason; no
+/// `RESULT` line is required, and the metrics come out `null` when there is
+/// none to read.
+fn record_rejection(home: &Path, captured: &str, args: &[String]) -> i32 {
+    let (engine, model, preset_rel) = resolved(home);
+    let note = arg_value(args, "--note")
+        .map(str::to_string)
+        .or_else(|| process_var("RECORD_NOTE"))
+        .unwrap_or_default();
+    let mut facts = facts::collect(home, Kind::Reject, &engine, &model, &preset_rel, &note);
+    // The context a refusal is *about*: nothing served it, so the preset
+    // cannot say, and the report files a row under it. The build is the same
+    // kind of fact - an engine that never started answers no `/props`, and a
+    // row that does not name the build it rejected is a row the next reader
+    // has to guess at.
+    if let Some(ctx) = arg_value(args, "--ctx").and_then(|v| v.parse().ok()) {
+        facts.ctx = Some(ctx);
+    }
+    if let Some(build) = arg_value(args, "--build") {
+        facts.engine_build = build.to_string();
+    }
+    let line = record::reject_row(&facts, captured);
+    if let Err(e) = record::append(home, &line) {
+        eprintln!("[FAIL] cannot append to bench/results.jsonl: {e}");
+        return 1;
+    }
+    println!("[ OK ] recorded a rejection in bench/results.jsonl ({model})");
+    0
+}
+
+/// The three names a run resolves before it records, with the shell's
+/// precedence: the per-run override, then `.env`, then a default.
+///
+/// `RECORD_MODEL` and `RECORD_NOTE` are overrides only - they are never keys
+/// in `.env`, so they are read from the process alone.
+fn resolved(home: &Path) -> (String, String, String) {
+    let engine = state::override_value(home, "GOLEM_ENGINE", "ENGINE")
+        .unwrap_or_else(|| "llama.cpp".to_string());
+    let model = process_var("RECORD_MODEL")
+        .or_else(|| process_var("GOLEM_MODEL_ALIAS"))
+        .or_else(|| state::env_value(home, "MODEL_ALIAS"))
+        .unwrap_or_else(|| "local-model".to_string());
+    let preset_rel =
+        state::override_value(home, "GOLEM_MODELS_PRESET", "MODELS_PRESET").unwrap_or_default();
+    (engine, model, preset_rel)
 }
 
 /// Build the row for `captured`, append it, and say so - `run_recorded`'s
@@ -163,16 +181,7 @@ fn record_capture(home: &Path, kind: Kind, captured: &str) -> i32 {
 
     // The four names the shell resolves before it calls the recorder, with
     // the same precedence: the per-run override, then `.env`, then a default.
-    // `RECORD_MODEL` and `RECORD_NOTE` are overrides only - they are never
-    // keys in `.env`, so they are read from the process alone.
-    let engine = state::override_value(home, "GOLEM_ENGINE", "ENGINE")
-        .unwrap_or_else(|| "llama.cpp".to_string());
-    let model = process_var("RECORD_MODEL")
-        .or_else(|| process_var("GOLEM_MODEL_ALIAS"))
-        .or_else(|| state::env_value(home, "MODEL_ALIAS"))
-        .unwrap_or_else(|| "local-model".to_string());
-    let preset_rel =
-        state::override_value(home, "GOLEM_MODELS_PRESET", "MODELS_PRESET").unwrap_or_default();
+    let (engine, model, preset_rel) = resolved(home);
     let note = process_var("RECORD_NOTE").unwrap_or_default();
 
     match record_with(home, kind, &engine, &model, &preset_rel, &note, captured) {

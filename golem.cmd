@@ -55,7 +55,7 @@ if defined BIN (
     rem answer for whatever .env names, and `golem.cmd install` would try to
     rem build llama.cpp on a machine that fetches a pinned release instead.
     set "GOLEM_DEPLOY_MODE=windows"
-    for %%c in (report status tui menu logs pull bench eval env claude install setup tune) do if /i "%~1"=="%%c" (call :hand %* & exit /b)
+    for %%c in (report status tui menu logs pull bench eval env claude install setup tune stop) do if /i "%~1"=="%%c" (call :hand %* & exit /b)
     if /i "%~1"=="web" if "%~2"=="" (call :hand web & exit /b)
 )
 

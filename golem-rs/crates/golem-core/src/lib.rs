@@ -31,6 +31,15 @@ pub mod report;
 
 pub mod tune;
 
+/// The engine adapter's contract: a preset's flags become the arguments the
+/// engine is started with. The part of `start-windows.ps1` worth having in
+/// Rust; the rest is downloading a release and spawning a process.
+pub mod adapter;
+
+/// `golem.toml`: the TOML subset the binary's own configuration file uses,
+/// read and written line by line so the comments survive.
+pub mod config;
+
 /// The row builder behind `scripts/record-result.sh`: a captured bench or
 /// eval output, plus what was measured on, becomes one line of
 /// `bench/results.jsonl`.

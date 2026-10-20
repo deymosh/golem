@@ -3,6 +3,29 @@
 Status: **design, not built** (2026-10-20). Blocked on the engine viability probe below;
 nothing here changes the defaults until Strata passes it.
 
+**The probe ran on 2026-10-20 and Strata refuses.** v0.1.45 was started at the preset's
+236544 context (`engines/strata/engine.ini`'s `strata_context`, applied to the installed
+`strata-qwen36-ud-q4_k_xl.json`) and its engine exited before it was ready:
+
+```
+strata-q36: context 236544 cells, prompt chunk 2048, MTP block loaded, 0.00 GiB of VRAM free
+strata-q36: not enough VRAM left for the hybrid experts' buffers and slots
+            (1256 MiB needed, 0 MiB free after the weights, the context and the sessions)
+```
+
+The context alone takes the card: its KV is ~57 KB per token against llama.cpp's ~12.7 KB,
+so 236544 needs ~13.5 GB before any weights. That is not a placement problem to tune around
+- no expert split makes 236544 fit on 12 GB - so this is a refusal, not a slow start. It is
+recorded as a `reject` row in `bench/results.jsonl` with the engine's own words in the note,
+and the installed config was put back to the 32768 that does run. Per the rule below,
+nothing on this page ships: Golem keeps llama.cpp and this waits for 0.2.x.
+
+**The adapter and the machine now disagree on purpose.** `strata_context = 236544` in
+`engines/strata/engine.ini` is what a fresh install would ask for, and this box cannot serve
+it. A Strata install on a 16 GB or 24 GB card would want it; on 12 GB the number is
+aspirational. Whichever way that is resolved - a smaller adapter default, or a fit check
+before the context is written - it is part of the design below, not a one-line change.
+
 ## What we want
 
 Two things, both user-facing:

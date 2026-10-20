@@ -31,7 +31,13 @@
 # --auto), tui, menu, logs, pull, bench, eval, claude, env, setup and install.
 # `up`, `down` and `restart` stay here - the binary starts engines by running
 # this script - and so do `web` and `web status`/`web stop`, which read the
-# console's pid file. GOLEM_NO_BINARY=1 runs the shell everywhere.
+# console's pid file.
+#
+# Four of those have no fallback left, because the script behind them is gone:
+# report, bench, eval and tune say "build the binary" instead. The measurement
+# is `bench.rs` / `eval.rs` / `tune.rs` now, not a shell script, so there is
+# nothing here to fall back to. The rest still run their scripts when no binary
+# is built. GOLEM_NO_BINARY=1 runs the shell everywhere it can.
 #
 # Mode:
 #   DEPLOY_MODE in .env (docker|native|windows), overridden by
@@ -92,8 +98,8 @@ MODELS_PRESET="${GOLEM_MODELS_PRESET:-${MODELS_PRESET:-}}"
 # so handing those over would be a loop on Linux, where this script is the
 # only launcher there is, and a pointless extra hop on Windows.
 #
-# `tune --auto` is not either: that is scripts/tune-auto.sh, a driver with
-# the per-preset sweep as its worker, and the binary does not have it.
+# `tune --auto` is in the list with `tune`: it is `auto_tune.rs` now, driving
+# the binary's own sweep per installed preset.
 # `web status` and `web stop` read the console's pid file, which this script
 # still owns.
 GOLEM_BIN=""
@@ -121,7 +127,7 @@ hand_over() {
     case "${cmd}" in
         # Implemented in golem-rs/. `tune` includes `--auto`, which is
         # `auto_tune.rs` now rather than scripts/tune-auto.sh.
-        report|status|tui|menu|logs|pull|bench|eval|env|claude|install|setup|tune) ;;
+        report|status|tui|menu|logs|pull|bench|eval|env|claude|install|setup|tune|down|stop) ;;
         # `web` is only the console: `web status` and `web stop` read the
         # pid file this script writes.
         web)  [[ -n "${1:-}" ]] && return 1 ;;
@@ -358,30 +364,10 @@ cmd_logs() {
     fi
 }
 
-# run_recorded <kind> <command...>: run a bench/eval, show its output live
-# and append its RESULT lines to bench/results.jsonl. RECORD=0 skips it.
-run_recorded() {
-    local kind="$1"; shift
-    local out status=0
-    out="$(mktemp)"
-    "$@" 2>&1 | tee "${out}" || status=$?
-    if [[ "${status}" == 0 && "${RECORD:-1}" != 0 ]] && grep -q '^RESULT' "${out}"; then
-        "${SCRIPTS}/record-result.sh" "${kind}" "${out}" "${RECORD_NOTE:-}" || true
-    fi
-    rm -f "${out}"
-    return "${status}"
-}
-
-cmd_bench() {
-    run_recorded bench "${SCRIPTS}/benchmark-ai.sh" "$@"
-}
-
-cmd_eval() {
-    # One code path everywhere: the harness needs only bash, curl and awk,
-    # so there is nothing to hand to WSL (and nothing to lose on the way
-    # across it - see the header of scripts/eval-model.sh).
-    run_recorded eval "${SCRIPTS}/eval-model.sh" "$@"
-}
+# bench, eval and tune are the portable binary's now, all the way down: the
+# measurement itself is `bench.rs` / `eval.rs` / `tune.rs`, not a script, so
+# there is no shell fallback left to keep. `--replay` and `--reject` on the
+# binary are what replacing `record-result.sh` needs (see golem-rs/README.md).
 
 cmd_env() {
     # llama-server speaks the Anthropic Messages API natively, so Claude
@@ -452,16 +438,16 @@ case "${CMD}" in
     install)  hand_over install "$@" || cmd_install ;;
     pull)     hand_over pull "$@" || cmd_pull "$@" ;;
     up)       cmd_up ;;
-    down)     cmd_down ;;
+    down)     hand_over down "$@" || cmd_down ;;
     restart)  cmd_restart ;;
     status)   hand_over status "$@" || cmd_status ;;
     logs)     hand_over logs "$@" || cmd_logs "${1:-}" ;;
-    bench)    hand_over bench "$@" || cmd_bench "$@" ;;
+    bench)    hand_over bench "$@" || die "bench is the portable binary's (golem-rs/): build it with ./scripts/cargo.sh build" ;;
     report)   hand_over report "$@" || die "report is the portable binary's (golem-rs/): build it with ./scripts/cargo.sh build" ;;
     web)      hand_over web "$@" || cmd_web "$@" ;;
     tui|menu) hand_over "${CMD}" "$@" || exec "${SCRIPTS}/tui.sh" ;;
-    tune)     hand_over tune "$@" || "${SCRIPTS}/tune.sh" "$@" ;;
-    eval)     hand_over eval "$@" || cmd_eval "$@" ;;
+    tune)     hand_over tune "$@" || die "tune is the portable binary's (golem-rs/): build it with ./scripts/cargo.sh build" ;;
+    eval)     hand_over eval "$@" || die "eval is the portable binary's (golem-rs/): build it with ./scripts/cargo.sh build" ;;
     claude)   hand_over claude "$@" || cmd_claude "$@" ;;
     env)      hand_over env || cmd_env ;;
     help|-h|--help) cmd_help ;;

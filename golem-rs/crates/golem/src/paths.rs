@@ -23,6 +23,12 @@ use std::path::{Path, PathBuf};
 /// is what a downloaded binary uses.
 const EMBEDDED_TEMPLATE: &str = include_str!("../../../../bench/report.template.html");
 
+/// The configuration file, compiled in for the same reason: a release folder
+/// has no `golem.toml`, and without one the moved keys would silently fall
+/// back to the code's defaults - which work, but leave the user with no file
+/// to read the settings out of or edit them in.
+const EMBEDDED_CONFIG: &str = include_str!("../../../../golem.toml");
+
 /// The directories the binary expects under the home. Created on demand.
 const DIRS: [&str; 5] = ["bench", "data/models", "data/cache", "data/tuned", "logs"];
 
@@ -52,6 +58,10 @@ pub fn ensure(home: &Path) -> std::io::Result<()> {
     if !template.is_file() {
         std::fs::write(&template, EMBEDDED_TEMPLATE)?;
     }
+    let config = home.join("golem.toml");
+    if !config.is_file() {
+        std::fs::write(&config, EMBEDDED_CONFIG)?;
+    }
     Ok(())
 }
 
@@ -79,6 +89,30 @@ mod tests {
         for sub in DIRS {
             assert!(dir.join(sub).is_dir(), "{sub} should exist");
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ensure_writes_the_embedded_config_once() {
+        // A release folder has no `golem.toml`; without one the moved keys
+        // fall back to the code's defaults and the user has no file to read
+        // them out of.
+        let dir = std::env::temp_dir().join("golem-rs-paths-config-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        ensure(&dir).expect("first run");
+        let written = std::fs::read_to_string(dir.join("golem.toml")).expect("config");
+        assert_eq!(written, EMBEDDED_CONFIG);
+        // And it parses as what the binary reads: the comments are the point.
+        assert!(written.contains("TUNE_MIN_DECODE"), "the tuner's floors are in it");
+        golem_core::config::Document::parse(&written).expect("the embedded config parses");
+
+        // A user's edit must win over the embedded copy.
+        std::fs::write(dir.join("golem.toml"), "TUNE_RUNS = 9\n").expect("edit");
+        ensure(&dir).expect("second run");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("golem.toml")).expect("read"),
+            "TUNE_RUNS = 9\n"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

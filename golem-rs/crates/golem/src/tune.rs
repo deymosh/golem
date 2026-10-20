@@ -55,6 +55,41 @@ use crate::state;
 const HEALTH_TRIES: u32 = 120;
 const HEALTH_SLEEP: Duration = Duration::from_secs(5);
 
+/// Where a candidate restart's launcher output goes, relative to the home.
+///
+/// The launcher's own words are the answer when a candidate will not start,
+/// so the sweep shows them rather than a message of its own invention.
+const RESTART_LOG: &str = "logs/tune-restart.log";
+
+/// Where the gate's restart goes. Its own file, for the reason the shell had
+/// two: a gate that fails should not overwrite the sweep's last restart.
+const GATE_LOG: &str = "logs/tune-gate.log";
+
+/// How much RAM beyond the model itself a *locked* load needs.
+///
+/// The gate is the one load that keeps the preset's `mlock`, and the server
+/// needs working room on top of the weights; two gigabytes is the point below
+/// which a 20 GB model on a 32 GB box starts fighting the desktop.
+const SWEEP_RAM_MARGIN_GB: f64 = 2.0;
+
+/// How long a restart will wait for the previous candidate's RAM to come back
+/// before trying anyway. Windows returns locked pages a moment after the
+/// process dies, and that moment is long enough to matter.
+const RAM_SETTLE: Duration = Duration::from_secs(60);
+
+/// How far above the seed the search looks when the seed itself spills.
+///
+/// Each step is two layers (less on the card), and the placement tool aims at
+/// the wall, so a seed that does not fit is one or two steps from fitting -
+/// a desktop that grew by a gigabyte, not a different machine.
+const SEED_STEPS_UP: u32 = 6;
+
+/// How many halvings the frontier search may spend.
+///
+/// `log2(61) < 6`, so eight is generous for a split range of 0..=60; it exists
+/// so a pathological measurement cannot turn the search into a walk.
+const MAX_BISECT: usize = 8;
+
 /// `golem tune [preset] [flags]`.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -564,16 +599,24 @@ impl<'a> Tuner<'a> {
         let engines = self.sweepable_engines()?;
         self.print_plan(&engines);
         if self.opts.dry_run {
-            // The shell echoes each engine's seed and candidate list even in a
-            // dry run, and only then skips the measuring. A plan that omits the
-            // points it would spend is not the plan.
+            // The shell echoed each engine's seed and candidate list even in a
+            // dry run, and only then skipped the measuring. A plan that omits
+            // what it would spend is not the plan - and what it spends now is
+            // a search, so the plan says that instead of a list.
             for engine in &engines {
-                let (seed, candidates) = self.plan_for(engine);
+                let seed = self.seed_for(engine);
                 self.emit(format_args!(""));
-                self.emit(format_args!(
-                    "  --- {engine}: seed {seed}, offload candidates {}",
-                    candidates.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
-                ));
+                if self.opts.candidates.is_empty() {
+                    self.emit(format_args!(
+                        "  --- {engine}: seed {seed}, bisecting the frontier (at most {} loads)",
+                        SEED_STEPS_UP / 2 + MAX_BISECT as u32 + 1
+                    ));
+                } else {
+                    self.emit(format_args!(
+                        "  --- {engine}: seed {seed}, measuring the given splits {}",
+                        self.opts.candidates.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+                    ));
+                }
             }
             self.emit(format_args!(""));
             self.emit(format_args!("[ OK ] dry run: nothing started"));
@@ -586,6 +629,20 @@ impl<'a> Tuner<'a> {
                 vram_mib: 0.0,
                 gated_tokens: None,
             });
+        }
+
+        // The sweep itself no longer needs the model's worth of RAM (see
+        // `measure`), but the *gate* still loads it with the preset's own
+        // `mlock`, and that is the one load this machine has to be able to
+        // hold. Say the arithmetic up front rather than discovering it at the
+        // end of a long sweep.
+        let model_gb = self.model_gb();
+        let free_gb = state::ram_free_gb().unwrap_or(0.0);
+        if self.locks_ram() && free_gb > 0.0 && free_gb < model_gb + SWEEP_RAM_MARGIN_GB {
+            self.emit(format_args!(
+                "  [WARN] {free_gb:.1} GB of RAM free and the gate locks {model_gb:.1} GB - \
+                 close what is using it before the gate runs"
+            ));
         }
 
         for engine in &engines {
@@ -601,16 +658,23 @@ impl<'a> Tuner<'a> {
 
     /// The engines this preset can be tuned on.
     ///
-    /// An engine whose adapter says `tune = false` is installed but cannot be
-    /// measured - Strata serves its own catalog model and ignores preset
-    /// flags - so it is named and skipped rather than swept and reported as a
-    /// mysterious zero.
+    /// Two kinds are named and skipped rather than swept:
+    ///
+    /// - an engine whose adapter says `tune = false` serves its own catalog
+    ///   model and ignores preset flags (Strata), so there is nothing to sweep;
+    /// - an engine whose adapter serves no `/v1/messages` **cannot win**,
+    ///   because the client this repository exists for cannot talk to it.
+    ///   Sweeping it spent ten model loads on a foregone conclusion and then
+    ///   printed a warning saying so - the numbers belong in the database when
+    ///   an engine is *being assessed*, not on every routine tune. Ask for it
+    ///   by name (`--engines ik_llama.cpp`) when that is what you want.
     fn sweepable_engines(&self) -> Result<Vec<String>, String> {
         let installed = state::engines(self.home);
         if installed.is_empty() {
             return Err("no engines found under engines/".into());
         }
-        let wanted = if self.opts.engines.is_empty() { installed.clone() } else { self.opts.engines.clone() };
+        let explicit = !self.opts.engines.is_empty();
+        let wanted = if explicit { self.opts.engines.clone() } else { installed.clone() };
         let mut sweepable = Vec::new();
         for name in wanted {
             if !installed.contains(&name) {
@@ -620,6 +684,12 @@ impl<'a> Tuner<'a> {
                 Some("false") => {
                     let reason = self.engine_ini(&name, "tune_reason").unwrap_or_default();
                     self.emit(format_args!("  {name}: skipped - {reason}"));
+                }
+                _ if !explicit && !self.serves_anthropic(&name) => {
+                    self.emit(format_args!(
+                        "  {name}: skipped - its adapter serves no /v1/messages, so it cannot \
+                         serve this client (ask for it with --engines {name})"
+                    ));
                 }
                 _ => sweepable.push(name),
             }
@@ -694,6 +764,12 @@ impl<'a> Tuner<'a> {
             "  gate       needle at 90% of each candidate's tuned context, up to {} tokens",
             self.opts.gate_tokens_max
         ));
+        if self.locks_ram() {
+            self.emit(format_args!(
+                "  load mode  sweep points use mmap; the gate and the adopted setup keep {}",
+                self.preset_value("load-mode").unwrap_or_default()
+            ));
+        }
         if m.vram_used_mib > 2000 {
             self.emit(format_args!(
                 "  [WARN] {} MiB of VRAM is already in use - the numbers will be noisy",
@@ -704,62 +780,147 @@ impl<'a> Tuner<'a> {
 
     // ---- measuring -----------------------------------------------------
 
-    /// The seed and the offload splits one engine's sweep will visit.
-    ///
-    /// Split out of [`Tuner::sweep_engine`] so the dry run can print the same
-    /// line without measuring anything: the shell prints the candidate list in
-    /// both cases (`if [[ "${DRY_RUN}" == 1 ]]; then continue; fi` comes *after*
-    /// the echo), and a plan that hides the points it would spend is not the
-    /// plan the shell showed.
-    fn plan_for(&self, engine: &str) -> (u32, Vec<u32>) {
-        let seed = self.seed_for(engine);
-        let candidates: Vec<u32> = if self.opts.candidates.is_empty() {
-            // Wider above the seed than below: the placement tool keeps ~1 GB
-            // free, while a hand-tuned split ran four layers further (fitter
-            // is faster, up to the cliff).
-            (-2i64..=6)
-                .map(|d| seed as i64 + d)
-                .filter(|n| (0..=60).contains(n))
-                .map(|n| n as u32)
-                .collect()
-        } else {
-            self.opts.candidates.clone()
-        };
-        (seed, candidates)
-    }
-
     /// Sweep one engine's offload splits, then refine its best.
+    ///
+    /// **The frontier is bisected, not walked.** `n-cpu-moe N` keeps the first
+    /// N layers' experts in RAM, so a lower N puts more on the card: the
+    /// splits that fit are a contiguous run from the seed downward, and the
+    /// frontier is one search rather than nine measurements. Nine model loads
+    /// to learn one layer is what made a sweep take an hour and what made it
+    /// hostile to the machine; three to five find the same answer.
+    ///
+    /// `--candidates a,b,c` still measures exactly the splits it is given -
+    /// the escape hatch for reproducing an old sweep or checking this one.
     fn sweep_engine(&mut self, engine: &str) {
-        let (seed, candidates) = self.plan_for(engine);
+        let seed = self.seed_for(engine);
         self.emit(format_args!(""));
+        if !self.opts.candidates.is_empty() {
+            self.emit(format_args!(
+                "  --- {engine}: seed {seed}, measuring the given splits {}",
+                self.opts.candidates.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+            ));
+            for n in self.opts.candidates.clone() {
+                self.measure_split(engine, n);
+            }
+            if self.opts.refine {
+                if let Some((split, _)) = self.best_measured(engine) {
+                    self.refine(engine, split);
+                }
+            }
+            return;
+        }
+
         self.emit(format_args!(
-            "  --- {engine}: seed {seed}, offload candidates {}",
-            candidates.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+            "  --- {engine}: seed {seed}, bisecting the frontier (at most {} loads)",
+            SEED_STEPS_UP / 2 + MAX_BISECT as u32 + 1
         ));
 
-        // The engine's own best split so far, which the refine points build
-        // on: a split that measures badly is still a measurement, but it is
-        // not the one to spend the batch/thread/spec points on.
-        let mut best: Option<(u32, f64)> = None;
-        for n in &candidates {
-            let overrides = vec![Entry::new("n-cpu-moe", n.to_string()), Entry::new("fit", "off")];
-            if self.measure(engine, &format!("{engine}-n{n}"), &overrides).is_none() {
-                continue;
+        // The seed is the placement tool's answer for this context. Measure
+        // it; when it does not fit - the desktop took more VRAM than the tool
+        // assumed - step *up*, because a higher split puts less on the card.
+        //
+        // Every step up that spills is also the search's upper bound, and it
+        // is kept: the candidates ascend, so the last spill is the highest one
+        // known. Throwing it away and starting the bisection from "nothing has
+        // spilled yet" is what made the search halve to n17 from n35 when it
+        // already knew n33 did not fit.
+        let mut fits: Option<u32> = None;
+        let mut spills: Option<u32> = None;
+        let mut n = seed;
+        while n <= seed + SEED_STEPS_UP {
+            match self.measure_split(engine, n) {
+                Some(true) => {
+                    fits = Some(n);
+                    break;
+                }
+                Some(false) => {
+                    self.emit(format_args!("  {engine}-n{n}: spilling"));
+                    spills = Some(n);
+                }
+                None => {
+                    self.emit(format_args!("  {engine}-n{n}: no measurement"));
+                    spills = Some(n);
+                }
             }
-            let decode = self.points.last().map(|p| p.decode).unwrap_or(0.0);
-            if best.is_none_or(|(_, best_decode)| decode > best_decode) {
-                best = Some((*n, decode));
+            n += 2;
+        }
+        let Some(mut best) = fits else {
+            self.emit(format_args!(
+                "  no split from {seed} to {} fit on this card - skipping {engine}",
+                seed + SEED_STEPS_UP
+            ));
+            return;
+        };
+
+        // Then down, by halving the gap between what fits and what spilled.
+        for _ in 0..MAX_BISECT {
+            let next = match spills {
+                Some(spills) => tune::between(best, spills),
+                // Nothing spilled on the way up (the seed fit first try): the
+                // lower end of the range is still open, so halve to it.
+                None if best > 1 => Some(best / 2),
+                None => None,
+            };
+            let Some(next) = next else { break };
+            // A split that will not load is a split that does not fit: it is
+            // the search's upper bound, not a lost point.
+            match self.measure_split(engine, next) {
+                Some(true) => best = next,
+                Some(false) | None => spills = Some(next),
             }
         }
+        self.emit(format_args!("  {engine}: frontier at n-cpu-moe {best}"));
 
         if self.opts.refine {
-            if let Some((split, _)) = best {
-                self.refine(engine, split);
-            }
+            self.refine(engine, best);
         }
     }
 
-    /// The knobs the plan promised: prompt batch, threads, spec on/off.
+    /// Measure one split, and say whether it fit.
+    ///
+    /// "Fit" is two things, and neither is `wall_mib()`: that number is the
+    /// *seed heuristic* - deliberately conservative, because the placement
+    /// tool should leave room - so a split 60 MiB "over" it still serves at
+    /// full prefill. Rejecting those would walk the search off the good end
+    /// and find nothing.
+    ///
+    /// What is real is the card: a point above `vram_total - the desktop` has
+    /// the driver spilling into system memory, whatever its prefill says. And
+    /// the prefill floor is the project's own rule for "usable at all". A
+    /// milder spill - prefill collapsed but still over the floor - is the
+    /// ranking's business (`tune::exclusion` compares against the engine's
+    /// best), not the search's.
+    ///
+    /// `None` is "no measurement at all" - the candidate would not start or
+    /// the bench returned nothing - which for the search is the same answer as
+    /// spilling: that split is not one to serve.
+    fn measure_split(&mut self, engine: &str, n: u32) -> Option<bool> {
+        let overrides = vec![Entry::new("n-cpu-moe", n.to_string()), Entry::new("fit", "off")];
+        self.measure(engine, &format!("{engine}-n{n}"), &overrides)?;
+        let point = self.points.last()?;
+        let card = self.machine.vram_total_mib as f64 - self.machine.vram_used_mib as f64;
+        Some(point.prefill >= self.opts.floor.prefill && point.vram_mib <= card)
+    }
+
+    /// The measured split with the best decode on `engine`, if any.
+    fn best_measured(&self, engine: &str) -> Option<(u32, f64)> {
+        self.points
+            .iter()
+            .filter(|p| p.engine == engine)
+            .filter_map(|p| p.n_cpu_moe.parse::<u32>().ok().map(|n| (n, p.decode)))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    }
+
+    /// The knobs worth one load each: prompt batch, threads, spec on/off.
+    ///
+    /// Every one of these is a *single* probe, not a sweep. The topology
+    /// already says which thread count wins (16 of 20 - the P-cores with their
+    /// hyperthreads - beats all 20 by ~8% on the reference box, because E-cores
+    /// add sync overhead when decode streams RAM-resident experts), `ub` is the
+    /// prefill lever the collapse test already catches when it is wrong, and MTP
+    /// is either on and worth one comparison or absent and worth none. Probing
+    /// neighbourhoods around values the documentation already settled was the
+    /// other half of a seventeen-load sweep.
     fn refine(&mut self, engine: &str, best: u32) {
         self.emit(format_args!("  --- {engine}: refining n-cpu-moe {best} (batch, threads, spec)"));
         let base = || vec![Entry::new("n-cpu-moe", best.to_string()), Entry::new("fit", "off")];
@@ -770,26 +931,17 @@ impl<'a> Tuner<'a> {
             self.measure(engine, &format!("{engine}-ub1024"), &overrides);
         }
 
-        // Threads: probe the neighbourhoods the CPU topology makes promising
-        // (measured on the reference box: 16 of 20 - the P-cores with their
-        // hyperthreads - beats all 20 by ~8%, because E-cores add sync
-        // overhead when decode streams RAM-resident experts).
+        // One thread point: the count the topology makes promising, and only
+        // when it differs from what the preset already serves.
         if self.machine.cores > 4 {
-            let mut tried: Vec<u32> = Vec::new();
-            for t in self.thread_candidates() {
-                if tried.contains(&t) || t == 0 {
-                    continue;
+            let default =
+                state::env_value(self.home, "CPU_THREADS").and_then(|v| v.parse().ok()).unwrap_or(0);
+            if let Some(t) = self.thread_candidates().first().copied().filter(|t| *t > 0) {
+                if t != default {
+                    let mut overrides = base();
+                    overrides.push(Entry::new("threads", t.to_string()));
+                    self.measure(engine, &format!("{engine}-t{t}"), &overrides);
                 }
-                tried.push(t);
-                let default = state::env_value(self.home, "CPU_THREADS")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0);
-                if t == default {
-                    continue;
-                }
-                let mut overrides = base();
-                overrides.push(Entry::new("threads", t.to_string()));
-                self.measure(engine, &format!("{engine}-t{t}"), &overrides);
             }
         }
 
@@ -828,16 +980,12 @@ impl<'a> Tuner<'a> {
         ini::parse(&self.preset_text).value(&self.opts.target, key).map(str::to_string)
     }
 
-    /// A `scripts/*.sh` command, run the way the launchers run theirs.
+    /// Whether the preset pins its weights into RAM.
     ///
-    /// Through Git's bash - not a bare `bash`, which on Windows is the WSL
-    /// launcher and would run the script inside a Linux VM that cannot see
-    /// this engine - and with a *relative* path, because an absolute `C:\...`
-    /// handed to MSYS bash is a path that does not exist.
-    fn script(&self, rel: &str) -> Command {
-        let mut command = Command::new(driver::bash());
-        command.current_dir(self.home).arg(rel);
-        command
+    /// The sweep overrides this (see [`Tuner::measure`]); the gate and the
+    /// adopted setup keep it, because it is a serving choice, not a speed one.
+    fn locks_ram(&self) -> bool {
+        matches!(self.preset_value("load-mode").as_deref(), Some("mlock" | "mmap+mlock"))
     }
 
     /// The offload split to start from: the engine's own placement tool when
@@ -925,13 +1073,41 @@ impl<'a> Tuner<'a> {
         let candidate_rel = format!("data/tuned/candidates/{}-{label}.ini", self.opts.target);
         let candidate = self.home.join(&candidate_rel);
         std::fs::create_dir_all(&self.cand_dir).ok()?;
-        let text = ini::write_candidate(&self.preset_text, &self.opts.target, overrides);
+        // The sweep does not lock the model into RAM.
+        //
+        // Every point reloads the whole model, and `--load-mode mlock` pins
+        // all of it: reloading a 20 GB model twenty times on a 32 GB box does
+        // not fail the sweep, it takes the desktop with it - Windows runs out
+        // of resources and the launcher cannot even be spawned (`os error
+        // 1450`). Steady-state decode and prefill are the same under mmap,
+        // because the first touch is paid by the bench's warmup rather than
+        // by the number, so the placement is measured in the cheap mode.
+        //
+        // The gate is where the real mode is measured, and it is the one that
+        // decides: one load, the preset's own flags, the serving config. And
+        // the override deliberately does not enter `Measured::overrides`, so
+        // the winner's overlay keeps the `load-mode` the preset serves with.
+        let for_file = candidate_overrides(self.locks_ram(), overrides);
+        let text = ini::write_candidate(&self.preset_text, &self.opts.target, &for_file);
         std::fs::write(&candidate, text).ok()?;
 
         self.emit(format_args!("  {engine} {label}: restarting..."));
-        if !self.restart(engine, &candidate_rel, "logs/tune-restart.log") {
-            self.emit(format_args!("  restart failed, skipping"));
-            return None;
+        // The launcher's exit code, not just whether it could be spawned: a
+        // launcher that ran and failed is the common case (a model that would
+        // not fit, a port still held), and reporting both as "restart failed"
+        // makes an afternoon out of a one-line answer. The launcher's own
+        // output says which.
+        match self.restart(engine, &candidate_rel, RESTART_LOG, false) {
+            Ok(0) => {}
+            Ok(code) => {
+                self.emit(format_args!("  the launcher exited {code}, skipping - it said:"));
+                self.say_launcher_tail(RESTART_LOG, 6);
+                return None;
+            }
+            Err(e) => {
+                self.emit(format_args!("  cannot run the launcher: {e}, skipping"));
+                return None;
+            }
         }
         if !self.wait_healthy() {
             self.emit(format_args!("  never became healthy, skipping"));
@@ -940,16 +1116,35 @@ impl<'a> Tuner<'a> {
 
         let note = format!("tune {} on {engine}: {label}", self.opts.target);
         let out_file = self.cand_dir.join(format!("out-{}-{label}.txt", self.opts.target));
-        let mut command = self.script("scripts/benchmark-ai.sh");
-        command
-            .args(["--runs", &self.opts.runs.to_string(), "--prefill", &self.opts.prefill.to_string()])
-            .env("GOLEM_MODEL_ALIAS", &self.opts.target)
-            .env("RECORD_NOTE", &note);
-        if driver::run_command(command, &out_file).is_err() {
-            self.emit(format_args!("  cannot run the bench, skipping"));
+        let args = vec![
+            "--runs".to_string(),
+            self.opts.runs.to_string(),
+            "--prefill".to_string(),
+            self.opts.prefill.to_string(),
+        ];
+        // The bench is in process now (`crate::bench`), not
+        // `scripts/benchmark-ai.sh` through Git Bash - which is what took a
+        // shell off this path. It reads the model alias through the same
+        // `GOLEM_MODEL_ALIAS` override every other reader uses, because the
+        // tuner measures a candidate the environment does not name; the shell
+        // exported it to the child, and this sets it for the call.
+        let previous = std::env::var_os("GOLEM_MODEL_ALIAS");
+        std::env::set_var("GOLEM_MODEL_ALIAS", &self.opts.target);
+        let mut captured: Vec<u8> = Vec::new();
+        let status = crate::bench::run(self.home, &args, &mut captured);
+        match previous {
+            Some(previous) => std::env::set_var("GOLEM_MODEL_ALIAS", previous),
+            None => std::env::remove_var("GOLEM_MODEL_ALIAS"),
+        }
+        let text = String::from_utf8_lossy(&captured).into_owned();
+        // The transcript stays on disk as the shell's redirect left it: it is
+        // the evidence next to the row this point records.
+        let _ = std::fs::write(&out_file, &text);
+        if status != 0 {
+            self.emit(format_args!("  the bench exited {status}, skipping"));
+            self.say_tail(&text, 6);
             return None;
         }
-        let text = std::fs::read_to_string(&out_file).unwrap_or_default();
         let Some(bench) = bench_result(&text) else {
             // Say what the bench said. "no usable result" on its own is the
             // kind of message that costs an afternoon: the bench's own last
@@ -1031,13 +1226,46 @@ impl<'a> Tuner<'a> {
     /// `MODELS_PRESET` set here would be overwritten. That indirection is
     /// also the bug this port exists to kill - the eval harness used to lose
     /// exactly these variables on the way into WSL and gate the wrong model.
-    fn restart(&self, engine: &str, preset: &str, log: &str) -> bool {
+    /// `lock` says whether this restart will pin the weights into RAM - the
+    /// gate does, a sweep point does not - and only a locked load waits for
+    /// the previous one's memory to come back.
+    fn restart(&self, engine: &str, preset: &str, log: &str, lock: bool) -> std::io::Result<i32> {
+        if lock {
+            self.wait_for_ram();
+        }
         let mut command = self.driver.command_with("restart", &[]);
         command
             .env("GOLEM_ENGINE", engine)
             .env("GOLEM_MODEL_ALIAS", &self.opts.target)
             .env("GOLEM_MODELS_PRESET", preset);
-        driver::run_command(command, &self.home.join(log)).is_ok()
+        driver::run_command(command, &self.home.join(log))
+    }
+
+    /// Wait until the machine can hold another copy of the model, bounded.
+    ///
+    /// The previous candidate's `mlock`ed pages come back a moment after its
+    /// process dies, and a start that begins before they do cannot even spawn
+    /// the launcher: Windows reports `os error 1450`, "insufficient system
+    /// resources". This is where a sweep waits instead of walking into it.
+    /// `None` from the RAM reader (a machine we cannot ask) is treated as
+    /// "enough" - blocking on a number we do not have would be worse.
+    fn wait_for_ram(&self) {
+        let needed = self.model_gb() + SWEEP_RAM_MARGIN_GB;
+        let deadline = Instant::now() + RAM_SETTLE;
+        let mut said = false;
+        loop {
+            let free = state::ram_free_gb().unwrap_or(f64::INFINITY);
+            if free >= needed || Instant::now() >= deadline {
+                return;
+            }
+            if !said {
+                self.emit(format_args!(
+                    "  waiting for RAM to come back ({free:.1} of {needed:.1} GB free)..."
+                ));
+                said = true;
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
     }
 
     /// Wait for the engine to answer, up to the shell's own patience.
@@ -1121,8 +1349,10 @@ impl<'a> Tuner<'a> {
             }
 
             self.emit(format_args!("[ .. ] gating {engine} {}: restarting and running the {gate_tokens}-token needle (this takes a while)...", self.points[key].label));
-            if !self.restart(&engine, &overlay, "logs/tune-gate.log") || !self.wait_healthy() {
+            let restarted = matches!(self.restart(&engine, &overlay, GATE_LOG, true), Ok(0));
+            if !restarted || !self.wait_healthy() {
                 self.emit(format_args!("  [WARN] the engine did not come back on the effective preset - trying the next candidate"));
+                self.say_launcher_tail(GATE_LOG, 6);
                 continue;
             }
             let Some(eval) = self.gate(gate_tokens) else {
@@ -1375,6 +1605,28 @@ impl<'a> Tuner<'a> {
             self.emit(format_args!("        | {line}"));
         }
     }
+
+    /// The same, for a log the launcher wrote rather than text we captured.
+    fn say_launcher_tail(&self, log: &str, lines: usize) {
+        let text = std::fs::read_to_string(self.home.join(log)).unwrap_or_default();
+        self.say_tail(&text, lines);
+    }
+}
+
+/// What a sweep candidate's file is written with: the caller's overrides,
+/// plus `load-mode = auto` when the preset locks its weights.
+///
+/// The caller's list is what the winner's overlay is built from, so this is
+/// deliberately a *copy* plus one entry: the sweep measures in mmap, and the
+/// adopted setup keeps the mode the preset serves with. See
+/// [`Tuner::measure`] for why that is the difference between a sweep and a
+/// crashed desktop.
+fn candidate_overrides(locks: bool, overrides: &[Entry]) -> Vec<Entry> {
+    let mut out = overrides.to_vec();
+    if locks {
+        out.push(Entry::new("load-mode", "auto"));
+    }
+    out
 }
 
 /// The distinct layer names in a `-ot` placement pattern.
@@ -1416,6 +1668,22 @@ fn bench_result(text: &str) -> Option<evalparse::Bench> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sweep_candidate_uses_mmap_and_the_overlay_does_not() {
+        let measured = vec![Entry::new("n-cpu-moe", "35"), Entry::new("ctx-size", "249344")];
+        // The preset locks its weights: the candidate file gets mmap...
+        let for_file = candidate_overrides(true, &measured);
+        assert_eq!(for_file.len(), measured.len() + 1);
+        assert!(for_file.iter().any(|e| e.key == "load-mode" && e.value == "auto"));
+        // ...and the list the overlay is built from is untouched, so the
+        // adopted setup keeps the preset's `mlock`.
+        assert_eq!(measured.len(), 2, "the caller's list is not modified");
+        assert!(!measured.iter().any(|e| e.key == "load-mode"));
+
+        // A preset that does not lock is measured exactly as it serves.
+        assert_eq!(candidate_overrides(false, &measured), measured);
+    }
 
     #[test]
     fn layer_names_reads_the_escaped_placement_pattern() {

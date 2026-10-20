@@ -111,11 +111,28 @@ impl Default for Facts {
     }
 }
 
-/// One JSON line for `captured`, or `Err` when there is nothing to record.
+/// A row for a rejection: the same shape, and **no `RESULT` line required**.
 ///
-/// The members are assembled in the printf's own order (record-result.sh
-/// lines 270-278) and joined with `", "` / `": "` - `json.dumps` spacing -
-/// so the line is byte-identical to the shell's.
+/// A rejection is a measurement the project took and will not adopt, and the
+/// note is the point of it - "record why not" is what keeps a rejected
+/// candidate from being proposed again every month. Some rejections have
+/// numbers behind them (a candidate that was measured and lost) and some have
+/// none at all (an engine that refused to start), which is why this does not
+/// insist on a `RESULT` line the way [`row`] does.
+///
+/// Metrics are the bench's, matching the reject rows `bench/results.jsonl`
+/// already holds; with no capture to read they are all `null`.
+pub fn reject_row(facts: &Facts, captured: &str) -> String {
+    let mut out = row_with(facts, captured, Metrics::Bench).unwrap_or_default();
+    // `row` cannot fail here (the RESULT check is the only error and it is
+    // gone), but an empty string would append a blank line to the database.
+    if out.is_empty() {
+        out.push_str("{\"ts\": \"\", \"kind\": \"reject\"}\n");
+    }
+    out
+}
+
+/// One JSON line for `captured`, or `Err` when there is nothing to record.
 pub fn row(facts: &Facts, captured: &str) -> Result<String, String> {
     // The shell's `grep -q '^RESULT'`: a run with no RESULT line is not a
     // measurement (a failed or interrupted run), and recording it would put a
@@ -123,7 +140,27 @@ pub fn row(facts: &Facts, captured: &str) -> Result<String, String> {
     if !captured.lines().any(|line| line.starts_with("RESULT")) {
         return Err("no RESULT line in the captured output - nothing to record".into());
     }
+    row_with(facts, captured, metrics_for(facts.kind))
+}
 
+/// Which metrics object a row carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Metrics {
+    Bench,
+    Eval,
+}
+
+/// The metrics a kind of row carries: the shell's
+/// `if [[ "${KIND}" == bench ]] ... else`, with `reject` on the bench side
+/// because that is what the reject rows in the file already hold.
+fn metrics_for(kind: Kind) -> Metrics {
+    match kind {
+        Kind::Eval => Metrics::Eval,
+        _ => Metrics::Bench,
+    }
+}
+
+fn row_with(facts: &Facts, captured: &str, metrics: Metrics) -> Result<String, String> {
     let mut members: Vec<String> = Vec::new();
     members.push(format!("\"ts\": \"{}\"", facts.ts));
     members.push(format!("\"kind\": \"{}\"", kind_name(facts.kind)));
@@ -152,9 +189,9 @@ pub fn row(facts: &Facts, captured: &str) -> Result<String, String> {
     members.push(format!("\"flags\": {}", flags_json(&facts.flags)));
     // The kind-specific metrics object's members, inlined where the printf
     // puts `${METRICS}` (the shell's `if [[ "${KIND}" == bench ]] ... else`).
-    members.push(match facts.kind {
-        Kind::Bench => bench_metrics(captured),
-        _ => eval_metrics(captured),
+    members.push(match metrics {
+        Metrics::Bench => bench_metrics(captured),
+        Metrics::Eval => eval_metrics(captured),
     });
     members.push(format!("\"vram_mib\": {}", num_opt_u64(facts.vram_mib)));
     members.push(format!("\"ram_used_gib\": {}", num_opt_f1(facts.ram_used_gib)));
@@ -389,6 +426,25 @@ pub fn flags_of(preset_text: &str, alias: &str) -> Vec<Flag> {
         }
     }
     out
+}
+
+/// The preset's effective flags as plain `(key, value)` pairs.
+///
+/// For a caller that is building a command line rather than a row: the
+/// launcher wants the text the preset gave, with no opinion about how a row
+/// would quote it. Same parse, same order, same merge as [`flags_of`].
+pub fn preset_flags(preset_text: &str, alias: &str) -> Vec<(String, String)> {
+    flags_of(preset_text, alias)
+        .into_iter()
+        .map(|(key, value)| {
+            let text = match value {
+                FlagValue::Preset(value)
+                | FlagValue::Text(value)
+                | FlagValue::Number(value) => value,
+            };
+            (key, text)
+        })
+        .collect()
 }
 
 /// The `ctx-size` the preset serves for `alias` (alias section only).

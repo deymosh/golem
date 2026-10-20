@@ -11,11 +11,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 mod auto_tune;
+mod bench;
 mod client;
 mod driver;
 mod engine;
+mod eval;
 mod facts;
 mod install;
+mod launch;
 mod logs;
 mod measure;
 mod models;
@@ -104,7 +107,7 @@ async fn main() -> ExitCode {
         }
         Some("tune") => cmd_tune(&args[1..]),
         Some(action @ ("up" | "down" | "start" | "stop" | "restart")) => {
-            cmd_driver(action, mode.as_deref())
+            cmd_driver(action, mode.as_deref(), &args[1..])
         }
         Some(other) => {
             eprintln!("golem: '{other}' is not wired up yet; see docs/plan-portable-binary.md");
@@ -206,8 +209,41 @@ fn take_mode_flags(args: &mut Vec<String>) -> Option<String> {
 /// flag: the launcher reads `DEPLOY_MODE` from `.env`, so a mode that lived
 /// only in this process's environment would be silently dropped - and
 /// `./golem up --docker` would start a native server.
-fn cmd_driver(action: &str, mode: Option<&str>) -> ExitCode {
+fn cmd_driver(action: &str, mode: Option<&str>, rest: &[String]) -> ExitCode {
     let home = prepare_home();
+
+    // `up --dry-run` resolves everything and starts nothing - the launcher's
+    // `-DryRun`, and the check a port of `up` needs: the command line is the
+    // thing worth diffing, not the banner.
+    if matches!(action, "up" | "start") && rest.iter().any(|a| a == "--dry-run") {
+        return match launch::plan(&home) {
+            Ok(plan) => {
+                for (key, value) in &plan.dropped {
+                    println!("[WARN] this engine has no equivalent of --{key} {value}, dropped");
+                }
+                println!("[ OK ] dry run: \"{}\" {}", plan.program.display(), plan.args.join(" "));
+                println!("       (working directory: {})", plan.workdir.display());
+                println!("       serving: {}  -> pid {}", plan.served, plan.pid_file.display());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("[FAIL] {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
+    // `down` is the binary's own, for windows and native mode. Stopping is a
+    // process tree and a wait for the card, and neither needs a launcher - the
+    // first step of the launchers' port, and the one with the correctness rule
+    // (kill the children, then wait for the VRAM). Docker keeps the launcher:
+    // its stop is `docker compose down`, which is a different thing.
+    let deploy = state::override_value(&home, "GOLEM_DEPLOY_MODE", "DEPLOY_MODE")
+        .unwrap_or_else(|| "native".to_string());
+    if matches!(action, "down" | "stop") && deploy != "docker" {
+        return code(launch::down(&home));
+    }
+
     let Some(launcher) = driver::Driver::find(&home) else {
         eprintln!(
             "[FAIL] no launcher in {} (golem.cmd or golem) - the engine drivers come with the repository for now",

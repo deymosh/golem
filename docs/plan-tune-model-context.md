@@ -8,10 +8,10 @@ today's behavior until the floors are confirmed.
 
 **Ported to the binary 2026-10-20** (`docs/plan-portable-binary.md` phase 4):
 `./golem tune` is now `golem-rs/crates/golem/src/tune.rs`, which measures through the same
-launchers and the same `scripts/benchmark-ai.sh`, and decides with `golem_core::tune` —
-`exclusion`, `rank`, `next_context`, the `Floor`. Everything below still describes the
-behaviour, with two differences worth knowing: `--auto` is still `scripts/tune-auto.sh`
-(the binary says so rather than tuning one preset), and **an engine whose adapter says
+launchers and its own in-process bench (`bench.rs`, a port of the script it used to call),
+and decides with `golem_core::tune` — `exclusion`, `rank`, `next_context`, the `Floor`.
+Everything below still describes the behaviour, with two differences worth knowing:
+`--auto` is `auto_tune.rs` now, and **an engine whose adapter says
 `api_anthropic = false` is swept and recorded but can never win** — ik_llama.cpp has no
 `/v1/messages`, so adopting it would leave Claude Code unable to talk to the engine the
 tuner had just chosen. The scripts have no such guard.
@@ -54,7 +54,10 @@ slow-but-not-spilling.
 
 ## User control
 
-Knobs, in .env with per-run overrides (GOLEM_* so .env re-sourcing can't eat them):
+Knobs, in `golem.toml` with per-run overrides (GOLEM_* so .env re-sourcing can't eat
+them). They were in `.env` until 2026-10-20, and moved when the binary became their
+only reader — the shell drivers never read them, and the plan's configuration section
+is where that rule lives:
 
 | Knob | Default | Meaning |
 |---|---|---|

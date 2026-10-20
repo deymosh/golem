@@ -90,6 +90,15 @@ tested module uses has to be declared in `tests/*.rs` as well - see the `#[path]
 block at the top of each.
 
 What the clean-machine walk found, and what the next plan is: a fresh clone has no
-`golem.exe` (the binary is git-ignored), so the missing piece is a **release asset**;
-and `bench` / `eval` / `tune` still reach Git Bash through `scripts/benchmark-ai.sh`
-and `scripts/eval-model.sh`, so **those two scripts are the last port**.
+`golem.exe` (the binary is git-ignored), so the missing piece is a **release asset**.
+The measurement no longer needs a shell - `bench`, `eval` and `tune` are `bench.rs`,
+`eval.rs` and `tune.rs`, and `scripts/benchmark-ai.sh`, `scripts/eval-model.sh`,
+`scripts/record-result.sh`, `scripts/tune.sh` and `scripts/tune-auto.sh` were deleted
+on 2026-10-20 under the migration gate. The scripts that remain are the launchers'
+helpers and the no-binary fallbacks.
+
+The launchers are being ported too, and the first step is in: `golem down` kills the
+process tree and waits for the card itself, and `golem up --dry-run` resolves the whole
+command line (verified flag for flag against `start-windows.ps1 -DryRun`). The plan is
+[docs/plan-launchers.md](../docs/plan-launchers.md); when `up` is the binary's, the last
+`.env` keys move to `golem.toml` and there is no shell left anywhere.

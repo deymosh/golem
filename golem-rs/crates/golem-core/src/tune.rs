@@ -39,6 +39,26 @@ impl Default for Floor {
     }
 }
 
+/// The next split to probe, between one that fits and one that spills.
+///
+/// `n-cpu-moe N` keeps the experts of the first N layers in RAM, so a *lower*
+/// N puts more of the model on the card: the splits that fit form a contiguous
+/// run from the seed downward, and the frontier is a single bisection rather
+/// than a walk. `fits` is the lowest split known to fit, `spills` the highest
+/// known to spill; both are facts from measurement, and `fits > spills`.
+///
+/// `None` means the two bounds are adjacent - there is nothing left between
+/// them to learn, and the caller stops instead of spending a model load on a
+/// split it can already predict. That is the whole point of this function: the
+/// grid the shell swept spent nine loads to learn what three bisection steps
+/// know.
+pub fn between(fits: u32, spills: u32) -> Option<u32> {
+    if fits <= spills + 1 {
+        return None;
+    }
+    Some(fits - (fits - spills) / 2)
+}
+
 /// One measured sweep point.
 #[derive(Debug, Clone)]
 pub struct Point {
@@ -362,5 +382,50 @@ mod tests {
         // A midpoint that adds nothing stops instead of looping.
         assert_eq!(next_context(4096, 262144, RungOutcome::Failed { attempt: 4096 }), Rung::Stop);
         assert_eq!(next_context(4096, 262144, RungOutcome::Failed { attempt: 4097 }), Rung::Stop);
+    }
+
+    #[test]
+    fn the_frontier_is_found_by_bisection_not_by_walking() {
+        // A seed of 35 that fits, and a split of 0 known to spill: the search
+        // halves the gap each time, so nine candidates become three probes.
+        let mut fits = 35u32;
+        let mut spills = 0u32;
+        let mut probes = Vec::new();
+        while let Some(next) = between(fits, spills) {
+            probes.push(next);
+            // Pretend the frontier is at 30: below that, it does not fit.
+            if next >= 30 {
+                fits = next;
+            } else {
+                spills = next;
+            }
+        }
+        assert_eq!(probes, vec![18, 27, 31, 29, 30], "five probes, not nine");
+        assert_eq!((fits, spills), (30, 29), "the frontier is pinned to one layer");
+
+        // Adjacent bounds are done: no load is spent learning nothing.
+        assert_eq!(between(30, 29), None);
+        assert_eq!(between(30, 30), None);
+        assert_eq!(between(1, 0), None);
+    }
+
+    #[test]
+    fn a_frontier_search_from_the_seed_alone_is_four_probes_at_most() {
+        // The worst case the tuner can hit: the whole range is open. Four
+        // probes narrow 0..=41 to one layer, which is what the sweep's nine
+        // candidates were spending loads to do.
+        let mut fits = 41u32;
+        let mut spills = 0u32;
+        let mut count = 0;
+        while let Some(next) = between(fits, spills) {
+            count += 1;
+            if next >= 20 {
+                fits = next
+            } else {
+                spills = next
+            }
+        }
+        assert!(count <= 6, "{count} probes to narrow 0..=41");
+        assert_eq!(fits - spills, 1);
     }
 }

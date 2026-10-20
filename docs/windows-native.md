@@ -121,11 +121,12 @@ Fallback**. Startup then fails loudly when the config does not fit.
 
 ## Evaluating from Windows
 
-`eval-model.sh` needs python3; Git Bash usually has none, so `./golem eval` runs it inside
-WSL. WSL's default NAT network cannot see the Windows loopback, so the script falls back to
-WSL's default gateway (= the Windows host). That requires the server to listen beyond
-loopback: `LOCAL_AI_HOST="0.0.0.0"`. `./golem bench` needs only curl + awk and runs from
-Git Bash directly.
+`golem eval` is the binary's own now (`golem-rs/crates/golem/src/eval.rs`), so the WSL hop
+this section used to describe is gone: it speaks HTTP to the socket itself, and needs
+neither python3 nor a shell. What it does need is a server it can reach — `LOCAL_AI_HOST`
+and `LOCAL_AI_BASE_URL` still decide that, and an `https://` base URL is refused rather than
+half-honoured, because this client has no TLS. `./golem bench` is the same code path, and
+neither needs Git Bash.
 
 ## LAN exposure
 
