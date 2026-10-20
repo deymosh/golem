@@ -1,0 +1,9 @@
+[package]
+name = "golem-core"
+description = "The testable core: results DB, ini merge, GGUF header, eval output parsing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]

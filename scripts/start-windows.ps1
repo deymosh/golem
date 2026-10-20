@@ -310,7 +310,14 @@ if ($Preset) {
             $Pending = @()
         }
     }
-    $All = -not ($Entries | Where-Object Section -eq $Alias)
+    # "MODEL_ALIAS names no section" is a property of the preset's section
+    # headers, not of its Download comments: a section whose model is already
+    # on disk has no comment, and inferring it from $Entries switched on
+    # every other section's download (serving one model fetched another's).
+    $SectionNames = Get-Content $PresetPath | ForEach-Object {
+        if ($_ -match '^\[([^\]]+)\]') { $Matches[1] }
+    }
+    $All = -not ($SectionNames -contains $Alias)
     foreach ($e in $Entries) {
         if (Test-Path (Join-Path $ModelDir $e.File)) { continue }
         if ($All -or $e.Section -eq $Alias) { Ensure-Model $e.Repo $e.File }
@@ -321,15 +328,28 @@ if ($Preset) {
     if ($DraftFile) { Ensure-Model $DraftRepo $DraftFile }
 }
 
-# A preset section without a "; Download:" comment would only fail at
-# request time (file not found) - catch it now, with the section named.
+# A preset section whose model has no "; Download:" comment would only fail
+# at request time (file not found). That is fatal for the section being
+# served - the failure the user would hit right now - and a warning for the
+# others: starting one model must not be blocked by another section's state.
 if ($Preset) {
-    # Only files with no Download source at all are fatal; known-but-not-
-    # fetched presets were warned about above.
-    $missing = Get-Content $PresetPath | ForEach-Object {
-        if ($_ -match '^\s*(model|spec-draft-model)\s*=\s*(\S+)') { $Matches[2] }
-    } | Where-Object { -not (Test-Path (Join-Path $ModelDir $_)) -and -not ($Entries.File -contains $_) }
-    if ($missing) { throw "Preset models without a `"; Download:`" source (add one per file in $Preset): $($missing -join ', ')" }
+    $CurSection = ""; $NoSource = @()
+    Get-Content $PresetPath | ForEach-Object {
+        if ($_ -match '^\[([^\]]+)\]') { $CurSection = $Matches[1] }
+        elseif ($_ -match '^\s*(model|spec-draft-model)\s*=\s*(\S+)') {
+            $File = $Matches[2]
+            if (-not (Test-Path (Join-Path $ModelDir $File)) -and -not ($Entries.File -contains $File)) {
+                $NoSource += [pscustomobject]@{ Section = $CurSection; File = $File }
+            }
+        }
+    }
+    $Fatal = @($NoSource | Where-Object { $_.Section -eq $Alias })
+    if ($Fatal.Count -gt 0) {
+        throw "Preset models without a `"; Download:`" source (add one per file in $Preset): $((($Fatal | ForEach-Object File) -join ', '))"
+    }
+    foreach ($n in @($NoSource | Where-Object { $_.Section -ne $Alias })) {
+        Write-Host "[WARN] preset [$($n.Section)] has no Download source for $($n.File) - it will fail if requested"
+    }
 }
 
 # ------------------------------------------------------------

@@ -77,7 +77,16 @@ reach is in the database, not in a log.
 
 ## Order of work
 
-1. floors + `TUNE_*` knobs + floor enforcement in the ranking (small, tune.sh only);
-2. ctx maximization loop with fit-seeded steps and gate backoff;
-3. `--auto` model selection over installed presets;
+1. ✅ floors + `TUNE_*` knobs + floor enforcement in the ranking, plus a topology-derived
+   thread sweep in the refine stage (hybrid P/E CPUs probe {P, P+HT, all} — measured
+   16-of-20 best on the reference box, docs/models.md "Threads") — all tune.sh only;
+2. ✅ ctx maximization loop (doubling + one midpoint probe) gated at 90% of the final ctx;
+3. ✅ `--auto` model selection (`scripts/tune-auto.sh`): cheap sweep per installed preset,
+   rank by `; Quality: N` then parameters then context then speed, then a full gated tune
+   of the best, falling back down the ranking. Verified on the 0.5B preset with two
+   sections at different quality scores plus one undownloaded section (skipped);
 4. registry-driven candidates (strata-models.md) once that probe clears.
+
+Still open from this plan: the web console has a `tune` endpoint but no control that
+sends `--auto` (the validation would accept it), and `start-local-ai.sh` (Linux/docker)
+never got the Windows launcher's `; Download:` auto-fetch, so `--auto` there is untested.

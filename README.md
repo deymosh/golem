@@ -61,11 +61,22 @@ pre-fetches `MODEL_FILE` explicitly; `up` does it automatically when a file is m
 **Auto-tune** (`./golem tune [preset]`) answers "what is the best way to run this model on
 this machine?" with no AI and no hand-editing. It tries every installed engine that can serve
 the preset — sweeping the expert offload for each, seeding from llama.cpp's own placement tool
-— keeps the fastest engine + split that is not spilling VRAM into system memory, gates the
-winner with the 200K eval, and writes the verdict (engine, flags, every measured point) to
-`data/tuned/`. Re-run with `--adopt` to put the winner into `.env`; `--engine NAME` tunes one
-engine only, `--dry-run` prints the plan. It refuses to measure while a download, build or game
-is loading the machine, because the numbers would be meaningless.
+— keeps the fastest engine + split that is not spilling VRAM into system memory, **grows the
+context** to the biggest the card can truly serve (up to the model's trained context; `--ctx N`
+pins it), holds every candidate to a **speed floor** (decode 25 / prefill 350 / at-depth 15 t/s
+by default; `TUNE_MIN_*` in `.env` or `--min-*` per run move it, and under-floor candidates are
+named in the output), gates the winner with the 200K eval, and writes the verdict (engine,
+flags, context, every measured point) to `data/tuned/`. The thread sweep probes the counts the
+CPU topology makes promising — on a hybrid P/E chip, P-cores, P-cores with hyperthreads, and
+all — rather than guessing one. Re-run with `--adopt` to put the winner into `.env`;
+`--engine NAME` tunes one engine only, `--dry-run` prints the plan.
+
+`./golem tune --auto` skips the "which model?" question: every preset whose GGUF is already
+downloaded gets a cheap sweep, the presets are ranked by their `; Quality: N` comment (a vendor
+score — a ranking input only, the gate still decides) or by size when they have none, and the
+best one is tuned fully and gated, falling back down the ranking if it fails. A model that is
+not downloaded is skipped, never fetched mid-measurement. It refuses to measure while a
+download, build or game is loading the machine, because the numbers would be meaningless.
 
 **Console** (`./golem web`, or `golem.cmd web`) serves a local page on `127.0.0.1:8787`
 that stays up whether or not an engine is running: live results from `bench/results.jsonl`,

@@ -20,6 +20,7 @@ while something was downloading or building carry `"quiet": false` and the page 
 | `engine`, `engine_build` | `llama.cpp b11379-1537a0a8b`, `ik_llama.cpp main-b5483…`, `strata v0.1.45` |
 | `model`, `model_file` | the preset (or alias) and the GGUF it served |
 | `ctx` | context actually served |
+| `threads` | CPU threads the engine ran with (the preset's `threads`, else `CPU_THREADS` from `.env`) — a tuned parameter like the offload split, so it travels with the number it produced |
 | `params_b`, `params_active_b` | total and **active** parameters — a 35B-A3B is 35.5B of weights but 3.5B of work per token |
 | `moe`, `experts`, `n_layer`, `ctx_train` | model shape, from the GGUF header (`scripts/gguf-info.sh`) |
 | `flags` | the preset section's effective flags (`[*]` merged with the model's own) |
@@ -32,9 +33,17 @@ while something was downloading or building carry `"quiet": false` and the page 
 
 ## Reading the numbers
 
-- **Only compare within a size class.** A 0.5B at 269 t/s says nothing about a 35B at 59. The
-  report groups by active parameters (≤2B, 2–8B, 8–20B, 20B+) and offers "t/s per active B" as
-  the one honest cross-size ratio.
+- **Only compare on the same machine.** A number belongs to the box that produced it. The report
+  has one section per `host` slug — GPU, VRAM, RAM and CPU in one string — and never puts two
+  machines in one table.
+- **Only compare within a size class.** A 0.5B at 269 t/s says nothing about a 35B at 59. Inside
+  a machine the report orders models by active-parameter class (≤2B, 2–8B, 8–20B, 20B+) and
+  offers "t/s per active B" as the one honest cross-size ratio.
+- **One line per context, at the best setup measured there.** A model tuned five ways at 231K
+  contributes one row — the winner — with its flags named in the `setup` column; the other four
+  are still in `results.jsonl`. The `setup` column names the knobs that differ between rows;
+  anything identical on every row is the preset's own configuration and lives in the flags field
+  of each row.
 - **Only compare within a session.** Desktop load moves decode by ±3 t/s; downloads and games by
   far more. The `quiet` flag is a warning, not a guarantee.
 - **Same flags, same context.** `ctx` and `flags` are part of the comparison: 231K context costs
@@ -46,7 +55,7 @@ while something was downloading or building carry `"quiet": false` and the page 
 |---|---|
 | Server page, always current | `./golem web` → http://127.0.0.1:8787 (live from `results.jsonl`, controls, models, engine log) |
 | Static page for sharing | `./golem report` → `bench/report.html`, one self-contained file (no server, no CDN) |
-| Markdown for GitHub | `./golem report --md` → `bench/RESULTS.md` with the tables below, rendered by GitHub |
+| Markdown for GitHub | `./golem.exe report --md` → `bench/RESULTS.md`: a section per machine, a block per model, a row per context |
 
 GitHub does not render HTML or JavaScript inside a `.md` file (it strips it), so the interactive
 page cannot be embedded in a README: the Markdown summary is the GitHub-friendly view, and the

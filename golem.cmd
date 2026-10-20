@@ -36,7 +36,12 @@ for /f "usebackq tokens=1,* delims==" %%a in ("%ROOT%.env") do (
 
 rem No argument: the TUI is the default face (menu: golem.cmd menu).
 if "%~1"=="" goto tui
-for %%c in (start stop restart status logs report web tune bench eval tui menu) do if /i "%~1"=="%%c" (call :%%c & exit /b)
+rem Pass the arguments through to the label: inside `call :label` an unpassed
+rem %* is EMPTY, so `call :tune` alone made `golem.cmd tune <preset>` silently
+rem tune the default model instead - which loaded a 35B nobody asked for.
+rem %2..%9 is the tail without the command word; the labels then hand %* to
+rem the bash bridge.
+for %%c in (start stop restart status logs report web tune bench eval tui menu) do if /i "%~1"=="%%c" (call :%%c %2 %3 %4 %5 %6 %7 %8 %9 & exit /b)
 echo Usage: golem.cmd [start^|stop^|restart^|status^|logs^|report^|web^|tune^|bench^|eval^|tui]
 exit /b 1
 
@@ -106,7 +111,9 @@ exit /b 0
 %PS% -File "%ROOT%scripts\web.ps1"
 exit /b 0
 :tune
-call "%ROOT%scripts\tune.cmd" %*
+rem tune is a bash script like bench/eval: hand over to Git Bash through the
+rem same bridge (scripts\tune.cmd never existed - this path was broken).
+call "%ROOT%scripts\golem-bash.cmd" tune %*
 exit /b 0
 :bench
 call "%ROOT%scripts\golem-bash.cmd" bench %*

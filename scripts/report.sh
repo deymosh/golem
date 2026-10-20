@@ -63,6 +63,7 @@ if [[ "${1:-}" == "--md" ]]; then
                 ram[key] = jnum($0, "ram_used_gib"); pact[key] = jnum($0, "params_active_b")
                 ptot[key] = jnum($0, "params_b"); nnexp[key] = jstr($0, "experts")
                 acc[key] = jnum($0, "draft_accept"); day[key] = substr(jstr($0, "ts"), 1, 10)
+                thr[key] = jnum($0, "threads")
                 cls[key] = clsname((pact[key] == "" ? ptot[key] : pact[key]) + 0)
                 modelof[key] = model; engof[key] = eng; buildof[key] = build; ctxof[key] = ctx
                 if (!(key in seen)) { seen[key] = 1; order[++n] = key }
@@ -94,20 +95,20 @@ if [[ "${1:-}" == "--md" ]]; then
                     print ""
                     print "## " cur
                     print ""
-                    print "| model | engine | ctx | decode t/s | prefill t/s | t/s / active B | params | VRAM GB | RAM GB | MTP acc. | needle | measured |"
-                    print "|---|---|---:|---:|---:|---:|---|---:|---:|---:|---|---|"
+                    print "| model | engine | ctx | threads | decode t/s | prefill t/s | t/s / active B | params | VRAM GB | RAM GB | MTP acc. | needle | measured |"
+                    print "|---|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---|---|"
                 }
                 p = (pact[k] == "" ? ptot[k] : pact[k])
                 ratio = (p > 0 ? sprintf("%.1f", best[k] / p) : "-")
                 pstr = (ptot[k] == "") ? "-" : sprintf("%.2fB / %.2fB active", ptot[k], pact[k])
-                if (nexp[k] != "") pstr = pstr " \\*" nexp[k] "\\*"
+                if (nnexp[k] != "") pstr = pstr " \\*" nnexp[k] "\\*"
                 v = (vram[k] == "") ? "-" : sprintf("%.1f", vram[k] / 1024)
                 r = (ram[k] == "") ? "-" : sprintf("%.1f", ram[k])
                 a = (acc[k] == "") ? "-" : sprintf("%.0f%%", acc[k] * 100)
                 nd = ((modelof[k] in needle) ? needle[modelof[k]] : "-")
                 ctxs = (ctxof[k] == "") ? "-" : sprintf("%.0fK", ctxof[k] / 1024)
-                printf "| %s | %s `%s` | %s | **%s** | %s | %s | %s | %s | %s | %s | %s | %s |\n", \
-                    modelof[k], engof[k], buildof[k], ctxs, best[k], pre[k], ratio, pstr, v, r, a, nd, day[k]
+                printf "| %s | %s `%s` | %s | %s | **%s** | %s | %s | %s | %s | %s | %s | %s | %s |\n", \
+                    modelof[k], engof[k], buildof[k], ctxs, ((thr[k] == "") ? "-" : thr[k]), best[k], pre[k], ratio, pstr, v, r, a, nd, day[k]
             }
             if (nr > 0) {
                 print ""

@@ -1,0 +1,75 @@
+# golem-rs — the portable binary
+
+One `golem` binary that owns the TUI, the console, the results database and the tuner,
+so the shell stack is needed only as engine drivers. The plan, phase by phase, is
+[docs/plan-portable-binary.md](../docs/plan-portable-binary.md); a script is deleted only
+when this binary replaces its gate.
+
+```
+crates/
+  golem-core/   the testable core: JSON, results.jsonl, INI, GGUF, RESULT lines
+  golem/        the binary (phase 0: --version and help)
+```
+
+## Build and test
+
+```sh
+./scripts/setup-rust-toolchain.sh   # once per machine
+./scripts/cargo.sh test
+```
+
+`setup-rust-toolchain.sh` gives this checkout a compiler without installing anything
+system-wide:
+
+- **Windows** — a pinned mingw-w64 in `.local/toolchain/` (~264 MiB, no installer, no
+  admin, checksum verified) plus the **GNU-hosted Rust toolchain** (`rustup toolchain
+  install stable-x86_64-pc-windows-gnu`), and a per-directory `rustup override` pointing
+  this checkout at it. Rust's usual Windows requirement is the MSVC linker from Visual
+  Studio Build Tools (~2 GB, admin); this avoids it entirely.
+- **Linux / macOS** — the system compiler; only the Rust side is checked.
+
+The GNU *host* matters, not just the GNU target: build scripts always compile for the
+host, so with an MSVC host any dependency that has one (tokio and axum pull in several)
+still needs the MSVC linker. A GNU host links everything with mingw-w64.
+
+**Build through `./scripts/cargo.sh`, not plain cargo.** The dependency tree runs
+`dlltool` from the toolchain's `bin` by name, and cargo's `[env]` section cannot put PATH
+in front of a build script — the wrapper does, and forwards every argument. (Plain
+`cargo test` works too if that `bin` is already on your PATH.)
+
+A build also drops the binary at the repository root as `golem.exe` (git-ignored): a
+binary sitting next to `bench/` and `data/` is exactly the shape a release has, so
+`./golem.exe report --md` works on the checkout's own files.
+
+**CI is unaffected and still builds MSVC** (`.github/workflows/golem-bin.yml`), which is
+what a released Windows binary should be. The local GNU build is for testing; it is
+self-contained (`+crt-static`, no mingw DLLs beside it) but it is not byte-identical to
+the MSVC release.
+
+## Where the binary keeps its files
+
+A release is one executable someone downloaded, so nothing about the repository layout
+can be assumed. The rule is one sentence: **the home is `GOLEM_HOME` if set, otherwise
+the directory the binary lives in.** Everything the binary needs lives under it, and is
+created on first run if missing — `bench/`, `data/models`, `data/cache`, `data/tuned`,
+`logs/`, and the page template, which is compiled into the binary and written out the
+first time it is needed (an existing copy is never overwritten, so editing it wins).
+
+That single rule covers both shapes: a release unpacked anywhere populates its own
+folder, and a dev build at the repository root uses the checkout's files by virtue of
+sitting next to them.
+
+## Status
+
+Phases 0-3 and the console of phase 5, per
+[docs/plan-portable-binary.md](../docs/plan-portable-binary.md): the scaffold and CI; the
+read-only core (JSON, `results.jsonl` with its size classes and best-per-configuration
+reduction, the `RESULT`-line contract, the GGUF header, both report views); the controls
+(`golem status`, `up`/`down`/`restart`, and `golem web`'s `api/state`, `api/logs`,
+`api/run` driving the shell launchers); and `golem tui`, the full-screen console, whose
+menu entries run those same verbs.
+
+145 tests, all runnable locally. Not done yet: the console's `api/models` (and the
+add/delete behind it), the phase-4 tuner, and the phase-6 switchover that lets `./golem`
+hand a command to this binary. `golem-core::ini` is still only a placeholder - nothing
+needed it until phase 4.

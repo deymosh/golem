@@ -16,7 +16,13 @@ set -Eeuo pipefail
 #   5. optional needle-in-haystack at --long TOKENS, then decode speed
 #      at that depth (follow-up request reusing the cached haystack)
 #
-# Needs python3; on Windows `./golem eval` runs it through WSL.
+# Needs only bash, curl and awk - the same three tools benchmark-ai.sh
+# uses, so it runs identically on Windows (Git Bash), Linux and inside a
+# container. It deliberately does NOT need python3 or WSL: the earlier
+# python version had to be handed to WSL on Windows, and that hop is what
+# silently made the tuner's gate measure the .env model instead of the
+# candidate under test (the GOLEM_* override never crossed the boundary).
+#
 # Usage: ./scripts/eval-model.sh [--long tokens]
 # ============================================================
 
@@ -37,17 +43,16 @@ MODEL_ALIAS="${GOLEM_MODEL_ALIAS:-${MODEL_ALIAS:-local-model}}"
 TEMPERATURE="${TEMPERATURE:-0.15}"
 TOP_P="${TOP_P:-0.95}"
 
-# EVAL_HOST: reach a server on another host. Inside WSL (default NAT
-# networking) the Windows loopback is invisible, so a server running
-# natively on Windows is tried at WSL's default gateway = the Windows
-# host; that needs the server bound to 0.0.0.0 (LOCAL_AI_HOST).
-EVAL_HOST="${EVAL_HOST:-127.0.0.1}"
-if ! curl --silent --fail --max-time 3 "http://${EVAL_HOST}:${PORT}/health" >/dev/null 2>&1 \
-    && grep -qi microsoft /proc/version 2>/dev/null; then
-    WIN_HOST="$(ip route show default 2>/dev/null | awk '{print $3; exit}')"
-    [[ -n "${WIN_HOST}" ]] && EVAL_HOST="${WIN_HOST}"
-fi
-BASE_URL="http://${EVAL_HOST}:${PORT}"
+# A server on 0.0.0.0 is reachable on the loopback; a server bound to the
+# LAN needs its own address. LOCAL_AI_BASE_URL wins when set.
+BASE_URL="${LOCAL_AI_BASE_URL:-http://127.0.0.1:${PORT}}"
+BASE_URL="${BASE_URL%/}"
+BASE_URL="${BASE_URL%/v1}"
+
+# Scratch bodies live under data/tmp (git-ignored, and a real path in every
+# environment - /tmp does not survive MSYS path translation to Windows curl).
+TMP_DIR="${ROOT_DIR}/data/tmp"
+mkdir -p "${TMP_DIR}"
 
 LONG_TOKENS=""
 while [[ $# -gt 0 ]]; do
@@ -57,11 +62,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "[ERROR] python3 is required" >&2
-    exit 1
-fi
-
 section() {
     echo
     echo "------------------------------------------------------------"
@@ -69,9 +69,71 @@ section() {
     echo "------------------------------------------------------------"
 }
 
-# ============================================================
+# ------------------------------------------------------------
+# JSON helpers: awk, no dependency. The server's JSON is either
+# compact or pretty-printed (llama.cpp prints `timings` indented),
+# so every helper first squeezes the text onto one line.
+# ------------------------------------------------------------
+
+# json_str <json> <key> -> the string value, or empty
+json_str() {
+    printf '%s' "$1" | tr -d '\n\r' | awk -v key="$2" '
+        {
+            if (match($0, "\"" key "\":[ ]*\"[^\"]*\"")) {
+                s = substr($0, RSTART, RLENGTH)
+                sub("^\"" key "\":[ ]*\"", "", s); sub("\"$", "", s)
+                print s
+            }
+        }'
+}
+
+# json_num <json> <key> -> the number as written, or empty
+json_num() {
+    printf '%s' "$1" | tr -d '\n\r' | awk -v key="$2" '
+        {
+            if (match($0, "\"" key "\":[ ]*-?[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?")) {
+                s = substr($0, RSTART, RLENGTH)
+                sub("^\"" key "\":[ ]*", "", s)
+                print s
+            }
+        }'
+}
+
+# json_raw <json> <key> -> the value as written (object, array, string, number)
+json_raw() {
+    printf '%s' "$1" | tr -d '\n\r' | awk -v key="$2" '
+        {
+            i = index($0, "\"" key "\":")
+            if (!i) next
+            rest = substr($0, i + length(key) + 3)
+            sub(/^[ ]*/, "", rest)
+            if (substr(rest, 1, 1) == "{") {
+                depth = 0; out = ""
+                for (j = 1; j <= length(rest); j++) {
+                    c = substr(rest, j, 1); out = out c
+                    if (c == "{") depth++
+                    else if (c == "}") { depth--; if (depth == 0) break }
+                }
+                print out
+            } else {
+                print rest
+            }
+        }'
+}
+
+# The assistant's text: content, or reasoning_content for thinking models.
+msg_content() {
+    local json="$1" body
+    body="$(json_raw "${json}" "message")"
+    [[ -n "${body}" ]] || body="${json}"
+    local c; c="$(json_str "${body}" "content")"
+    [[ -n "${c}" ]] || c="$(json_str "${body}" "reasoning_content")"
+    printf '%s' "${c}"
+}
+
+# ------------------------------------------------------------
 # 1. HEALTH + IDENTITY
-# ============================================================
+# ------------------------------------------------------------
 
 section "1. HEALTH + IDENTITY"
 
@@ -79,22 +141,14 @@ curl --silent --show-error --fail --max-time 5 "${BASE_URL}/health" >/dev/null \
     || { echo "[FAIL] server not responding"; exit 1; }
 echo "[ OK ] /health"
 
-curl --silent -H "Authorization: Bearer ${API_KEY}" "${BASE_URL}/props?model=${MODEL_ALIAS}" \
-    | python3 -c '
-import json,sys
-try:
-    d = json.load(sys.stdin)
-    if isinstance(d, dict):
-        print("model_path :", d.get("model_path","?"))
-        print("n_ctx      :", d.get("default_generation_settings",{}).get("n_ctx","?"))
-    else:
-        print("props      : (unexpected shape)")
-except Exception as e:
-    print("props      : (unavailable)")' || true
+PROPS="$(curl --silent --max-time 10 -H "Authorization: Bearer ${API_KEY}" \
+    "${BASE_URL}/props?model=${MODEL_ALIAS}" 2>/dev/null || true)"
+echo "model_path : $( [[ -n "$(json_str "${PROPS}" "model_path")" ]] && json_str "${PROPS}" "model_path" || echo "?")"
+echo "n_ctx      : $( [[ -n "$(json_num "${PROPS}" "n_ctx")" ]] && json_num "${PROPS}" "n_ctx" || echo "?")"
 
-# ============================================================
+# ------------------------------------------------------------
 # 2. WARMUP + ARITHMETIC SANITY
-# ============================================================
+# ------------------------------------------------------------
 
 section "2. WARMUP + ARITHMETIC SANITY"
 
@@ -107,15 +161,8 @@ curl --silent --show-error --fail --max-time 900 \
     > /dev/null || echo "[WARN] warmup request failed (continuing)"
 echo "[ OK ] warmup done"
 
-# Prefer thinking disabled (Qwen3.x hybrid models accept the kwarg);
-# fall back to a plain body for models whose template rejects it.
-SANITY_PLAIN='{
-  "model": "'"${MODEL_ALIAS}"'",
-  "messages": [{"role": "user", "content": "What is 17*23? Reply with the number only."}],
-  "temperature": 0,
-  "max_tokens": 512
-}'
-
+# Thinking disabled where the template accepts the kwarg (Qwen3.x hybrids);
+# plain body otherwise.
 SANITY_NOTHINK='{
   "model": "'"${MODEL_ALIAS}"'",
   "messages": [{"role": "user", "content": "What is 17*23? Reply with the number only."}],
@@ -124,34 +171,40 @@ SANITY_NOTHINK='{
   "max_tokens": 512
 }'
 
-parse_msg() { python3 -c 'import json,sys; m=json.load(sys.stdin)["choices"][0]["message"]; print(m.get("content") or m.get("reasoning_content") or "")'; }
+SANITY_PLAIN='{
+  "model": "'"${MODEL_ALIAS}"'",
+  "messages": [{"role": "user", "content": "What is 17*23? Reply with the number only."}],
+  "temperature": 0,
+  "max_tokens": 512
+}'
 
-SANITY_OUT="$(echo "${SANITY_NOTHINK}" | curl --silent --show-error --max-time 600 \
+SANITY_RAW="$(printf '%s' "${SANITY_NOTHINK}" | curl --silent --show-error --max-time 600 \
     "${BASE_URL}/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${API_KEY}" \
-    -d @- | parse_msg 2>/dev/null || true)"
+    -d @- || true)"
 
+SANITY_OUT="$(msg_content "${SANITY_RAW}")"
 if [[ -z "${SANITY_OUT}" ]]; then
-    SANITY_OUT="$(echo "${SANITY_PLAIN}" | curl --silent --show-error --max-time 600 \
+    SANITY_RAW="$(printf '%s' "${SANITY_PLAIN}" | curl --silent --show-error --max-time 600 \
         "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${API_KEY}" \
-        -d @- | parse_msg || true)"
+        -d @- || true)"
+    SANITY_OUT="$(msg_content "${SANITY_RAW}")"
 fi
-
 [[ -z "${SANITY_OUT}" ]] && SANITY_OUT="(request failed)"
 
 echo "answer: ${SANITY_OUT}"
-if echo "${SANITY_OUT}" | grep -q "391"; then
+if grep -q "391" <<<"${SANITY_OUT}"; then
     echo "[ OK ] arithmetic sanity"
 else
     echo "[FAIL] arithmetic sanity (expected 391) - quant damage / bad CUDA?"
 fi
 
-# ============================================================
+# ------------------------------------------------------------
 # 3. TOOL CALLING
-# ============================================================
+# ------------------------------------------------------------
 
 section "3. TOOL CALLING"
 
@@ -178,16 +231,16 @@ TOOL_BODY='{
   "max_tokens": 1024
 }'
 
-TOOL_OUT="$(echo "${TOOL_BODY}" | curl --silent --show-error --max-time 600 \
+TOOL_RAW="$(printf '%s' "${TOOL_BODY}" | curl --silent --show-error --max-time 600 \
     "${BASE_URL}/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${API_KEY}" \
     -d @- || true)"
 
-if [[ -z "${TOOL_OUT}" ]]; then
-    # retry once appending the kwarg (some templates only emit tool calls
-    # when thinking is disabled)
-    TOOL_OUT="$(echo "${TOOL_BODY}" | sed 's/"tool_choice": "auto",/"tool_choice": "auto", "chat_template_kwargs": {"enable_thinking": false},/' \
+# Some templates only emit tool calls with thinking disabled.
+if [[ -z "$(json_raw "${TOOL_RAW}" "tool_calls")" ]]; then
+    TOOL_RAW="$(printf '%s' "${TOOL_BODY}" \
+        | sed 's/"tool_choice": "auto",/"tool_choice": "auto", "chat_template_kwargs": {"enable_thinking": false},/' \
         | curl --silent --show-error --max-time 600 \
             "${BASE_URL}/v1/chat/completions" \
             -H "Content-Type: application/json" \
@@ -195,50 +248,48 @@ if [[ -z "${TOOL_OUT}" ]]; then
             -d @- || true)"
 fi
 
-if [[ -z "${TOOL_OUT}" ]]; then
+TOOL_CALLS="$(json_raw "${TOOL_RAW}" "tool_calls")"
+if [[ -z "${TOOL_RAW}" ]]; then
     echo "[FAIL] tool request returned no response"
+elif [[ -z "${TOOL_CALLS}" ]]; then
+    echo "[FAIL] no tool call emitted; content=$(msg_content "${TOOL_RAW}" | head -c 200)"
+elif grep -q 'get_weather' <<<"${TOOL_CALLS}" && grep -qi 'munich' <<<"${TOOL_CALLS}"; then
+    echo "tool_call : $(grep -o 'get_weather' <<<"${TOOL_CALLS}" | head -n1)($(json_str "${TOOL_CALLS}" "arguments"))"
+    echo "[ OK ] tool calling"
+elif grep -q 'get_weather' <<<"${TOOL_CALLS}"; then
+    echo "tool_call : get_weather($(json_str "${TOOL_CALLS}" "arguments"))"
+    echo "[WARN] tool called with wrong city"
 else
-    # The heredoc is python's stdin, so the response travels via env.
-    TOOL_OUT="${TOOL_OUT}" python3 - <<'PYEOF' || true
-import json, os
-d = json.loads(os.environ["TOOL_OUT"])
-msg = d["choices"][0]["message"]
-tc = msg.get("tool_calls") or []
-if tc and tc[0]["function"]["name"] == "get_weather":
-    try:
-        args = json.loads(tc[0]["function"]["arguments"])
-        ok = args.get("city", "").lower() == "munich"
-        print(f"tool_call : get_weather({args})")
-        print("[ OK ] tool calling" if ok else "[WARN] tool called with wrong city")
-    except json.JSONDecodeError as e:
-        print(f"[FAIL] tool arguments are not valid JSON: {e}")
-else:
-    print(f"[FAIL] no tool call emitted; content={msg.get('content','')[:200]!r}")
-PYEOF
+    echo "[FAIL] no tool call emitted; content=$(msg_content "${TOOL_RAW}" | head -c 200)"
 fi
 
-# ============================================================
+# ------------------------------------------------------------
 # 4. THROUGHPUT (3 timed runs)
-# ============================================================
+# ------------------------------------------------------------
 
 section "4. THROUGHPUT (3 runs, code-review prompt, 192 gen tokens)"
 
 # Per-request server timings (llama.cpp `timings`): decode and prompt
 # tok/s exclude HTTP and each other. Prompt caching is off so every run
 # pays its prefill. ./golem bench is the fuller speed benchmark.
-timings() {
-    python3 -c '
-import json, sys
-t = json.load(sys.stdin).get("timings", {})
-acc = " draft_accept=%.0f%%" % (100.0 * t["draft_n_accepted"] / t["draft_n"]) if t.get("draft_n") else ""
-print("prompt=%d tok @ %.0f t/s, gen=%d tok @ %.1f t/s%s" % (
-    t.get("prompt_n", 0), t.get("prompt_per_second", 0),
-    t.get("predicted_n", 0), t.get("predicted_per_second", 0), acc))'
+timings_line() {
+    local json="$1" prompt_n prompt_tps gen_n gen_tps draft_n draft_acc out
+    prompt_n="$(json_num "${json}" "prompt_n")"
+    prompt_tps="$(json_num "${json}" "prompt_per_second")"
+    gen_n="$(json_num "${json}" "predicted_n")"
+    gen_tps="$(json_num "${json}" "predicted_per_second")"
+    draft_n="$(json_num "${json}" "draft_n")"
+    draft_acc="$(json_num "${json}" "draft_n_accepted")"
+    out="prompt=${prompt_n:-0} tok @ $(printf '%.0f' "${prompt_tps:-0}") t/s, gen=${gen_n:-0} tok @ $(printf '%.1f' "${gen_tps:-0}") t/s"
+    if [[ -n "${draft_n}" && "${draft_n}" != "0" ]]; then
+        out+=" draft_accept=$(awk -v a="${draft_acc:-0}" -v n="${draft_n}" 'BEGIN {printf "%.0f%%", 100 * a / n}')"
+    fi
+    printf '%s' "${out}"
 }
 
 GEN_SPEEDS=()
 for i in $(seq 1 3); do
-    OUT="$(curl --silent --show-error --fail --max-time 900 \
+    OUT="$(curl --silent --show-error --max-time 900 \
         "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${API_KEY}" \
@@ -255,15 +306,15 @@ for i in $(seq 1 3); do
 }
 EOF
 )"
-    LINE="$(timings <<<"${OUT}")"
+    LINE="$(timings_line "${OUT}")"
     echo "run $i: ${LINE}"
-    GEN_SPEEDS+=("$(sed -n 's/.*gen=[0-9]* tok @ \([0-9.]*\) t\/s.*/\1/p' <<<"${LINE}")")
+    GEN_SPEEDS+=("$(json_num "${OUT}" "predicted_per_second")")
 done
 echo "RESULT gen_tok_s_best=$(printf '%s\n' "${GEN_SPEEDS[@]}" | sort -g | tail -n1)"
 
-# ============================================================
+# ------------------------------------------------------------
 # 5. LONG CONTEXT NEEDLE (optional)
-# ============================================================
+# ------------------------------------------------------------
 
 if [[ -n "${LONG_TOKENS}" ]]; then
     section "5. NEEDLE-IN-HAYSTACK (~${LONG_TOKENS} tokens) + DECODE AT DEPTH"
@@ -271,63 +322,112 @@ if [[ -n "${LONG_TOKENS}" ]]; then
     # Haystack first, question last: the follow-up request below shares
     # the whole haystack as a cached prefix, which is how an agent turn
     # looks (long history, short new tail).
-    python3 - "$LONG_TOKENS" "${MODEL_ALIAS}" <<'PYEOF'
-import json, sys
-n, model = int(sys.argv[1]), sys.argv[2]
-line = "The warehouse holds crates of silicon wafers and the manifests are filed by quarter.\n"
-filler = line * (n * 5 // len(line))          # ~4 chars/token for this text
-needle = "IMPORTANT: the release code for Q3 is stored under the passphrase 8127.\n"
-half = len(filler) // 2
-haystack = ("Below is a pile of warehouse log lines. Somewhere inside there is one IMPORTANT line.\n\n"
-            + filler[:half] + needle + filler[half:])
-def body(question, max_tokens, cache):
-    return {
-        "model": model,
-        "messages": [{"role": "user", "content": haystack + "\n" + question}],
-        "temperature": 0,
-        "max_tokens": max_tokens,
-        # hybrid-thinking models would spend the budget reasoning
-        "chat_template_kwargs": {"enable_thinking": False},
-        "cache_prompt": cache,
-        "stream": False,
+    #
+    # The text is built by awk into a file (it is ~1 MB at 200K tokens) and
+    # sized by the server's own tokenizer, not by a guessed characters-per-
+    # token ratio: that ratio belongs to the model's tokenizer, and a gate
+    # that asks for 200K while sending 165K is testing something else.
+    BODY_NEEDLE="${TMP_DIR}/eval-needle.json"
+    BODY_DEPTH="${TMP_DIR}/eval-depth.json"
+    BODY_TOKENS="${TMP_DIR}/eval-tokenize.json"
+
+    build_bodies() {
+        # $1 = target tokens, $2 = characters per token (the first guess)
+        awk -v target="$1" -v cpt="$2" -v model="${MODEL_ALIAS}" \
+            -v needle_out="${BODY_NEEDLE}" -v depth_out="${BODY_DEPTH}" \
+            -v tokens_out="${BODY_TOKENS}" '
+            BEGIN {
+                line = "The warehouse holds crates of silicon wafers and the manifests are filed by quarter."
+                needle = "IMPORTANT: the release code for Q3 is stored under the passphrase 8127."
+                reps = int(target * cpt / length(line)) + 1
+                if (reps < 2) reps = 2
+                half = int(reps / 2)
+
+                head = "Below is a pile of warehouse log lines. Somewhere inside there is one IMPORTANT line."
+                hay = head
+                for (i = 0; i < half; i++) hay = hay "\\n" line
+                hay = hay "\\n" needle
+                for (i = half; i < reps; i++) hay = hay "\\n" line
+
+                q_needle = "\\n\\nWhat is the passphrase in the IMPORTANT line? Reply with the number only."
+                q_depth = "\\n\\nNow write a Python function that parses one of these log lines into a dict, with a docstring."
+
+                common = "\"temperature\": 0, \"chat_template_kwargs\": {\"enable_thinking\": false}, \"stream\": false"
+                printf "{\"model\": \"%s\", \"messages\": [{\"role\": \"user\", \"content\": \"%s%s\"}], %s, \"cache_prompt\": false, \"max_tokens\": 16}",
+                    model, hay, q_needle, common > needle_out
+                printf "{\"model\": \"%s\", \"messages\": [{\"role\": \"user\", \"content\": \"%s%s\"}], %s, \"cache_prompt\": true, \"max_tokens\": 256}",
+                    model, hay, q_depth, common > depth_out
+                # /tokenize takes the model in the body and a bare `content`,
+                # not a chat request: the same text, counted by the server.
+                printf "{\"model\": \"%s\", \"content\": \"%s%s\"}", model, hay, q_needle > tokens_out
+                close(needle_out); close(depth_out); close(tokens_out)
+            }'
     }
-json.dump(body("What is the passphrase in the IMPORTANT line? Reply with the number only.", 16, False),
-          open("/tmp/golem_needle_body.json", "w"))
-json.dump(body("Now write a Python function that parses one of these log lines into a dict, with a docstring.", 256, True),
-          open("/tmp/golem_depth_body.json", "w"))
-PYEOF
+
+    # How many tokens the server sees in a request body, or nothing when the
+    # engine has no /tokenize (then the estimate stands, as before). Never
+    # fails: `grep -c` exits 1 on a zero count, and under `set -e` that would
+    # kill the run silently - which is exactly what it did first time round.
+    tokenize_count() {
+        local ids
+        ids="$(curl --silent --max-time 120 "${BASE_URL}/tokenize" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${API_KEY}" \
+            --data-binary @"${BODY_TOKENS}" 2>/dev/null \
+            | tr -d '\n' \
+            | sed -n 's/.*"tokens": *\[\([^]]*\)\].*/\1/p' || true)"
+        [[ -n "${ids}" ]] || return 0
+        printf '%s' "${ids}" | tr ',' '\n' | grep -c '[0-9]' || true
+    }
+
+    build_bodies "${LONG_TOKENS}" "4.7"
+    HAYSTACK_TOKENS="$(tokenize_count)"
+    if [[ -n "${HAYSTACK_TOKENS}" ]] && (( HAYSTACK_TOKENS > 0 )); then
+        # One correction pass against the measured count; the ratio is
+        # linear enough that a second pass is noise.
+        if (( HAYSTACK_TOKENS != LONG_TOKENS )); then
+            build_bodies "${LONG_TOKENS}" \
+                "$(awk -v cpt=4.7 -v want="${LONG_TOKENS}" -v got="${HAYSTACK_TOKENS}" 'BEGIN {printf "%.3f", cpt * want / got}')"
+            HAYSTACK_TOKENS="$(tokenize_count)"
+        fi
+        echo "haystack: ${HAYSTACK_TOKENS} tokens (asked for ${LONG_TOKENS})"
+    else
+        echo "haystack: sized by the 4.7 chars/token estimate (no /tokenize on this engine)"
+    fi
 
     NEEDLE_RAW="$(curl --silent --show-error --fail --max-time 3600 \
         "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${API_KEY}" \
-        --data-binary @/tmp/golem_needle_body.json || true)"
-    NEEDLE_OUT="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])' <<<"${NEEDLE_RAW}" 2>/dev/null || echo "(request failed)")"
-    PROMPT_TPS="$(python3 -c 'import json,sys; print("%.0f" % json.load(sys.stdin)["timings"]["prompt_per_second"])' <<<"${NEEDLE_RAW}" 2>/dev/null || echo 0)"
-    echo "needle : $(timings <<<"${NEEDLE_RAW}" 2>/dev/null); answer: ${NEEDLE_OUT}"
+        --data-binary @- < "${BODY_NEEDLE}" || true)"
+    NEEDLE_OUT="$(msg_content "${NEEDLE_RAW}")"
+    [[ -z "${NEEDLE_OUT}" ]] && NEEDLE_OUT="(request failed)"
+    PROMPT_TPS="$(json_num "${NEEDLE_RAW}" "prompt_per_second")"
+    PROMPT_N="$(json_num "${NEEDLE_RAW}" "prompt_n")"
+    echo "needle : prompt=${PROMPT_N:-0} tok @ $(printf '%.0f' "${PROMPT_TPS:-0}") t/s; answer: ${NEEDLE_OUT}"
 
     DEPTH_RAW="$(curl --silent --show-error --fail --max-time 3600 \
         "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${API_KEY}" \
-        --data-binary @/tmp/golem_depth_body.json || true)"
-    DEPTH_TPS="$(python3 -c 'import json,sys; print("%.1f" % json.load(sys.stdin)["timings"]["predicted_per_second"])' <<<"${DEPTH_RAW}" 2>/dev/null || echo 0)"
-    echo "depth  : $(timings <<<"${DEPTH_RAW}" 2>/dev/null) (prefix from cache)"
-    rm -f /tmp/golem_needle_body.json /tmp/golem_depth_body.json
+        --data-binary @- < "${BODY_DEPTH}" || true)"
+    DEPTH_TPS="$(json_num "${DEPTH_RAW}" "predicted_per_second")"
+    echo "depth  : $(timings_line "${DEPTH_RAW}") (prefix from cache)"
+    rm -f "${BODY_NEEDLE}" "${BODY_DEPTH}" "${BODY_TOKENS}"
 
-    if echo "${NEEDLE_OUT}" | grep -q "8127"; then
+    if grep -q "8127" <<<"${NEEDLE_OUT}"; then
         echo "[ OK ] needle found"
         VERDICT=PASS
     else
         echo "[FAIL] needle missed"
         VERDICT=FAIL
     fi
-    echo "RESULT long_ctx_${LONG_TOKENS}=${VERDICT} prompt_tok_s=${PROMPT_TPS} gen_tok_s_at_depth=${DEPTH_TPS}"
+    echo "RESULT long_ctx_${LONG_TOKENS}=${VERDICT} prompt_tok_s=$(printf '%.0f' "${PROMPT_TPS:-0}") gen_tok_s_at_depth=$(printf '%.1f' "${DEPTH_TPS:-0}")"
 fi
 
-# ============================================================
+# ------------------------------------------------------------
 # DONE
-# ============================================================
+# ------------------------------------------------------------
 
 echo
 echo "============================================================"

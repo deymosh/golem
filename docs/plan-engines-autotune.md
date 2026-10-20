@@ -5,7 +5,37 @@ top to bottom; commit after each step that passes its check.
 
 ## Status and next steps (update this block every session)
 
-As of 2026-10-19 (`experiment/token-machine`):
+As of 2026-10-20 (`experiment/token-machine`):
+
+- **⚠️ The gate was measuring the wrong model (found and fixed 2026-10-20).** `./golem eval`
+  on Git Bash was handed to WSL, environment variables do not cross that boundary, so
+  `GOLEM_MODEL_ALIAS` was dropped and the harness evaluated `.env`'s `MODEL_ALIAS` — the
+  35B coder — while recording it under the candidate's name. Proof: rows claiming
+  `qwen2.5-0.5b-instruct` with `needle_prefill` 867-883 and `depth_decode` 43-49 (35B rates;
+  the real 0.5B does 19311 and 254.3). The "gate PASS" results from the 0.5B work were
+  therefore meaningless. Fixed by rewriting `scripts/eval-model.sh` in bash+curl+awk (no
+  python3, no WSL, one path on every platform) and dropping the WSL branch from `golem`.
+  Rows recorded before the fix are mislabelled in `bench/results.jsonl` and need a
+  correction row.
+- **Tuner hardening done (0.5B-verified)**: the gate-failure fallback (winner FAIL →
+  next candidate → `no candidate passed the eval gate`, exit 1, nothing adopted) and
+  `--adopt` (`.env.bak` + ENGINE/MODELS_PRESET rewrite, adopted state verified serving)
+  both exercised for real. Two findings: the 0.5B passes needles at 211K tokens on a
+  32K-train model, and the llama.cpp router serves prompts beyond the section's ctx-size,
+  so a missing ctx-size is not a gate trigger.
+- **Speed floor live** (docs/plan-tune-model-context.md, floors agreed with the user):
+  decode 25 / prefill 350 / at-depth 15 t/s, `TUNE_MIN_*` in .env or `--min-*` per run;
+  under-floor candidates are excluded from the ranking with the reason printed.
+- **Context maximization live**: the winner's ctx grows toward the model's trained ctx
+  (GGUF header) with recorded rungs, `--ctx N` pins it, and the needle gates at 90% of
+  the final context. Verified: the 0.5B climbed 8192 → 32768, gate PASS at 29491.
+- **Thread sweep live**: topology-derived probe set — hybrid P/E CPUs probe {P-cores,
+  P-cores+HT, all} (reference box: {8, 16, 20}; measured 16 of 20 is best,
+  docs/models.md "Threads"), plain SMT boxes probe {physical, all-2, all}.
+- **GOLEM_MODEL_ALIAS / GOLEM_MODELS_PRESET / GOLEM_ENGINE now honored** by the tuner
+  (it re-sourced .env and ate them; found during the gate-path tests).
+
+As of 2026-10-19:
 
 - **Phase 1 done** (db1f63b): `./golem bench|eval` append to `bench/results.jsonl`, now with
   engine RAM (`ram_used_gib`) and a build fallback for engines whose `/props` omits it.

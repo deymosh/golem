@@ -1,0 +1,287 @@
+//! Tests for the full-screen console (`src/tui.rs`).
+//!
+//! `golem` is a binary crate with no library target, so the module is pulled
+//! in by path, exactly as `tests/web.rs` pulls in the console.
+//!
+//! `tui.rs` asks `crate::engine` three questions, and this crate root answers
+//! them with a stub: the bin declares `mod engine;` itself, but a test crate
+//! has no such module, so without the stub `tui.rs` would not compile here.
+//! The stub also keeps these tests hermetic and quick - no sockets, no temp
+//! files - and avoids compiling the real engine (and its own tests) a second
+//! time.
+//!
+//! The screen is rendered into ratatui's `TestBackend` - a buffer, not a
+//! terminal - and read back cell by cell, which is the only way to assert on
+//! what a user would see without a user. `run` itself is left alone: it needs
+//! a real terminal in raw mode.
+
+/// A stand-in for `crate::engine`: the few items `tui.rs` and `state.rs`
+/// reach for and nothing else. It reports the engine down and answers no
+/// socket, which is what a test machine with nothing running would see.
+mod engine {
+    use std::path::Path;
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Endpoint {
+        pub port: u16,
+        pub api_key: String,
+    }
+
+    impl Endpoint {
+        pub fn from_home(_home: &Path) -> Endpoint {
+            Endpoint { port: 8000, api_key: String::new() }
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Status {
+        pub up: bool,
+        pub pid: Option<u32>,
+        pub port: u16,
+    }
+
+    pub fn status(_home: &Path) -> Status {
+        Status { up: false, pid: None, port: 8000 }
+    }
+
+    /// No console is running in a test, so nothing answers.
+    pub fn get(_endpoint: &Endpoint, _path: &str) -> Option<(u16, String)> {
+        None
+    }
+}
+
+#[path = "../src/paths.rs"]
+mod paths;
+#[path = "../src/state.rs"]
+mod state;
+#[path = "../src/tui.rs"]
+mod tui;
+
+use ratatui::backend::TestBackend;
+use ratatui::Terminal;
+
+use tui::{Action, App, Facts};
+
+/// Render one frame into a `w`x`h` buffer and return it as text, one line per
+/// row, so the assertions read like the screen looks.
+fn screen_at(app: &App, w: u16, h: u16) -> String {
+    let backend = TestBackend::new(w, h);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| tui::draw(app, frame))
+        .expect("draw into the test buffer");
+    let buffer = terminal.backend().buffer();
+    let width = buffer.area.width as usize;
+    buffer
+        .content
+        .chunks(width)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn screen(app: &App) -> String {
+    screen_at(app, 80, 24)
+}
+
+/// The one row carrying the selection marker. Only the selected entry is
+/// highlighted, and nothing else on screen contains the marker.
+fn marked_row(text: &str) -> &str {
+    text.lines()
+        .find(|line| line.contains("\u{25b8}"))
+        .expect("a row with the selection marker")
+}
+
+/// An app with a machine's worth of facts, without a machine.
+fn app_with_facts() -> App {
+    let mut app = App::new();
+    app.show_facts(Facts {
+        up: true,
+        vram_mib: Some(11000),
+        ram_free_gb: Some(8.4),
+        alias: "ornith-1.5-35b".to_string(),
+        engine: "llama.cpp".to_string(),
+        web_up: true,
+    });
+    app
+}
+
+// ---- the menu ----------------------------------------------------------
+
+#[test]
+fn every_menu_entry_is_drawn() {
+    let app = App::new();
+    let text = screen(&app);
+    for &(label, _) in app.items() {
+        assert!(text.contains(label), "menu entry {label:?} is not on screen:\n{text}");
+    }
+}
+
+#[test]
+fn the_menu_is_in_the_documented_order() {
+    let labels: Vec<&str> = App::new().items().iter().map(|&(label, _)| label).collect();
+    assert_eq!(
+        labels,
+        ["Status", "Start", "Stop", "Restart", "Bench", "Eval", "Tune", "Report", "Web", "Quit"]
+    );
+}
+
+// ---- selection ---------------------------------------------------------
+
+#[test]
+fn selected_returns_the_action_the_marker_is_on() {
+    let mut app = App::new();
+    assert_eq!(app.selected(), Action::Status);
+    app.next();
+    assert_eq!(app.selected(), Action::Start);
+    app.next();
+    assert_eq!(app.selected(), Action::Stop);
+    app.previous();
+    assert_eq!(app.selected(), Action::Start);
+}
+
+#[test]
+fn next_wraps_from_the_last_entry_to_the_first() {
+    let mut app = App::new();
+    for _ in 0..app.items().len() {
+        app.next();
+    }
+    assert_eq!(app.selected(), Action::Status);
+}
+
+#[test]
+fn previous_wraps_from_the_first_entry_to_the_last() {
+    let mut app = App::new();
+    app.previous();
+    assert_eq!(app.selected(), Action::Quit);
+}
+
+#[test]
+fn the_selection_marker_moves_and_wraps() {
+    let mut app = App::new();
+    assert!(marked_row(&screen(&app)).contains("Status"));
+
+    app.next();
+    assert!(marked_row(&screen(&app)).contains("Start"));
+
+    app.previous();
+    assert!(marked_row(&screen(&app)).contains("Status"));
+
+    app.previous(); // past the first: wraps to the last
+    assert!(marked_row(&screen(&app)).contains("Quit"));
+
+    app.next(); // past the last: wraps to the first
+    assert!(marked_row(&screen(&app)).contains("Status"));
+}
+
+// ---- the message line --------------------------------------------------
+
+#[test]
+fn the_message_line_shows_what_set_message_was_given() {
+    let mut app = App::new();
+    app.set_message("engine restarted");
+    let text = screen(&app);
+    assert!(text.contains("engine restarted"), "the message is not on screen:\n{text}");
+}
+
+#[test]
+fn the_message_line_starts_with_a_hint() {
+    let text = screen(&App::new());
+    assert!(text.contains("enter run"), "the default hint should be drawn:\n{text}");
+}
+
+// ---- the header --------------------------------------------------------
+
+#[test]
+fn the_header_names_the_engine_state() {
+    let text = screen(&App::new());
+    assert!(text.contains("GOLEM"), "the header title is missing:\n{text}");
+    assert!(text.contains("down"), "the stub reports the engine down:\n{text}");
+}
+
+#[test]
+fn the_header_carries_the_facts_the_shell_screen_shows() {
+    // The mark, the state, the VRAM, the alias, the engine, the console and
+    // the free memory: the same segments in the same order as scripts/tui.sh.
+    // Wide enough for all of them - at 80 columns the free-memory segment is
+    // the one that does not fit, which is the next test's subject.
+    let text = screen_at(&app_with_facts(), 120, 24);
+    let header = text.lines().nth(1).expect("the header is the second line");
+    assert!(header.contains("\u{259f}\u{2588}\u{2599} GOLEM"), "{header:?}");
+    assert!(header.contains("\u{25cf} up"), "{header:?}");
+    assert!(header.contains("11000 MiB VRAM"), "{header:?}");
+    assert!(header.contains("ornith-1.5-35b"), "{header:?}");
+    assert!(header.contains("[llama.cpp]"), "{header:?}");
+    assert!(header.contains("web up"), "{header:?}");
+    assert!(header.contains("8.4 GB free"), "{header:?}");
+}
+
+#[test]
+fn a_narrow_header_drops_whole_segments_from_the_right() {
+    // Cutting a styled line would slice it mid-escape and colour the rest of
+    // the terminal, so segments are dropped whole - and the ones that matter
+    // most are on the left.
+    let app = app_with_facts();
+    let narrow = screen_at(&app, 40, 24);
+    let header = narrow.lines().nth(1).expect("the header");
+    assert!(header.contains("GOLEM"), "the mark survives:\n{header:?}");
+    assert!(header.contains("\u{25cf} up"), "so does the state:\n{header:?}");
+    assert!(!header.contains("GB free"), "the last segment goes first:\n{header:?}");
+    assert!(header.chars().count() <= 40, "and it fits: {header:?}");
+}
+
+#[test]
+fn the_bars_span_the_window() {
+    let text = screen_at(&App::new(), 60, 24);
+    assert!(text.lines().next().is_some_and(|l| l == "=".repeat(60)), "a full-width rule opens the screen");
+    assert!(text.lines().any(|l| l == "-".repeat(60)), "and rules separate the parts");
+}
+
+// ---- the panes ---------------------------------------------------------
+
+#[test]
+fn the_runs_and_log_panes_show_what_they_were_given() {
+    let mut app = App::new();
+    app.set_runs(vec!["  59.3 t/s  ornith-1.5-35b".to_string()]);
+    app.set_log(vec!["  srv load: model loaded".to_string()]);
+    let text = screen(&app);
+
+    assert!(text.contains("recent runs"), "{text}");
+    assert!(text.contains("59.3 t/s"), "{text}");
+    assert!(text.contains("engine log"), "{text}");
+    assert!(text.contains("srv load: model loaded"), "{text}");
+}
+
+#[test]
+fn the_panes_show_the_newest_rows_and_fill_their_height() {
+    // The screen below the pane must not jump about as entries arrive, so a
+    // short pane is padded rather than left ragged.
+    let mut app = App::new();
+    app.set_runs((1..=12).map(|i| format!("run {i}")).collect());
+    let text = screen(&app);
+    assert!(text.contains("run 12"), "the newest row is shown:\n{text}");
+    assert!(!text.contains("run 1\n"), "the oldest is pushed out:\n{text}");
+}
+
+#[test]
+fn a_short_window_drops_the_panes_before_the_menu() {
+    // The menu is why the screen exists; the panes are the first thing to go.
+    // 17 rows is the tallest window with no room for a pane and still enough
+    // for the whole ten-entry menu.
+    let app = app_with_facts();
+    let text = screen_at(&app, 80, 17);
+    assert!(!text.contains("recent runs"), "no room for panes:\n{text}");
+    assert!(!text.contains("\u{2026}"), "and the menu still fits whole:\n{text}");
+    for &(label, _) in app.items() {
+        assert!(text.contains(label), "{label} is still there:\n{text}");
+    }
+}
+
+#[test]
+fn a_window_too_short_for_the_menu_still_shows_the_selection() {
+    let mut app = App::new();
+    app.next(); // Start
+    let text = screen_at(&app, 60, 12);
+    assert!(marked_row(&text).contains("Start"), "the marker stays on screen:\n{text}");
+    assert!(text.contains("\u{2026}"), "and says there is more:\n{text}");
+}

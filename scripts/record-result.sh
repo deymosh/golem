@@ -225,6 +225,22 @@ if [[ -n "${MODELS_PRESET:-}" && -f "${ROOT_DIR}/${MODELS_PRESET}" ]]; then
 fi
 [[ -n "${CTX}" ]] || CTX="${CONTEXT_SIZE:-}"
 
+# Threads actually used: the preset's own key when it sets one (the tuner's
+# thread points do), else CPU_THREADS from .env, which is what the launcher
+# passes on the command line. Recorded next to the speed because it is a
+# tuned parameter: a decode number says little without the thread count that
+# produced it, and the tuner sweeps it like the offload split.
+THREADS=""
+if [[ -n "${MODELS_PRESET:-}" && -f "${ROOT_DIR}/${MODELS_PRESET}" ]]; then
+    THREADS="$(awk -v want="${MODEL_ALIAS}" '
+        /^\[/ { s = $0; gsub(/^\[|\].*$/, "", s); next }
+        /^[[:space:]]*[;#]/ || !/=/ { next }
+        s == want && /^[[:space:]]*threads[[:space:]]*=/ {
+            v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); gsub(/[[:space:]]+$/, "", v); print v; exit }' \
+        "${ROOT_DIR}/${MODELS_PRESET}")"
+fi
+[[ -n "${THREADS}" ]] || THREADS="${CPU_THREADS:-}"
+
 # ------------------------------------------------------------
 # Metrics
 # ------------------------------------------------------------
@@ -244,11 +260,11 @@ fi
 mkdir -p "$(dirname "${RESULTS}")"
 # json.dumps-style spacing (", " / ": ") so every row reads the same as the
 # backfilled ones: one style in the file, diff-friendly, still one line.
-printf '{"ts": "%s", "kind": "%s", "host": %s, "gpu": %s, "os": "%s", "mode": "%s", "engine": %s, "engine_build": %s, "model": %s, "model_file": %s, "ctx": %s, "params_b": %s, "params_active_b": %s, "moe": %s, "experts": %s, "n_layer": %s, "ctx_train": %s, "flags": %s, %s, "vram_mib": %s, "ram_used_gib": %s, "ram_free_gib": %s, "quiet": %s, "note": %s}\n' \
+printf '{"ts": "%s", "kind": "%s", "host": %s, "gpu": %s, "os": "%s", "mode": "%s", "engine": %s, "engine_build": %s, "model": %s, "model_file": %s, "ctx": %s, "threads": %s, "params_b": %s, "params_active_b": %s, "moe": %s, "experts": %s, "n_layer": %s, "ctx_train": %s, "flags": %s, %s, "vram_mib": %s, "ram_used_gib": %s, "ram_free_gib": %s, "quiet": %s, "note": %s}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${KIND}" "$(json_str "${HOST_SLUG}")" "$(json_str "${GPU}")" \
     "${OS}" "${DEPLOY_MODE:-native}" "$(json_str "${ENGINE:-llama.cpp}")" "$(json_str "${BUILD:-unknown}")" \
     "$(json_str "${MODEL_ALIAS}")" "$(json_str "${MODEL_FILE_SERVED:-${MODEL_FILE:-}}")" \
-    "$(json_num "${CTX}")" "$(json_num "${PARAMS_B}")" "$(json_num "${PARAMS_ACTIVE_B}")" \
+    "$(json_num "${CTX}")" "$(json_num "${THREADS}")" "$(json_num "${PARAMS_B}")" "$(json_num "${PARAMS_ACTIVE_B}")" \
     "$( [[ "${MOE}" == "yes" ]] && echo true || echo false )" "$( [[ -n "${EXPERTS}" ]] && json_str "${EXPERTS}" || echo null )" \
     "$(json_num "${N_LAYER}")" "$(json_num "${CTX_TRAIN}")" \
     "${FLAGS}" "${METRICS}" \

@@ -25,7 +25,10 @@
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--ink);
   font: 14px/1.45 ui-sans-serif, system-ui, "Segoe UI", sans-serif; }
-main { max-width: 1180px; margin: 0 auto; padding: 28px 16px 60px; }
+/* Wide by default: this page is mostly tables and charts, which read better
+   filling the window than in a narrow column. The cap only exists so an
+   ultrawide monitor does not stretch rows into unreadable lines. */
+main { max-width: 2200px; margin: 0 auto; padding: 28px 18px 60px; }
 header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 h1 { font: 600 22px/1.2 ui-monospace, "Cascadia Code", Consolas, monospace; margin: 0; letter-spacing: -.01em; }
 h1 b { color: var(--accent); }
@@ -246,18 +249,19 @@ function renderBoard(rows) {
     if (!(c in bestByClass) || (r.decode_median ?? 0) > bestByClass[c]) bestByClass[c] = r.decode_median;
   });
   let lastClass = null;
-  $("board").innerHTML = `<thead><tr><th>model</th><th>class</th><th>engine</th><th>params</th><th class="num">ctx</th><th class="num">decode med</th><th class="num">best</th>
+  $("board").innerHTML = `<thead><tr><th>model</th><th>class</th><th>engine</th><th>params</th><th class="num">ctx</th><th class="num">threads</th><th class="num">decode med</th><th class="num">best</th>
     <th class="num">MTP acc.</th><th class="num">prefill</th><th class="num">t/s per active B</th><th class="num">VRAM GB</th><th class="num">RAM GB</th><th>200K needle</th><th class="num">decode @depth</th><th>date</th><th>flags</th></tr></thead><tbody>` +
     lines.map(({ best: r, ev }) => {
       const needle = ev?.eval?.needle;
       const cls = classOf(r);
-      const head = cls !== lastClass ? `<tr><td colspan="16" class="classrow">${esc(cls)}</td></tr>` : "";
+      const head = cls !== lastClass ? `<tr><td colspan="17" class="classrow">${esc(cls)}</td></tr>` : "";
       lastClass = cls;
       return head + `<tr><td><span class="swatch" style="background:${colorOf(r.model)}"></span>${esc(r.model)}</td>
         <td class="flags">${esc(cls)}</td>
         <td>${esc(r.engine)} <span class="flags">${esc(r.engine_build)}</span></td>
         <td>${paramsCell(r)}</td>
         <td class="num">${r.ctx ? (r.ctx / 1024).toFixed(0) + "K" : "–"}</td>
+        <td class="num">${r.threads != null ? r.threads : "–"}</td>
         <td class="num ${r.decode_median === bestByClass[cls] ? "best" : ""}">${fmt(r.decode_median)}</td><td class="num">${fmt(r.decode_best)}</td>
         <td class="num">${r.draft_accept == null ? "–" : Math.round(r.draft_accept * 100) + "%"}</td>
         <td class="num">${fmt(r.prefill, 0)}</td><td class="num">${fmt(efficiency(r), 1)}</td>
@@ -309,7 +313,8 @@ function wireTip(pts) {
         `<b>${fmt(p.decode_median)}</b> t/s decode (best ${fmt(p.decode_best)})` +
         (p.draft_accept != null ? ` · MTP ${Math.round(p.draft_accept * 100)}%` : "") + `<br>` +
         `${fmt(p.prefill, 0)} t/s prefill · VRAM ${p.vram_mib ? fmt(p.vram_mib / 1024) : "–"} GB` +
-        (p.ram_used_gib != null ? ` · RAM ${fmt(p.ram_used_gib)} GB` : "") + `<br>` +
+        (p.ram_used_gib != null ? ` · RAM ${fmt(p.ram_used_gib)} GB` : "") +
+        (p.threads != null ? ` · ${p.threads} threads` : "") + `<br>` +
         `<span class="flags">${esc(flagStr(p.flags))}</span>` +
         (p.note ? `<br><i>${esc(p.note)}</i>` : "");
       tip.hidden = false;
@@ -338,6 +343,7 @@ const COLS = [
   ["engine_build", "build", (r) => esc(`${r.engine} ${r.engine_build}`)],
   ["model_stats", "params", (r) => paramsCell(r), false],
   ["ctx", "ctx", (r) => (r.ctx ? (r.ctx / 1024).toFixed(0) + "K" : "–"), true],
+  ["threads", "threads", (r) => (r.threads != null ? r.threads : "–"), true],
   ["decode", "decode", (r) => fmt(r.kind === "eval" ? r.eval?.decode_best : r.decode_median), true],
   ["prefill", "prefill", (r) => fmt(r.kind === "eval" ? r.eval?.needle_prefill : r.prefill, 0), true],
   ["vram_mib", "VRAM GB", (r) => (r.vram_mib ? fmt(r.vram_mib / 1024) : "–"), true],

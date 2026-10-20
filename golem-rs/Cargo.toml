@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/golem", "crates/golem-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# 1.81 is the second toolchain installed on the reference box; keep the
+# core buildable with it so the MSRV claim is honest.
+rust-version = "1.81"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
+strip = true

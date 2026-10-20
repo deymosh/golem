@@ -29,7 +29,13 @@ export LC_ALL=C
 #   --gate         run the needle eval on the winner (default on; the needle
 #                  is 200K tokens, or 90% of the model's context when that is
 #                  smaller - a 64K model cannot answer a 200K needle)
+#   --auto         tune every installed preset, keep the best that gates
+#                  (scripts/tune-auto.sh)
 #   --adopt        write ENGINE= and MODELS_PRESET= into .env for the winner
+#   --min-decode N / --min-prefill N / --min-depth-decode N
+#                  move the speed floor for this run (defaults from TUNE_MIN_*
+#                  in .env; see docs/plan-tune-model-context.md for why 25/350/15)
+#   --ctx N        pin the context instead of maximizing it; also TUNE_CTX_POLICY
 #   --no-refine    only sweep the offload split (skip batch/threads/spec)
 #   --dry-run      probe, print the plan, change nothing
 #
@@ -64,8 +70,18 @@ DRY_RUN=0
 REFINE=1
 CANDIDATES=""
 TARGET=""
+TARGET_GIVEN=0
 ENGINES_ARG=""
 ADOPT=0
+AUTO=0
+# Speed floor (docs/plan-tune-model-context.md): a candidate under it is
+# excluded from the ranking however fast its decode looks relative to worse
+# candidates. .env can move the defaults (TUNE_MIN_*); CLI flags move them
+# per run.
+MIN_DECODE="${TUNE_MIN_DECODE:-25}"
+MIN_PREFILL="${TUNE_MIN_PREFILL:-350}"
+MIN_DEPTH_DECODE="${TUNE_MIN_DEPTH_DECODE:-15}"
+CTX_POLICY="${TUNE_CTX_POLICY:-max}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -80,9 +96,14 @@ while [[ $# -gt 0 ]]; do
         --all-engines) ENGINES_ARG="__all__"; shift ;;
         --engine) ENGINES_ARG="$2"; shift 2 ;;
         --adopt) ADOPT=1; shift ;;
+        --auto) AUTO=1; shift ;;
+        --min-decode) MIN_DECODE="$2"; shift 2 ;;
+        --min-prefill) MIN_PREFILL="$2"; shift 2 ;;
+        --min-depth-decode) MIN_DEPTH_DECODE="$2"; shift 2 ;;
+        --ctx) CTX_POLICY="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         -*) echo "unknown arg: $1" >&2; exit 1 ;;
-        *) TARGET="$1"; shift ;;
+        *) TARGET="$1"; TARGET_GIVEN=1; shift ;;
     esac
 done
 TARGET="${TARGET:-${MODEL_ALIAS}}"
@@ -90,6 +111,30 @@ TARGET="${TARGET:-${MODEL_ALIAS}}"
 say() { echo "[ .. ] $*"; }
 ok()  { echo "[ OK ] $*"; }
 die() { echo "[FAIL] $*" >&2; exit 1; }
+
+# --auto tunes every installed preset and keeps the best one that passes the
+# gate: a different job, so it lives in its own driver (tune-auto.sh) with
+# this script as the per-preset worker. The flags are re-passed explicitly
+# (the originals are consumed by now) so the driver tunes with the same
+# settings the user asked for.
+if [[ "${AUTO}" == 1 ]]; then
+    if [[ "${TARGET_GIVEN}" == 1 ]]; then
+        die "--auto tunes every installed preset; drop the preset argument"
+    fi
+    FWD=(--runs "${RUNS}" --prefill "${PREFILL}"
+         --min-decode "${MIN_DECODE}" --min-prefill "${MIN_PREFILL}"
+         --min-depth-decode "${MIN_DEPTH_DECODE}")
+    if [[ "${ADOPT}" == 1 ]]; then FWD+=(--adopt); fi
+    if [[ "${REFINE}" == 0 ]]; then FWD+=(--no-refine); fi
+    if [[ "${CTX_POLICY}" != "max" ]]; then FWD+=(--ctx "${CTX_POLICY}"); fi
+    # A single named engine can be forwarded; a list or __all__ cannot (the
+    # driver sweeps whatever is installed, which is the point of --auto).
+    if [[ -n "${ENGINES_ARG}" && "${ENGINES_ARG}" != "__all__" \
+          && "${ENGINES_ARG}" != *,* && "${ENGINES_ARG}" != *" "* ]]; then
+        FWD+=(--engine "${ENGINES_ARG}")
+    fi
+    exec "${ROOT_DIR}/scripts/tune-auto.sh" "${FWD[@]}"
+fi
 
 # engine_ini <name> <key>: one key from engines/<name>/engine.ini
 engine_ini() {
@@ -135,6 +180,16 @@ ram_free_gb() {
 }
 RAM_FREE_GB="$(ram_free_gb)"
 CORES="$(nproc 2>/dev/null || echo 8)"
+# Physical cores (per socket). MSYS's /proc/cpuinfo lies about the count
+# (reports 10 on a 12-core hybrid), so only trust it on real Linux and ask
+# Windows otherwise. Topology tells the thread sweep where to probe: a hybrid
+# P/E CPU has logical < 2 x physical (i7-12700KF: 8P with HT + 4E = 20
+# logical / 12 physical), a plain SMT box has logical == 2 x physical.
+PHYS_CORES=""
+if ! uname -s | grep -qiE "mingw|msys|cygwin"; then
+    PHYS_CORES="$(awk '/^cpu cores/ {c=$4} END {print c+0}' /proc/cpuinfo 2>/dev/null)"
+fi
+[[ -n "${PHYS_CORES}" && "${PHYS_CORES}" -gt 0 ]] || PHYS_CORES="$(powershell.exe -NoProfile -Command '(Get-CimInstance Win32_Processor).NumberOfCores' 2>/dev/null | tr -d '\r' | head -n1)"
 
 # The cliff is a measured thing, not a number to guess at: when the driver
 # spills to system memory the prefill rate collapses (~40% on the reference
@@ -150,6 +205,12 @@ MODEL_FILE="$(preset_value "${TARGET}" model)"
 [[ -n "${MODEL_FILE}" ]] || die "preset [${TARGET}] not found in ${PRESET}"
 MODEL_PATH="${ROOT_DIR}/data/models/${MODEL_FILE}"
 [[ -f "${MODEL_PATH}" ]] || die "model file not found: ${MODEL_PATH} (run ./golem pull ${TARGET})"
+
+# The trained context (GGUF header, cached): the default ceiling for context
+# maximization - extrapolating past it worked in testing (the 0.5B passed a
+# 211K needle on a 32K-train model) but is per-model luck, so it must be
+# asked for with an explicit --ctx, never defaulted to.
+MODEL_CTX_TRAIN="$("${ROOT_DIR}/scripts/gguf-info.sh" "${MODEL_PATH}" 2>/dev/null | awk -F= '/^n_ctx_train/ {print $2}')"
 
 MODEL_GB="$(awk -v b="$(stat -c %s "${MODEL_PATH}" 2>/dev/null || echo 0)" 'BEGIN {printf "%.1f", b/1073741824}')"
 CTX="$(preset_value "${TARGET}" ctx-size)"
@@ -191,17 +252,15 @@ echo "  vram       ${VRAM_TOTAL} MiB total, ${VRAM_USED_NOW} MiB in use by the d
 echo "             wall ${WALL_MIB} MiB (seed heuristic; the real cliff shows up as a"
 echo "             prefill collapse during the sweep)"
 echo "  ram free   ${RAM_FREE_GB} GB   cpu ${CORES} threads   ctx ${CTX}   ubatch ${UB}"
+echo "  floors     decode >= ${MIN_DECODE} t/s, prefill >= ${MIN_PREFILL} t/s, at-depth >= ${MIN_DEPTH_DECODE} t/s"
+echo "  ctx        $( [[ "${CTX_POLICY}" == "max" ]] && echo "maximize (ceiling: the model's ${MODEL_CTX_TRAIN:-?}-token trained ctx)" || echo "pinned at ${CTX_POLICY}" )"
 
-# The gate asks for a 200K-token needle, which a model with a smaller context
-# cannot answer at all: use 90% of what it can actually serve (a 64K model is
-# gated at 57K, an 8K one at 7K). Without this, tuning any preset below 200K
-# context would fail every candidate and adopt nothing.
-GATE_TOKENS="${GATE_TOKENS:-200000}"
-if [[ -n "${CTX}" ]] && (( CTX > 0 )); then
-    GATE_MAX=$(( CTX * 9 / 10 ))
-    (( GATE_MAX < GATE_TOKENS )) && GATE_TOKENS="${GATE_MAX}"
-fi
-echo "  gate       needle of ${GATE_TOKENS} tokens$( (( GATE_TOKENS < 200000 )) && echo " (capped by the model's ${CTX}-token context)")"
+# The gate asks for a needle of up to 200K tokens (GATE_TOKENS caps it),
+# always at 90% of the context the candidate actually serves: asking a 64K
+# model for 200K would fail every candidate and adopt nothing. The final
+# number is computed per candidate in the gate loop, after maximization.
+GATE_TOKENS_MAX="${GATE_TOKENS:-200000}"
+echo "  gate       needle at 90% of each candidate's tuned context, up to ${GATE_TOKENS_MAX} tokens"
 
 # A game or a render job on the GPU makes every number noisy (decode varies
 # by several times with desktop load, measured). Downloads and builds are
@@ -381,17 +440,35 @@ for eng in ${SWEEPABLE}; do
     done
 
     # Refine the engine's best offload with the knobs the plan promised:
-    # prompt batch, thread count, and speculative decoding on/off. Bounded to
-    # three extra points per engine; --no-refine skips them.
+    # prompt batch, thread count, and speculative decoding on/off - a handful
+    # of extra points per engine; --no-refine skips them.
     if [[ "${REFINE}" == 1 && -n "${BEST_LOCAL}" ]]; then
         echo "  --- ${eng}: refining n-cpu-moe ${BEST_LOCAL} (batch, threads, spec)"
         base=("n-cpu-moe = ${BEST_LOCAL}" "fit = off")
         if [[ -n "${UB}" && "${UB}" != "1024" ]]; then
             measure "${eng}" "${eng}-ub1024" "${base[@]}" "ubatch-size = 1024" || true
         fi
+        # Threads: probe the neighborhoods the CPU topology makes promising
+        # (measured on the reference box, docs/models.md "Threads": 16 of 20
+        # = P-cores with hyperthreads beats all 20 by ~8% - E-cores add sync
+        # overhead when decode streams RAM-resident experts - and 8 P-only by
+        # ~5%). Hybrid CPU: {P, 2P, all}; plain SMT: {physical, all-2, all}.
+        # Deduplicated, the one equal to the server default skipped.
         if [[ -n "${CORES}" && "${CORES}" -gt 4 ]]; then
-            HALF=$(( CORES / 2 ))
-            [[ "${HALF}" != "${CPU_THREADS:-}" ]] && measure "${eng}" "${eng}-t${HALF}" "${base[@]}" "threads = ${HALF}" || true
+            if [[ -n "${PHYS_CORES}" && "${PHYS_CORES}" -gt 0 ]] && (( PHYS_CORES * 2 > CORES )); then
+                P_N=$(( CORES - PHYS_CORES ))
+                TSET="${P_N} $(( P_N * 2 )) ${CORES}"
+            else
+                TSET="${PHYS_CORES:-$(( CORES / 2 ))} $(( CORES - 2 )) ${CORES}"
+            fi
+            SEEN_T=" "
+            for t in ${TSET}; do
+                if [[ "${SEEN_T}" == *" ${t} "* ]]; then continue; fi
+                SEEN_T="${SEEN_T}${t} "
+                if (( t > 0 )) && [[ "${t}" != "${CPU_THREADS:-}" ]]; then
+                    measure "${eng}" "${eng}-t${t}" "${base[@]}" "threads = ${t}" || true
+                fi
+            done
         fi
         if [[ "$(preset_value "${TARGET}" spec-type)" == "draft-mtp" && "${MODEL_HAS_MTP}" == "1" ]]; then
             measure "${eng}" "${eng}-nospec" "${base[@]}" "spec-type = none" || true
@@ -426,9 +503,20 @@ for k in "${POINTS[@]}"; do
         echo "  ${eng} ${k##*|}: prefill ${RESULT_PRE[${k}]} far under ${eng}'s own ${ENG_MAXPRE[${eng}]} - spilling, excluded"
         continue
     fi
+    # The speed floor is absolute, not relative: however good a point looks
+    # next to worse points, an unusable setup must never win (docs/plan-
+    # tune-model-context.md). Excluded points stay recorded, just not ranked.
+    if awk -v d="${RESULT_DEC[${k}]}" -v m="${MIN_DECODE}" 'BEGIN {exit !(d+0 < m)}'; then
+        echo "  ${eng} ${k##*|}: decode ${RESULT_DEC[${k}]} t/s under the ${MIN_DECODE} t/s floor - excluded"
+        continue
+    fi
+    if awk -v p="${RESULT_PRE[${k}]}" -v m="${MIN_PREFILL}" 'BEGIN {exit !(p+0 < m)}'; then
+        echo "  ${eng} ${k##*|}: prefill ${RESULT_PRE[${k}]} t/s under the ${MIN_PREFILL} t/s floor - excluded"
+        continue
+    fi
     RANKED+=("${k}")
 done
-[[ ${#RANKED[@]} -gt 0 ]] || die "every candidate spilled (prefill under 75% of its engine's best) - the card is too small for this context"
+[[ ${#RANKED[@]} -gt 0 ]] || die "every candidate was excluded (spilling, or under the speed floor decode >= ${MIN_DECODE} / prefill >= ${MIN_PREFILL} t/s) - lower the floors (--min-decode/--min-prefill, TUNE_MIN_* in .env) or pick a smaller context"
 
 # sort by decode, best first
 mapfile -t SORTED < <(for k in "${RANKED[@]}"; do printf '%s %s\n' "${RESULT_DEC[${k}]}" "${k}"; done | sort -gr | awk '{print $2}')
@@ -492,10 +580,72 @@ write_overlay() {
     echo "${EFFECTIVE}"
 }
 
+# The context a candidate point serves: its own ctx-size override, else the
+# preset's, else the engine default (= the model's trained ctx, observed).
+cand_ctx() {
+    local v
+    v="$(tr ';' '\n' <<<"${RESULT_OV[$1]}" | sed -n 's/^ctx-size = //p' | tail -n1)"
+    [[ -n "${v}" ]] || v="${CTX:-${MODEL_CTX_TRAIN:-4096}}"
+    echo "${v}"
+}
+
+# Context maximization (docs/plan-tune-model-context.md): the preset's ctx is
+# a starting point, not a ceiling - a model that truly serves more should not
+# sit low because a smoke-test preset said so. Grow the winner's context
+# toward the model's trained ctx (or a pinned --ctx) while the card holds and
+# the decode floor is met; every rung is a recorded point like any other.
+# Sets MAX_KEY to the final measured point; empty = keep the candidate as is.
+MAX_KEY=""
+maximize_ctx() {
+    local key="$1" eng="$2" cur next mid
+    local -a ovs=()
+    mapfile -t ovs < <(tr ';' '\n' <<<"${RESULT_OV[${key}]}" | grep -v '^$')
+    if [[ "${CTX_POLICY}" != "max" ]]; then
+        # Pinned: one rung straight to the pin, up or down.
+        cur="${CTX_POLICY}"
+        if measure "${eng}" "${eng}-ctx${cur}" "${ovs[@]}" "ctx-size = ${cur}"; then
+            MAX_KEY="${eng}|${eng}-ctx${cur}"
+        fi
+        return
+    fi
+    cur="${CTX:-4096}"
+    local ceiling="${MODEL_CTX_TRAIN:-${cur}}"
+    while :; do
+        next=$(( cur * 2 ))
+        if (( next > ceiling )); then next="${ceiling}"; fi
+        if (( next <= cur )); then break; fi
+        if ! measure "${eng}" "${eng}-ctx${next}" "${ovs[@]}" "ctx-size = ${next}"; then break; fi
+        if awk -v v="${M_VRAM}" -v w="${WALL_MIB}" 'BEGIN {exit !(v+0 > w)}' \
+           || awk -v d="${M_DEC}" -v m="${MIN_DECODE}" 'BEGIN {exit !(d+0 < m)}'; then
+            # Over the VRAM wall or under the floor: one midpoint probe, then
+            # stop - finer steps are noise at this point in the sweep.
+            mid=$(( (cur + next) / 2 ))
+            if (( mid > cur )) \
+               && measure "${eng}" "${eng}-ctx${mid}" "${ovs[@]}" "ctx-size = ${mid}" \
+               && ! awk -v v="${M_VRAM}" -v w="${WALL_MIB}" 'BEGIN {exit !(v+0 > w)}' \
+               && ! awk -v d="${M_DEC}" -v m="${MIN_DECODE}" 'BEGIN {exit !(d+0 < m)}'; then
+                MAX_KEY="${eng}|${eng}-ctx${mid}"
+            fi
+            break
+        fi
+        cur="${next}"; MAX_KEY="${eng}|${eng}-ctx${next}"
+        say "context grows to ${cur} (${M_DEC} t/s decode, ${M_VRAM} MiB VRAM)"
+    done
+}
+
 WINNER=""; WINNER_ENG=""; WINNER_N=""
 for k in "${SORTED[@]}"; do
     eng="${RESULT_ENG[${k}]}"; n="${RESULT_N[${k}]:-?}"
     ok "candidate winner: ${eng} ${k##*|} (${RESULT_DEC[${k}]} t/s decode, ${RESULT_PRE[${k}]} t/s prefill, ${RESULT_VRAM[${k}]} MiB VRAM)"
+    MAX_KEY=""
+    maximize_ctx "${k}" "${eng}"
+    if [[ -n "${MAX_KEY}" ]]; then
+        k="${MAX_KEY}"
+        say "context maximized: ${eng} now serves $(cand_ctx "${k}") tokens"
+    fi
+    CAND_CTX="$(cand_ctx "${k}")"
+    GATE_MAX=$(( CAND_CTX * 9 / 10 ))
+    if (( GATE_MAX < GATE_TOKENS_MAX )); then GATE_TOKENS="${GATE_MAX}"; else GATE_TOKENS="${GATE_TOKENS_MAX}"; fi
     EFFECTIVE="$(write_overlay "${eng}" "${k}")"
 
     if [[ "${GATE}" != 1 ]]; then WINNER="${k}"; WINNER_ENG="${eng}"; WINNER_N="${n}"; break; fi
@@ -508,13 +658,29 @@ for k in "${SORTED[@]}"; do
         curl -s --noproxy '*' -m 3 "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1 && break
         sleep 5
     done
-    if ( cd "${ROOT_DIR}" && GOLEM_MODEL_ALIAS="${TARGET}" \
-        ./golem eval --long "${GATE_TOKENS}" 2>&1 | grep -q "long_ctx_${GATE_TOKENS}=PASS" ); then
+    EVAL_OUT="$( cd "${ROOT_DIR}" && GOLEM_MODEL_ALIAS="${TARGET}" \
+        ./golem eval --long "${GATE_TOKENS}" 2>&1 || true )"
+    grep '^RESULT' <<<"${EVAL_OUT}" | tail -n1 | sed 's/^/    /'
+    if grep -q "long_ctx_${GATE_TOKENS}=PASS" <<<"${EVAL_OUT}"; then
+        # A context you cannot use at depth is a fake win: the eval measures
+        # decode at full depth, and the floor applies to it too.
+        DEPTH_DEC="$(grep -o 'gen_tok_s_at_depth=[0-9.]*' <<<"${EVAL_OUT}" | cut -d= -f2)"
+        if [[ -n "${DEPTH_DEC}" ]] && awk -v d="${DEPTH_DEC}" -v m="${MIN_DEPTH_DECODE}" 'BEGIN {exit !(d > 0 && d < m)}'; then
+            echo "  [WARN] decode at depth ${DEPTH_DEC} t/s under the ${MIN_DEPTH_DECODE} t/s floor for ${eng} + n-cpu-moe ${n} - trying the next candidate"
+            continue
+        fi
         ok "eval gate PASSED"
         WINNER="${k}"; WINNER_ENG="${eng}"; WINNER_N="${n}"
         break
     fi
     echo "  [WARN] eval gate FAILED for ${eng} + n-cpu-moe ${n} - trying the next candidate"
+    # Say why. A gate can fail with no RESULT line at all (the eval died in an
+    # earlier section, e.g. the server refused the request), and without this
+    # the failure is indistinguishable from a missed needle.
+    if ! grep -q '^RESULT' <<<"${EVAL_OUT}"; then
+        echo "        (the eval produced no RESULT line; its last lines were:)"
+    fi
+    tail -n 4 <<<"${EVAL_OUT}" | sed 's/^/        | /'
 done
 
 [[ -n "${WINNER}" ]] || die "no candidate passed the eval gate; nothing adopted"
@@ -530,6 +696,7 @@ VERDICT="${OUT_DIR}/winner.txt"
     echo "date       $(date -u +%Y-%m-%dT%H:%MZ)"
     echo "engine     ${WINNER_ENG}"
     echo "n-cpu-moe  ${WINNER_N}"
+    echo "ctx        $(cand_ctx "${WINNER}")"
     echo "decode     ${RESULT_DEC[${WINNER}]} t/s (median), prefill ${RESULT_PRE[${WINNER}]} t/s, vram ${RESULT_VRAM[${WINNER}]} MiB"
     echo "eval       $( [[ "${GATE}" == 1 ]] && echo "${GATE_TOKENS}-token needle PASS" || echo "not run" )"
     echo
@@ -544,6 +711,10 @@ echo
 ok "winner: ${WINNER_ENG} with n-cpu-moe ${WINNER_N} - ${RESULT_DEC[${WINNER}]} t/s decode, ${RESULT_PRE[${WINNER}]} t/s prefill"
 ok "overlay: ${OUT_DIR}/${WINNER_ENG}/${TARGET}.ini"
 ok "verdict: ${VERDICT#"${ROOT_DIR}/"}"
+
+# One machine-readable line for the drivers (tune-auto.sh ranks on it), in
+# the same RESULT idiom the bench and eval scripts use.
+echo "RESULT tune_preset=${TARGET} engine=${WINNER_ENG} n_cpu_moe=${WINNER_N} ctx=$(cand_ctx "${WINNER}") decode=${RESULT_DEC[${WINNER}]} prefill=${RESULT_PRE[${WINNER}]} vram=${RESULT_VRAM[${WINNER}]}"
 
 if [[ "${ADOPT}" == 1 ]]; then
     cp -f "${ROOT_DIR}/.env" "${ROOT_DIR}/.env.bak"
