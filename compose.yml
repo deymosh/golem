@@ -1,15 +1,14 @@
 # Golem - local AI stack in Docker.
 #
-#   docker compose --profile cuda up -d     # or --profile rocm; ./golem
-#                                           # resolves GPU_BACKEND itself
+#   docker compose --profile cuda up -d     # or --profile rocm
 #
-# One inference service, two variants picked by compose profile (the golem
-# script maps GPU_BACKEND to COMPOSE_PROFILES; `auto` - the default -
-# detects the vendor, so plain users never set anything):
+# One inference service, two variants picked by compose profile. The profile
+# is the vendor: `GPU_BACKEND = "rocm"` in golem.toml is what the native path
+# reads, and here the same choice is the profile name.
 #   inference-cuda   NVIDIA
 #   inference-rocm   AMD
-# A bare `docker compose up` selects no profile and starts nothing - use
-# ./golem, or pass --profile cuda / --profile rocm yourself.
+# A bare `docker compose up` selects no profile and starts nothing - pass
+# --profile cuda / --profile rocm yourself.
 #
 # The image is this repository's Dockerfile: the golem binary, the pinned
 # engine baked in by `golem install`, and `golem service --up` as PID 1.
@@ -31,15 +30,14 @@ x-inference: &inference
   container_name: golem-inference
   restart: unless-stopped
 
-  # The binary reads its configuration from /golem/.env (golem.toml first,
-  # then .env), so the host's .env configures the container the same way it
-  # configures every other front door. Read-write, because `tune --adopt`
-  # and the console's model edits write back to it. LOCAL_AI_HOST stays a
-  # host-side concern: GOLEM_LOCAL_AI_HOST pins the in-container bind to
-  # 0.0.0.0 whatever the file says, since the port is published, not
-  # loopback.
+  # The binary reads its configuration from /golem/golem.toml, so the host's
+  # file configures the container the same way it configures every other
+  # front door. Read-write, because `tune --adopt` and the console's model
+  # edits write back to it. LOCAL_AI_HOST stays a host-side concern:
+  # GOLEM_LOCAL_AI_HOST pins the in-container bind to 0.0.0.0 whatever the
+  # file says, since the port is published, not loopback.
   volumes:
-    - ./.env:/golem/.env
+    - ./golem.toml:/golem/golem.toml
     - ./data/models:/golem/data/models
     - ./data/cache:/golem/data/cache
     - ./data/tuned:/golem/data/tuned
@@ -87,8 +85,8 @@ services:
   inference-rocm:
     <<: *inference
     profiles: ["rocm"]
-    # Active when GPU_BACKEND resolves to rocm (auto-detect, or set
-    # GPU_BACKEND="rocm" in .env; ./golem maps it to COMPOSE_PROFILES).
+    # Active when GPU_BACKEND resolves to rocm (auto-detect, or `GPU_BACKEND =
+    # "rocm"` in golem.toml; compose selects the profile here).
     # /dev/kfd (compute) + /dev/dri (display) grant GPU access on Linux; no
     # --gpus and no NVIDIA_* env here. The engine pin is the adapter's
     # `build`, same eval-gated rule as the CUDA one.

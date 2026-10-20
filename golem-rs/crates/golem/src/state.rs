@@ -56,7 +56,7 @@ pub fn override_value(home: &Path, override_key: &str, key: &str) -> Option<Stri
 /// Write `key="value"` into the home's `.env`.
 ///
 /// Every line that assigns `key` is replaced - including a commented-out one,
-/// which is how `scripts/web.ps1`'s `Env-Set` behaves, and how `.env.example`
+/// which is how `scripts/web.ps1`'s `Env-Set` behaves, and how `golem.toml.example`
 /// ships the optional keys - and the key is appended when the file has none.
 /// The line ending the file already uses is kept.
 pub fn env_set(home: &Path, key: &str, value: &str) -> std::io::Result<()> {
@@ -314,8 +314,22 @@ pub fn snapshot(home: &Path, job: &SharedJob) -> Snapshot {
 }
 
 /// The tail of the engine's log, for `api/logs`.
+/// The engine's own log, under `logs/`. One name for every platform: the
+/// `-windows` suffix was a mode, and there are no modes any more. It lives
+/// here rather than in `launch` because reading it is this module's job -
+/// the screen's pane and the console's `api/logs` both go through
+/// [`log_tail`] - and because a test that pulls `state` in by path would
+/// otherwise need all of `launch` and its imports with it.
+pub const LOG_NAME: &str = "llama-server.log";
+
 pub fn log_tail(home: &Path, lines: usize) -> (String, String) {
+    // The engine's own log first, by the name the binary starts it with.
+    // The two names after it are what older launchers wrote, and they are
+    // *stale* files on a machine that has run those: a pane that reads them
+    // shows a log from before the rename and looks like the engine went
+    // quiet.
     let candidates = [
+        home.join("logs").join(LOG_NAME),
         home.join("logs/llama-server-windows.log"),
         home.join("logs/local-ai.log"),
         home.join("logs/web-job.log"),

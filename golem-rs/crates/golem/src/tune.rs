@@ -42,7 +42,7 @@ use golem_core::gguf;
 use golem_core::ini::{self, Entry};
 use golem_core::results::Kind;
 use golem_core::time;
-use golem_core::tune::{self, Floor, Point, Rung, RungOutcome};
+use golem_core::tune::{self, Floor, Point, Probe, Rung, RungOutcome};
 
 use crate::runner;
 use crate::engine;
@@ -90,6 +90,16 @@ const SEED_STEPS_UP: u32 = 6;
 /// so a pathological measurement cannot turn the search into a walk.
 const MAX_BISECT: usize = 8;
 
+/// How close to the decode floor a split has to be before the thread probe is
+/// worth a model load.
+///
+/// Threads move decode by a few percent (16 of 20 threads beat all 20 by ~8%
+/// on the reference box), so a setup already well clear of the floor is not
+/// one a thread count rescues - and the probe is a whole load, which is what
+/// this tuner is spending its budget on. Within a quarter of the floor, the
+/// knob can still be the difference between passing and failing.
+const THREAD_PROBE_MARGIN: f64 = 1.25;
+
 /// `golem tune [preset] [flags]`.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -113,10 +123,15 @@ pub struct Options {
 /// How far the context may grow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CtxPolicy {
-    /// Grow until the card or the decode floor stops it (`TUNE_CTX_POLICY=max`).
+    /// Predict the ceiling from the points measured so far and confirm it
+    /// (`TUNE_CTX_POLICY=max`, the default).
     Max,
     /// Serve exactly this (`--ctx N`, or `TUNE_CTX_POLICY=<number>`).
     Pinned(u64),
+    /// The doubling ladder, one midpoint probe after a failure - what `Max`
+    /// was before the prediction, and reachable with `--ctx-ladder` until a
+    /// measured sweep says the prediction is at least as good.
+    Ladder,
 }
 
 impl Default for Options {
@@ -158,7 +173,9 @@ impl Options {
             opts.floor.depth_decode = v;
         }
         if let Some(v) = state::env_value(home, "TUNE_CTX_POLICY") {
-            if v != "max" {
+            if v == "ladder" {
+                opts.ctx = CtxPolicy::Ladder;
+            } else if v != "max" {
                 if let Ok(n) = v.parse() {
                     opts.ctx = CtxPolicy::Pinned(n);
                 }
@@ -218,6 +235,10 @@ impl Options {
                         CtxPolicy::Pinned(number(&pin)? as u64)
                     };
                 }
+                // The ladder the prediction replaced, kept reachable until a
+                // real sweep has been compared against it
+                // (docs/plan-smart-tune.md, step 4).
+                "--ctx-ladder" => opts.ctx = CtxPolicy::Ladder,
                 "--auto" => {
                     return Err("--auto is the driver in crate::auto_tune, not this \
                                 sweep: it ranks the installed presets and calls this \
@@ -397,6 +418,14 @@ fn slug(text: &str) -> String {
         }
     }
     out.trim_matches('-').to_string()
+}
+
+/// Whether the thread probe is worth a load at this decode.
+///
+/// Pure, and separate from the probe itself, because the answer is the whole
+/// reason the knob is not swept: see [`THREAD_PROBE_MARGIN`].
+fn thread_probe_worth_it(decode: f64, floor: f64) -> bool {
+    decode <= floor * THREAD_PROBE_MARGIN
 }
 
 /// The `[0-9]*th gen` in a CPU's marketing name ("12th Gen Intel...").
@@ -711,7 +740,11 @@ impl<'a> Tuner<'a> {
         let m = &self.machine;
         let ctx = match self.opts.ctx {
             CtxPolicy::Max => format!(
-                "maximize (ceiling: the model's {}-token trained ctx)",
+                "predict (ceiling: the model's {}-token trained ctx, confirmed by measurement)",
+                self.ctx_ceiling
+            ),
+            CtxPolicy::Ladder => format!(
+                "ladder (ceiling: the model's {}-token trained ctx)",
                 self.ctx_ceiling
             ),
             CtxPolicy::Pinned(n) => format!("pinned at {n}"),
@@ -916,8 +949,11 @@ impl<'a> Tuner<'a> {
         }
 
         // One thread point: the count the topology makes promising, and only
-        // when it differs from what the preset already serves.
-        if self.machine.cores > 4 {
+        // when it differs from what the preset already serves *and* when the
+        // decode is close enough to the floor that the knob could decide
+        // anything. A split already clear of the floor is not one a thread
+        // count rescues, and the probe is a whole model load.
+        if self.machine.cores > 4 && self.decode_at(engine, best).is_some_and(|d| thread_probe_worth_it(d, self.opts.floor.decode)) {
             let default =
                 state::env_value(self.home, "CPU_THREADS").and_then(|v| v.parse().ok()).unwrap_or(0);
             if let Some(t) = self.thread_candidates().first().copied().filter(|t| *t > 0) {
@@ -935,6 +971,16 @@ impl<'a> Tuner<'a> {
             overrides.push(Entry::new("spec-type", "none"));
             self.measure(engine, &format!("{engine}-nospec"), &overrides);
         }
+    }
+
+    /// The best decode measured at one split, or `None` when nothing was.
+    fn decode_at(&self, engine: &str, n_cpu_moe: u32) -> Option<f64> {
+        self.points
+            .iter()
+            .filter(|p| p.engine == engine)
+            .filter(|p| p.n_cpu_moe.parse::<u32>().ok() == Some(n_cpu_moe))
+            .map(|p| p.decode)
+            .fold(None, |best: Option<f64>, d| Some(best.map_or(d, |b| b.max(d))))
     }
 
     /// The thread counts worth probing on this CPU.
@@ -1391,10 +1437,17 @@ impl<'a> Tuner<'a> {
 
     /// Grow the winner's context toward the ceiling while the card holds.
     ///
-    /// The ladder itself is `golem_core::tune::next_context` - doubling, then
-    /// one midpoint probe after a failure - so what is here is only the
-    /// measuring and the two stopping conditions: over the VRAM wall, or
-    /// under the decode floor. Returns the index of the point to serve.
+    /// The rule is `golem_core::tune::next_predicted`: two measured points at
+    /// one split give VRAM per context token, and the largest context that
+    /// fits under the wall is arithmetic from there - so the ladder's four
+    /// doublings become one confirmation. What is here is the measuring and
+    /// the two ways a probe fails, which the rule needs told apart: over the
+    /// VRAM wall is a real point, under the decode floor is a spill whose
+    /// VRAM reading means nothing.
+    ///
+    /// `--ctx-ladder` runs the doubling ladder instead, until a measured
+    /// sweep says the prediction is at least as good
+    /// (docs/plan-smart-tune.md, step 4).
     fn maximize_ctx(&mut self, candidate: usize) -> usize {
         let engine = self.points[candidate].engine.clone();
         let overrides = self.points[candidate].overrides.clone();
@@ -1409,12 +1462,21 @@ impl<'a> Tuner<'a> {
             return candidate;
         }
 
+        if self.opts.ctx == CtxPolicy::Ladder {
+            return self.maximize_ctx_ladder(candidate, &engine, &overrides);
+        }
+
         let mut current = self.ctx_seed;
         let ceiling = self.ctx_ceiling.max(current);
+        let wall = self.machine.wall_mib();
         let mut best = candidate;
-        let mut last = RungOutcome::Starting;
+        // The points that fit, as (context, VRAM MiB) - the slope comes from
+        // the two highest of them, and a failed probe is not one of them
+        // unless it went over the wall, where it is a real measurement.
+        let mut fits: Vec<(u64, u64)> = Vec::new();
+        let mut probe = Probe::None;
         loop {
-            let next = match tune::next_context(current, ceiling, last.clone()) {
+            let next = match tune::next_predicted(&fits, wall, ceiling, &probe) {
                 Rung::Stop => break,
                 Rung::Grow(next) => next,
             };
@@ -1425,6 +1487,72 @@ impl<'a> Tuner<'a> {
                 break;
             }
             let measured = self.points.len() - 1;
+            let vram = self.points[measured].vram_mib;
+            let decode = self.points[measured].decode;
+            let over_wall = vram > wall as f64;
+            let under_floor = decode < self.opts.floor.decode;
+            if over_wall || under_floor {
+                // Under the floor wins when both are true: the spill is what
+                // made the decode slow, and the VRAM reading is where the
+                // spill ended up rather than what the context costs - which
+                // is the case the prediction must not treat as a point.
+                probe = if under_floor {
+                    Probe::UnderFloor { attempt: next }
+                } else {
+                    Probe::OverWall { attempt: next, vram_mib: vram as u64 }
+                };
+                self.emit(format_args!(
+                    "  context {next} does not fit ({:.1} t/s decode, {:.0} MiB VRAM{})",
+                    decode,
+                    vram,
+                    if under_floor { ", spilled" } else { "" }
+                ));
+                continue;
+            }
+            current = next;
+            best = measured;
+            fits.push((next, vram as u64));
+            probe = Probe::Fits;
+            self.emit(format_args!(
+                "  context grows to {current} ({:.1} t/s decode, {:.0} MiB VRAM)",
+                self.points[best].decode, self.points[best].vram_mib
+            ));
+        }
+        if best != candidate {
+            self.emit(format_args!("[ .. ] context maximized: {engine} now serves {} tokens", self.points[best].ctx));
+        }
+        best
+    }
+
+    /// The doubling ladder, kept for `--ctx-ladder`.
+    ///
+    /// `golem_core::tune::next_context`: double toward the ceiling, and after
+    /// a failed rung try one midpoint. It is what the prediction replaced,
+    /// and it stays reachable until a measured sweep compares the two
+    /// (docs/plan-smart-tune.md, step 4) - a tuner that finds a different
+    /// answer in fewer loads is only a win if the answer is at least as good.
+    fn maximize_ctx_ladder(
+        &mut self,
+        candidate: usize,
+        engine: &str,
+        overrides: &[Entry],
+    ) -> usize {
+        let mut current = self.ctx_seed;
+        let ceiling = self.ctx_ceiling.max(current);
+        let mut best = candidate;
+        let mut last = RungOutcome::Starting;
+        loop {
+            let next = match tune::next_context(current, ceiling, last.clone()) {
+                Rung::Stop => break,
+                Rung::Grow(next) => next,
+            };
+            let mut with_ctx = overrides.to_vec();
+            with_ctx.push(Entry::new("ctx-size", next.to_string()));
+            let label = format!("{engine}-ctx{next}");
+            if self.measure(engine, &label, &with_ctx).is_none() {
+                break;
+            }
+            let measured = self.points.len() - 1;
             let over_wall = self.points[measured].vram_mib > self.machine.wall_mib() as f64;
             let under_floor = self.points[measured].decode < self.opts.floor.decode;
             if over_wall || under_floor {
@@ -1432,10 +1560,10 @@ impl<'a> Tuner<'a> {
                 // then stop: finer steps are noise at this point.
                 last = RungOutcome::Failed { attempt: next };
                 if let Rung::Grow(mid) = tune::next_context(current, ceiling, last.clone()) {
-                    let mut with_mid = overrides.clone();
+                    let mut with_mid = overrides.to_vec();
                     with_mid.push(Entry::new("ctx-size", mid.to_string()));
                     let mid_label = format!("{engine}-ctx{mid}");
-                    if self.measure(&engine, &mid_label, &with_mid).is_some() {
+                    if self.measure(engine, &mid_label, &with_mid).is_some() {
                         let at = self.points.len() - 1;
                         if self.points[at].vram_mib <= self.machine.wall_mib() as f64
                             && self.points[at].decode >= self.opts.floor.decode
@@ -1455,7 +1583,10 @@ impl<'a> Tuner<'a> {
             ));
         }
         if best != candidate {
-            self.emit(format_args!("[ .. ] context maximized: {engine} now serves {} tokens", self.points[best].ctx));
+            self.emit(format_args!(
+                "[ .. ] context maximized: {engine} now serves {} tokens",
+                self.points[best].ctx
+            ));
         }
         best
     }
@@ -1756,6 +1887,18 @@ mod tests {
         assert_eq!(tuner.thread_candidates(), vec![4, 6, 8]);
     }
 
+    #[test]
+    fn the_thread_probe_is_spent_only_near_the_floor() {
+        // The knob is worth a model load when decode is close enough to the
+        // floor that a few percent decides it, and not otherwise: the
+        // reference box's 62 t/s against a 25 t/s floor is 2.5x clear.
+        assert!(!thread_probe_worth_it(62.0, 25.0), "62 t/s is not near a 25 t/s floor");
+        assert!(thread_probe_worth_it(30.0, 25.0), "30 t/s is");
+        assert!(thread_probe_worth_it(25.0, 25.0), "and so is exactly the floor");
+        assert!(thread_probe_worth_it(31.0, 25.0), "31 is inside the margin");
+        assert!(!thread_probe_worth_it(31.5, 25.0), "31.5 is outside it");
+    }
+
     /// A tuner with only what the thread sweep reads.
     fn machine_with(cores: u32, physical: u32) -> Tuner<'static> {
         tuner_at(Path::new("."), cores, physical)
@@ -1846,6 +1989,17 @@ mod tests {
         assert_eq!(opts.floor.depth_decode, 15.0, "the one .env did not move");
         assert_eq!(opts.ctx, CtxPolicy::Pinned(65536));
         assert!(opts.gate && opts.refine && !opts.dry_run);
+
+        // The ladder is what `max` was before the prediction: still reachable,
+        // from the file or from the flag, until a sweep compares the two.
+        std::fs::write(dir.join(".env"), "TUNE_CTX_POLICY=ladder\n").expect("write");
+        assert_eq!(Options::parse(&dir, &[]).expect("ladder").ctx, CtxPolicy::Ladder);
+        let ladder: Vec<String> =
+            ["smoke", "--ctx-ladder"].iter().map(|s| s.to_string()).collect();
+        std::fs::write(dir.join(".env"), "TUNE_CTX_POLICY=max\n").expect("write");
+        assert_eq!(Options::parse(&dir, &ladder).expect("flag").ctx, CtxPolicy::Ladder);
+        // And the default is the prediction.
+        assert_eq!(Options::parse(&dir, &[]).expect("max").ctx, CtxPolicy::Max);
 
         let args: Vec<String> = ["smoke", "--runs", "1", "--prefill", "0", "--no-gate", "--no-refine",
                                 "--candidates", "2,4,6", "--engine", "llama.cpp", "--min-decode", "5",

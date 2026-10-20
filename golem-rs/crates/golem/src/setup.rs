@@ -389,9 +389,9 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
     report.ok(&format!("Config directory       : {}", config_dir.display()));
     report.ok(&format!("Local build/state dir  : {}", local_dir.display()));
     report.ok(&format!("Logs directory         : {}", logs_dir.display()));
-    if !home.join(".env").is_file() && home.join(".env.example").is_file() {
-        report.warn("No .env yet - copy it before running the other scripts:");
-        report.line("    cp .env.example .env");
+    if !home.join("golem.toml").is_file() {
+        report.warn("No golem.toml yet - the binary writes one beside itself on first run:");
+        report.line("    golem up   (or golem install, which only fetches the engine)");
     }
 
     // ---- 15. git ---------------------------------------------------------

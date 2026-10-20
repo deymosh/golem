@@ -178,7 +178,7 @@ fn a_section_the_alias_names_is_refused_rather_than_served_empty() {
 
 #[test]
 fn no_preset_resolves_the_env_flag_set() {
-    // `.env.example` ships `MODELS_PRESET` commented out, so this is the shape
+    // `golem.toml.example` ships `MODELS_PRESET` commented out, so this is the shape
     // a fresh clone has: `.env` is the configuration, and the launcher builds
     // its flags from it - `MODEL_FILE`, `CONTEXT_SIZE`, `GPU_LAYERS`, the
     // cache types, `LOAD_MODE`, `SPEC_TYPE`, `DRAFT_FILE`, `EXTRA_ARGS`. This

@@ -208,10 +208,21 @@ As of 2026-10-20 (`experiment/token-machine`):
   launcher was left on the measuring path either; `driver.rs`, `launch::Outcome` and
   `service::HAND_BACK` are deleted with them, and an engine that installs itself (Strata) is
   refused by name instead of handed back. `docs/plan-launchers.md` is done.
-- **Next**: [plan-smart-tune.md](plan-smart-tune.md) step 2 - the context prediction, then
-  one full `tune` end to end on a free desktop - and the release tag, which is a push and
-  the user's call. The tray and the logo stay open (a GUI toolkit and an asset the repo does
-  not carry).
+- **The screen was reported broken and is fixed** (2026-10-20, the user's own report:
+  Enter did nothing, it felt slow and took a while to open). Three real defects: the runner
+  sent `status` to the service, so a *read* spawned a supervisor and blocked the UI for 4.7s
+  (`Plan::Read` answers reads locally now); the event loop was synchronous, so any action
+  froze the screen (actions run on a thread and the loop polls); and the log pane read the
+  pre-rename file names, so it showed a stale log on this box and the *job* log on a clean
+  one. The rest of the slowness was one timeout, not the screen: a connect to a closed
+  loopback port is dropped rather than refused on this box (2.07s), and the connect timeout
+  is 500ms now - a cold service start went 4.7s to 648ms. The menu also stops at its ends
+  instead of wrapping, and the screen paints before it reads the machine.
+- **Next**: [plan-smart-tune.md](plan-smart-tune.md) step 4 - one full `tune` end to end on a
+  free desktop, against the sweep's own load count and verdict. Steps 1-3 are built and
+  unit-tested but have never been measured. Then the release tag, which is a push and the
+  user's call (they have said no for now). The tray and the logo stay open (a GUI toolkit and
+  an asset the repo does not carry).
 - Worth borrowing when the console grows a LAN face: a `Host`-header check, since the
   current console binds 127.0.0.1 only and that is the reason it needs none today.
 

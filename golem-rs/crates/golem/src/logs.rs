@@ -14,7 +14,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::launch;
+use crate::state;
 
 /// How many lines `--no-follow` (and the first screenful of a follow) shows.
 const DEFAULT_LINES: usize = 40;
@@ -75,7 +75,7 @@ fn parse_lines(value: &str) -> Result<usize, String> {
 /// `docker` is the compose service, and everything else - `native`, or a mode
 /// a future `.env` invents - is the native log the shell's `else` tails.
 fn log_file(home: &Path) -> PathBuf {
-    home.join("logs").join(launch::LOG_NAME)
+    home.join("logs").join(state::LOG_NAME)
 }
 
 /// Print the tail of `path`, then keep printing what is appended to it.
@@ -225,8 +225,8 @@ mod tests {
         // the engine could disagree about which file to look at. One name now,
         // and the constant is shared so they cannot drift again.
         let home = Path::new("/tmp/golem-home");
-        assert_eq!(log_file(home), home.join("logs").join(launch::LOG_NAME));
-        assert_eq!(launch::LOG_NAME, "llama-server.log", "and it is not named after a mode");
+        assert_eq!(log_file(home), home.join("logs").join(state::LOG_NAME));
+        assert_eq!(state::LOG_NAME, "llama-server.log", "and it is not named after a mode");
     }
 
     #[test]

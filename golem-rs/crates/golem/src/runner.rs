@@ -24,9 +24,17 @@ use crate::service;
 /// and the argument policy are testable without a service or a process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
-    /// The engine verb, as the service knows it: "up", "down", "restart",
-    /// "status". (`start`/`stop` are the console's spellings of the first
-    /// two, and arrive here translated.)
+    /// A read of the engine's own state, answered here.
+    ///
+    /// The service can answer this too - same verb, same function - but
+    /// asking it *starts* one, and a read must not have that side effect:
+    /// pressing Status in the screen spawned a service and held the UI for
+    /// the seconds it took to come up (measured: 4.7s, which is
+    /// indistinguishable from the key doing nothing).
+    Read(&'static str),
+    /// The engine verb, as the service knows it: "up", "down", "restart".
+    /// (`start`/`stop` are the console's spellings of up/down, and arrive
+    /// here translated.)
     Engine(&'static str),
     /// This binary's own command: the verb and the arguments the console's
     /// button for it means.
@@ -59,7 +67,7 @@ pub fn plan(action: &str, arg: &str) -> Option<Plan> {
         "start" | "up" => Some(Plan::Engine("up")),
         "stop" | "down" => Some(Plan::Engine("down")),
         "restart" => Some(Plan::Engine("restart")),
-        "status" => Some(Plan::Engine("status")),
+        "status" => Some(Plan::Read("status")),
         // The button says "Eval 200K": the console means the full-context
         // gate, not whatever a bare `golem eval` would default to.
         "eval" => Some(Plan::Command(vec![
@@ -86,6 +94,7 @@ pub fn plan(action: &str, arg: &str) -> Option<Plan> {
 /// the pane should not care which of the two filled it.
 pub fn run(home: &Path, action: &str, arg: &str, log: &Path) -> i32 {
     match plan(action, arg) {
+        Some(Plan::Read(verb)) => read(home, verb, log),
         Some(Plan::Engine(verb)) => through_service(home, verb, log),
         Some(Plan::Command(args)) => self_run(home, &args, log),
         None => {
@@ -93,6 +102,23 @@ pub fn run(home: &Path, action: &str, arg: &str, log: &Path) -> i32 {
             2
         }
     }
+}
+
+/// A read of the engine's state, answered here rather than by the service.
+///
+/// No service is started for it, which is the whole point: a read that
+/// spawns a supervisor is a surprise with a wait attached.
+fn read(home: &Path, verb: &str, log: &Path) -> i32 {
+    let Some(mut out) = open(log) else { return 1 };
+    let code = match verb {
+        "status" => crate::launch::status(home, &mut out),
+        other => {
+            let _ = writeln!(out, "[FAIL] {other} is not a read of the engine");
+            2
+        }
+    };
+    let _ = out.flush();
+    code
 }
 
 /// The engine verbs: ask the service that owns the engine, starting one when
@@ -208,7 +234,15 @@ mod tests {
         assert_eq!(plan("stop", ""), Some(Plan::Engine("down")));
         assert_eq!(plan("down", ""), Some(Plan::Engine("down")));
         assert_eq!(plan("restart", ""), Some(Plan::Engine("restart")));
-        assert_eq!(plan("status", ""), Some(Plan::Engine("status")));
+    }
+
+    #[test]
+    fn status_is_a_read_and_not_a_service_verb() {
+        // The service can answer it, but asking starts one: pressing Status
+        // in the screen spawned a service and held the UI for 4.7 seconds,
+        // which reads as the key doing nothing. A read of the engine's own
+        // state needs no supervisor.
+        assert_eq!(plan("status", ""), Some(Plan::Read("status")));
     }
 
     #[test]

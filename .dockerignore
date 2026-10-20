@@ -10,3 +10,5 @@ bench/*
 golem-rs/target
 golem.exe
 .env
+.env.migrated
+golem.toml

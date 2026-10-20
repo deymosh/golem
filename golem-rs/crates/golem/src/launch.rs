@@ -70,11 +70,6 @@ const HEALTH_INTERVAL: Duration = Duration::from_secs(3);
 /// all: a bad flag or a missing model says so in those lines.
 const LOG_TAIL: usize = 15;
 
-/// The engine's own log, under `logs/`. One name for every platform: the
-/// `-windows` suffix was a mode, and there are no modes any more. The console
-/// tails this file and so does `golem logs`, which is why it is one constant.
-pub const LOG_NAME: &str = "llama-server.log";
-
 /// The model an unconfigured `MODEL_FILE` falls back to, as the launcher's is
 /// the same file.
 const DEFAULT_MODEL_FILE: &str = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
@@ -756,6 +751,20 @@ pub fn plan(home: &Path) -> Result<Startup, String> {
     let preset_rel = state::override_value(home, "GOLEM_MODELS_PRESET", "MODELS_PRESET")
         .unwrap_or_default();
     let preset_path = home.join(&preset_rel);
+    // A preset that is named but not there is a failure, not a fallback.
+    // Serving the single-model configuration instead would be serving a
+    // different model than the configuration names - and the eager load is
+    // gigabytes before anyone notices. A container with an unmounted volume
+    // is exactly how this happens (measured 2026-10-20: a 20 GB load in a
+    // container whose preset file was not mounted).
+    if !preset_rel.is_empty() && !preset_path.is_file() {
+        return Err(format!(
+            "MODELS_PRESET names {} and there is no such file under {} - \
+             serving it would start a different model than the configuration asks for",
+            preset_rel,
+            home.display()
+        ));
+    }
     let router = adapter.global("router").as_deref() != Some("false") && preset_path.is_file();
 
     let mut flags: Vec<(String, String)> = vec![
@@ -774,7 +783,7 @@ pub fn plan(home: &Path) -> Result<Startup, String> {
     flags.push(("api-key".to_string(), key.clone()));
     flags.push(("log-colors".to_string(), "off".to_string()));
     // The server writes its own log, and this is the file the console tails.
-    let log = home.join("logs").join(LOG_NAME);
+    let log = home.join("logs").join(state::LOG_NAME);
     flags.push(("log-file".to_string(), log.to_string_lossy().into_owned()));
     if !sleep_idle.is_empty() {
         flags.push(("sleep-idle-seconds".to_string(), sleep_idle));
@@ -823,7 +832,7 @@ pub fn plan(home: &Path) -> Result<Startup, String> {
         workdir = home.join("data/models");
     } else {
         // No preset at all: `.env` is the configuration, which is the shape a
-        // fresh clone has (`.env.example` ships `MODELS_PRESET` commented
+        // fresh clone has (`golem.toml.example` ships `MODELS_PRESET` commented
         // out). This is the launcher's list in the launcher's order, because
         // order is behaviour - the last flag wins in llama.cpp.
         let model_dir = home.join("data/models");
@@ -1059,6 +1068,24 @@ mod tests {
         std::fs::write(dir.join("config/models.ini"), preset).expect("preset");
         std::fs::write(dir.join("golem.toml"), config).expect("config");
         dir
+    }
+
+    #[test]
+    fn a_preset_that_is_named_but_missing_is_refused() {
+        // Not a fallback to the single-model configuration: that would serve a
+        // different model than the configuration names, and in a container -
+        // an unmounted volume is how this happens - the load is gigabytes
+        // before anybody notices.
+        let dir = engine_home(
+            "plan-preset-missing",
+            "[*]\njinja = true\n[model-a]\nmodel = a.gguf\n",
+            "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\n\
+             MODELS_PRESET = \"data/tuned/not-mounted.ini\"\n",
+        );
+        let err = plan(&dir).expect_err("a named preset has to be there");
+        assert!(err.contains("not-mounted.ini"), "{err}");
+        assert!(err.contains("MODELS_PRESET"), "the message names the key: {err}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -19,6 +19,18 @@ use std::time::Duration;
 /// How long any single status exchange may take.
 const TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long a *connect* to the local engine may take, separately from the
+/// exchange itself.
+///
+/// Loopback either has something listening or has nothing, and a refusal is
+/// immediate - except on a box where the SYN to a closed port is dropped
+/// instead of refused, and then this is the whole wait. Measured on the
+/// reference machine: 2.07s to a closed port 8000, which made every `status`
+/// take two seconds and the service's start-up poll pay it again per attempt.
+/// Nothing about the answer needs that long, so the connect does not wait for
+/// it; a slow *answer* is the read timeout's business.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// The parts of the shell's `.env` that describe where the engine is.
 ///
 /// During the migration `.env` is still the source of truth for the shell
@@ -109,7 +121,7 @@ pub fn status(home: &Path) -> Status {
 pub fn get(endpoint: &Endpoint, path: &str) -> Option<(u16, String)> {
     let addr = format!("127.0.0.1:{}", endpoint.port);
     let addr: SocketAddr = addr.to_socket_addrs().ok()?.next()?;
-    let mut stream = TcpStream::connect_timeout(&addr, TIMEOUT).ok()?;
+    let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).ok()?;
     stream.set_read_timeout(Some(TIMEOUT)).ok()?;
     stream.set_write_timeout(Some(TIMEOUT)).ok()?;
 

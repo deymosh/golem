@@ -237,6 +237,154 @@ pub fn next_context(current: u64, ceiling: u64, last: RungOutcome) -> Rung {
     }
 }
 
+/// VRAM against context, as a straight line.
+///
+/// Two measurements at one split fix it exactly, and that is the whole
+/// reason it exists: the model and its KV cache are what grow with context,
+/// so the card's ceiling is arithmetic once the slope is known - where the
+/// ladder spent four doublings to discover a number two measurements
+/// already describe.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Fit {
+    /// MiB the model costs before any context at all.
+    pub base_mib: f64,
+    /// MiB one more context token costs.
+    pub per_token_mib: f64,
+}
+
+impl Fit {
+    /// The line through two measured points, or `None` when they are not two
+    /// different contexts (one point is not a slope).
+    pub fn from_points(ctx_a: u64, vram_a: u64, ctx_b: u64, vram_b: u64) -> Option<Fit> {
+        if ctx_b <= ctx_a {
+            return None;
+        }
+        let per_token_mib = (vram_b as f64 - vram_a as f64) / (ctx_b - ctx_a) as f64;
+        Some(Fit { base_mib: vram_a as f64 - per_token_mib * ctx_a as f64, per_token_mib })
+    }
+
+    /// The largest context whose VRAM stays under `wall`, or `None` when the
+    /// fit cannot say.
+    ///
+    /// A slope that is not positive is two measurements disagreeing with the
+    /// model rather than a ceiling - noise, or a point taken while the
+    /// desktop was holding VRAM - and a prediction from it would be worse
+    /// than the ladder it replaces. `None` is that answer.
+    pub fn context_under(&self, wall_mib: u64) -> Option<u64> {
+        if !(self.per_token_mib > 0.0) {
+            return None;
+        }
+        let room = wall_mib as f64 - self.base_mib;
+        if room <= 0.0 {
+            return Some(0);
+        }
+        Some((room / self.per_token_mib).floor() as u64)
+    }
+}
+
+/// What the last context probe did, fed back to [`next_predicted`].
+///
+/// The distinction that matters is between the two ways a probe can fail.
+/// The plan states it as a rule because the obvious wiring gets it wrong: a
+/// failure *over the VRAM wall* is a real measurement - the model loaded and
+/// the card went past the wall - so it is a point, and a third point gives a
+/// steeper slope. A failure *under the decode floor* is not: the model
+/// spilled to system memory, and its VRAM reading describes where the spill
+/// ended up rather than what the context costs.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Probe {
+    /// Nothing probed beyond the points themselves.
+    None,
+    /// The probe fit, and its point is in the caller's list.
+    Fits,
+    /// The probe loaded and the card went over the wall.
+    OverWall { attempt: u64, vram_mib: u64 },
+    /// The probe fell under the decode floor.
+    UnderFloor { attempt: u64 },
+}
+
+/// The context to measure next, predicted from what has been measured.
+///
+/// `fits` are the (context, VRAM MiB) pairs that fit, in any order; `wall_mib`
+/// is what the card can hold; `ceiling` is the model's trained context (or a
+/// pinned `--ctx`). One point is not a slope, so the first grow is the
+/// ladder's doubling and the prediction starts with the second measurement.
+///
+/// **A prediction must not fall back to the ladder's midpoint rule.** That
+/// rule is right for a ladder, where `current` is a rung one doubling below
+/// the attempt, and wrong for a prediction, where `current` is the
+/// calibration point near the bottom: seed 4096, prediction 240000, failure,
+/// midpoint 122048 - where the ladder would have reached 249344. So an
+/// over-wall failure re-predicts from the failed point, and only a floor
+/// failure - where the failed point says nothing about cost - bisects.
+pub fn next_predicted(fits: &[(u64, u64)], wall_mib: u64, ceiling: u64, last: &Probe) -> Rung {
+    let current = fits.iter().map(|(ctx, _)| *ctx).max().unwrap_or(0);
+    match last {
+        // The spilled point is not a point, so there is nothing to re-fit:
+        // bisect between the best context that fit and the attempt, which
+        // converges on the floor's own edge.
+        Probe::UnderFloor { attempt } => {
+            let mid = current.saturating_add(*attempt) / 2;
+            if mid > current {
+                Rung::Grow(mid)
+            } else {
+                Rung::Stop
+            }
+        }
+        // The failed point is real, and it is the highest one there is. The
+        // two highest give a steeper slope and a second prediction, which is
+        // what lands near the true ceiling instead of halfway to it.
+        Probe::OverWall { attempt, vram_mib } => {
+            let below = fits
+                .iter()
+                .filter(|(ctx, _)| ctx < attempt)
+                .max_by_key(|(ctx, _)| *ctx);
+            let Some((ctx, vram)) = below else { return Rung::Stop };
+            let fit = Fit::from_points(*ctx, *vram, *attempt, *vram_mib);
+            // Strictly below the attempt: a prediction that landed on a
+            // context already known to be too big would be the same probe
+            // twice, and the loop would not end.
+            predict(fit, current, wall_mib, ceiling.min(attempt.saturating_sub(1)))
+        }
+        Probe::None | Probe::Fits => {
+            if fits.len() < 2 {
+                return grow(current, ceiling);
+            }
+            let mut sorted: Vec<(u64, u64)> = fits.to_vec();
+            sorted.sort_by_key(|(ctx, _)| *ctx);
+            let (ctx_b, vram_b) = sorted[sorted.len() - 1];
+            let (ctx_a, vram_a) = sorted[sorted.len() - 2];
+            let fit = Fit::from_points(ctx_a, vram_a, ctx_b, vram_b);
+            predict(fit, current, wall_mib, ceiling)
+        }
+    }
+}
+
+/// The largest context the fit allows, capped by `limit` and only worth
+/// growing to when it beats what already fit.
+fn predict(fit: Option<Fit>, current: u64, wall_mib: u64, limit: u64) -> Rung {
+    let Some(predicted) = fit.and_then(|f| f.context_under(wall_mib)) else {
+        return Rung::Stop;
+    };
+    let target = predicted.min(limit);
+    if target > current {
+        Rung::Grow(target)
+    } else {
+        Rung::Stop
+    }
+}
+
+/// The ladder's doubling, for the one grow the prediction cannot make: the
+/// second point it needs a slope from.
+fn grow(current: u64, ceiling: u64) -> Rung {
+    let next = current.saturating_mul(2).min(ceiling);
+    if next > current {
+        Rung::Grow(next)
+    } else {
+        Rung::Stop
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,5 +575,170 @@ mod tests {
         }
         assert!(count <= 6, "{count} probes to narrow 0..=41");
         assert_eq!(fits - spills, 1);
+    }
+
+    // ---- the context prediction -----------------------------------------
+
+    /// A fit whose slope is the reference box's own: ~12.7 KB per context
+    /// token at q8_0 KV, which is ~0.0121 MiB.
+    fn reference_fit() -> Fit {
+        // 11.1 GB at 236544 against 6.6 GB at 32768 - the two rows the
+        // engine gate measured on the 35B.
+        Fit::from_points(32768, 6758, 236544, 11366).expect("two contexts")
+    }
+
+    #[test]
+    fn two_points_give_the_slope_and_the_base() {
+        let fit = reference_fit();
+        // (11366 - 6758) / (236544 - 32768) = 4608 / 203776
+        assert!((fit.per_token_mib - 0.02261).abs() < 0.0001, "{}", fit.per_token_mib);
+        // The base is what the model costs before any context: the smaller
+        // point minus its own context's worth.
+        assert!((fit.base_mib - 6017.0).abs() < 5.0, "{}", fit.base_mib);
+        // One point is not a slope, and neither is a repeated context.
+        assert_eq!(Fit::from_points(32768, 6758, 32768, 6758), None);
+        assert_eq!(Fit::from_points(32768, 6758, 16384, 5000), None);
+    }
+
+    #[test]
+    fn the_ceiling_is_the_context_the_wall_leaves_room_for() {
+        let fit = reference_fit();
+        // A 12 GB card with ~0.5 GB of desktop: ~11.5 GB = 11776 MiB.
+        let ceiling = fit.context_under(11776).expect("a slope");
+        assert!((236000..=256000).contains(&ceiling), "{ceiling}");
+        // A wall the model alone does not fit under is no context at all,
+        // not a negative number.
+        assert_eq!(fit.context_under(5000), Some(0));
+        // A flat or falling slope is two measurements disagreeing with the
+        // model, and the honest answer is that the fit cannot say.
+        let flat = Fit { base_mib: 6000.0, per_token_mib: 0.0 };
+        assert_eq!(flat.context_under(11776), None);
+        let falling = Fit { base_mib: 6000.0, per_token_mib: -0.01 };
+        assert_eq!(falling.context_under(11776), None);
+    }
+
+    #[test]
+    fn one_point_doubles_before_it_predicts() {
+        // The calibration load is one point, and a line needs two: the first
+        // grow is the ladder's doubling, and the prediction starts after it.
+        let one = vec![(4096, 6300)];
+        assert_eq!(next_predicted(&one, 11776, 262144, &Probe::None), Rung::Grow(8192));
+        // At the trained ceiling there is nothing left to double.
+        let at_ceiling = vec![(262144, 11000)];
+        assert_eq!(next_predicted(&at_ceiling, 11776, 262144, &Probe::None), Rung::Stop);
+    }
+
+    #[test]
+    fn two_points_predict_the_ceiling_instead_of_climbing_to_it() {
+        // The ladder reached 249344 in four doublings from 8192. Two
+        // measurements and the wall give the same neighbourhood in one.
+        let fits = vec![(32768, 6758), (65536, 7463)];
+        match next_predicted(&fits, 11776, 262144, &Probe::Fits) {
+            Rung::Grow(ctx) => assert!((180000..=262144).contains(&ctx), "{ctx}"),
+            other => panic!("expected a predicted context, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_over_wall_failure_re_predicts_rather_than_bisecting() {
+        // The trap the plan names: seed 4096, prediction 240000, failure. The
+        // ladder's midpoint rule would answer 122048 - worse than the 249344
+        // the ladder itself reached - because `current` here is the
+        // calibration point near the bottom, not a rung one doubling below.
+        let fits = vec![(4096, 6300), (200000, 10800)];
+        let probe = Probe::OverWall { attempt: 240000, vram_mib: 11900 };
+        match next_predicted(&fits, 11776, 262144, &probe) {
+            Rung::Grow(ctx) => {
+                // The steeper slope from the failed point puts the answer
+                // near the true ceiling, well above the 122048 midpoint.
+                assert!(ctx > 150000, "{ctx} is a bisection, not a prediction");
+                assert!(ctx < 240000, "{ctx} is the attempt again");
+            }
+            other => panic!("expected a re-prediction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_over_wall_failure_converges_on_the_true_ceiling() {
+        // A real over-wall point lies on the real line: the model loaded and
+        // the card went past the wall, so its VRAM is what that context
+        // actually cost. Two such points are the line, which is why one
+        // re-prediction lands at the ceiling instead of walking to it.
+        const BASE: f64 = 6000.0;
+        const PER_TOKEN: f64 = 0.0245;
+        const WALL: u64 = 11776;
+        let true_ceiling = ((WALL as f64 - BASE) / PER_TOKEN) as u64;
+        let vram_at = |ctx: u64| (BASE + PER_TOKEN * ctx as f64).round() as u64;
+
+        let fits = vec![(8192, vram_at(8192))];
+        let attempt = 262144;
+        let next = match next_predicted(
+            &fits,
+            WALL,
+            262144,
+            &Probe::OverWall { attempt, vram_mib: vram_at(attempt) },
+        ) {
+            Rung::Grow(ctx) => ctx,
+            other => panic!("expected a re-prediction, got {other:?}"),
+        };
+        // The trap the plan names, stated as a number: the ladder's midpoint
+        // between 8192 and 262144 is 135168, which is nowhere near the
+        // ceiling the arithmetic finds.
+        let midpoint = (8192 + attempt) / 2;
+        assert!(
+            next.abs_diff(true_ceiling) < true_ceiling / 100,
+            "{next} should land within 1% of {true_ceiling}, not at the midpoint {midpoint}"
+        );
+        assert!(next > midpoint, "{next} is a bisection, not a prediction");
+
+        // And it terminates: that probe fits, and the next prediction from
+        // two points on the same line is the same ceiling - nothing left to
+        // grow to.
+        let fits = vec![(8192, vram_at(8192)), (next, vram_at(next))];
+        assert_eq!(next_predicted(&fits, WALL, 262144, &Probe::Fits), Rung::Stop);
+    }
+
+    #[test]
+    fn an_over_wall_failure_always_makes_progress() {
+        // Even when the relationship is not the straight line the fit
+        // assumes, each over-wall failure is a point above the wall and each
+        // prediction lands strictly lower - so the loop has to end.
+        let mut attempt = 262144u64;
+        let mut probes = 0;
+        while let Rung::Grow(next) = next_predicted(
+            &[(8192, 6400)],
+            11776,
+            262144,
+            &Probe::OverWall { attempt, vram_mib: 13000 },
+        ) {
+            assert!(next < attempt, "{next} does not improve on {attempt}");
+            attempt = next;
+            probes += 1;
+            assert!(probes < 200, "the loop does not terminate");
+        }
+    }
+
+    #[test]
+    fn a_floor_failure_bisects_because_the_point_says_nothing() {
+        // Spilled to system memory: its VRAM reading describes where the
+        // spill ended up, so it is not a point and there is nothing to
+        // re-fit. The midpoint between what fit and the attempt is the
+        // honest next question.
+        let fits = vec![(8192, 6400), (16384, 6900)];
+        let probe = Probe::UnderFloor { attempt: 131072 };
+        assert_eq!(next_predicted(&fits, 11776, 262144, &probe), Rung::Grow(73728));
+        // Converged: a floor failure just above what fits has nothing left
+        // to bisect, so the loop stops instead of asking twice.
+        let probe = Probe::UnderFloor { attempt: 8193 };
+        assert_eq!(next_predicted(&fits, 11776, 262144, &probe), Rung::Stop);
+    }
+
+    #[test]
+    fn a_prediction_under_what_already_fit_stops() {
+        // The highest context that fit already touches the wall, so the
+        // arithmetic has nothing to add and the loop ends on a measured
+        // answer rather than on a guess.
+        let fits = vec![(32768, 6758), (240000, 11780)];
+        assert_eq!(next_predicted(&fits, 11776, 262144, &Probe::Fits), Rung::Stop);
     }
 }

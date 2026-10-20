@@ -73,7 +73,7 @@ strata engine, preset ctx 236544 → either it starts and serves, or it reports 
 
 ### Model discovery and the fit check
 
-- `./golem models --engine strata` lists what the installed Strata can serve (its setup
+- `golem models --engine strata` lists what the installed Strata can serve (its setup
   writes the catalog the app reads; the adapter in `engines/strata/` exposes it).
 - Fit = the same arithmetic the tuner already does, with Strata's layout: GPU side
   (non-expert weights + KV at its per-token cost) against the measured VRAM wall
@@ -87,13 +87,13 @@ strata engine, preset ctx 236544 → either it starts and serves, or it reports 
 
 A Strata model that fits follows the standard path — no special casing:
 
-1. preset section with `; Download:` line → `./golem pull <preset>`
+1. preset section with `; Download:` line → `golem pull <preset>`
 2. paired bench (best-of-3, same session, same size class)
-3. `./golem eval --long 200000` — the gate that decides everything
+3. `golem eval --long 200000` — the gate that decides everything
 4. adopt as default, or keep as an *opt-in* preset users can request by name
 
 Step 4 is the "allow users to use them if they want": router mode already serves any
-preset section on request; the web console and `./golem models` list them with their
+preset section on request; the web console and `golem models` list them with their
 measured numbers, and nothing becomes the default without the eval PASS.
 
 ### Exposing the 0.2.0 app

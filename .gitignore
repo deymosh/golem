@@ -112,7 +112,6 @@ Desktop.ini
 
 .env
 .env.*
-!.env.example
 
 # Claude Code local session state
 .claude/

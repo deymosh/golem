@@ -1,6 +1,13 @@
 # Plan: the binary does everything, and the tuner stops guessing by brute force
 
-Status: **decided 2026-10-20**. Two directions from the user, one page each.
+Status: **decided 2026-10-20; steps 1-3 are built**. The split is found by
+bisection (`golem_core::tune::between`), the context ceiling is predicted from
+two measured points and confirmed by one load (`Fit`, `next_predicted`), and
+the refine stage spends one probe per knob with the thread probe only when the
+decode is near the floor. What is left is step 4, which is a GPU session: one
+full `tune` end to end on a free desktop, against the sweep's own load count
+and verdict. The prediction's fallback is in place for it - `--ctx-ladder`, or
+`TUNE_CTX_POLICY = "ladder"`, runs the old doubling ladder.
 
 ## 1. The binary is the app
 
@@ -123,9 +130,23 @@ switch models in process and are the cheap way to refresh the database.
 
 ### Order
 
-1. Bisection for the split (`golem_core::tune::between`, pure, tested).
-2. The context prediction from two points (pure, tested).
-3. Trim refine to the knobs above.
+1. Bisection for the split (`golem_core::tune::between`, pure, tested). **Done.**
+2. The context prediction from two points (pure, tested). **Done**:
+   `golem_core::tune::{Fit, Probe, next_predicted}`, wired into the tuner's
+   `maximize_ctx` with `--ctx-ladder` keeping the old rule reachable. Two points
+   at one split fix VRAM per context token, and the ceiling is arithmetic from
+   the wall; the first grow is still the ladder's doubling, because one point is
+   not a slope. An over-wall failure re-predicts from the failed point - which is
+   a real measurement - and only a floor failure bisects, because a spilled
+   model's VRAM reading describes where the spill ended up. A test states the
+   trap as a number: from seed 4096 and a 240000 attempt the midpoint rule
+   answers 122048 where the prediction lands within 1% of the true ceiling.
+3. Trim refine to the knobs above. **Done**: the stage was already one probe per
+   knob (batch, threads, spec), and the one thing it still spent a load on
+   unconditionally was the thread count - which the plan asks for only when the
+   observed decode is within reach of the floor, because the knob moves decode by
+   a few percent and the probe is a whole load. `thread_probe_worth_it` is that
+   rule, with the margin named.
 4. Re-bench, and compare the load count and the verdict against this sweep's.
 
 Until step 4 passes, the old sweep stays reachable behind a flag (`--sweep all`), because a

@@ -64,9 +64,14 @@ use golem_core::json;
 use crate::engine;
 use crate::launch;
 
-/// How long a client waits for the service to answer a connection. Short: the
-/// service is on loopback and either there or not.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a client waits for the service to answer a connection.
+///
+/// Short, and shorter than it looks: the service is on loopback and either
+/// there or not, and on a box where the SYN to a closed port is dropped
+/// rather than refused, this is the whole wait - measured at 2.07s, which the
+/// start-up poll then paid once per attempt (a service that takes 200ms to
+/// bind looked like it took five seconds).
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// How often `up` waits for a service it just started to write its endpoint.
 const START_DEADLINE: Duration = Duration::from_secs(10);

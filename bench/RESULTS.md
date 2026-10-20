@@ -1,6 +1,6 @@
 # Benchmark results
 
-Generated from [`bench/results.jsonl`](results.jsonl) by `./golem report --md`.
+Generated from [`bench/results.jsonl`](results.jsonl) by `golem report --md`.
 
 **One section per machine.** The heading is the `host` slug the recorder wrote - GPU, VRAM,
 RAM and CPU in one string, so `rtx-3060_12g_32g_i7-12700kf` is a 12 GB RTX 3060 with 32 GB

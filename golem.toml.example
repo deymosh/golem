@@ -43,10 +43,14 @@ TUNE_MIN_DECODE = 25          # median decode, tokens/s
 TUNE_MIN_PREFILL = 350        # prompt processing, tokens/s
 TUNE_MIN_DEPTH_DECODE = 15    # decode at full context, tokens/s
 
-# How far the tuner grows the context: "max" climbs until the card or the
-# decode floor stops it, and stops at the model's trained context unless a
-# number here (or `--ctx N`) asks for more. Extrapolating past the trained
-# context works per model rather than in general, so it has to be asked for.
+# How far the tuner grows the context: "max" predicts the ceiling from the
+# points it has measured and confirms the prediction with one load, and stops
+# at the model's trained context unless a number here (or `--ctx N`) asks for
+# more. Extrapolating past the trained context works per model rather than in
+# general, so it has to be asked for. "ladder" is the older rule - double
+# toward the ceiling and probe one midpoint after a failure - which costs
+# more loads and is kept for comparison (`--ctx-ladder` does the same for one
+# run).
 TUNE_CTX_POLICY = "max"
 
 # How much a sweep spends per point. `TUNE_RUNS` is the bench's best-of-N and

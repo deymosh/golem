@@ -23,11 +23,11 @@ ARG GPU_BACKEND=cuda
 # dependencies beyond cargo.
 FROM ${RUST_IMAGE} AS build
 WORKDIR /src
-# golem.toml and bench/report.template.html are compiled in with
+# golem.toml.example and bench/report.template.html are compiled in with
 # include_str!(), resolved relative to paths.rs - so the layout here has to
 # match the checkout's.
 COPY golem-rs golem-rs
-COPY golem.toml golem.toml
+COPY golem.toml.example golem.toml.example
 COPY bench/report.template.html bench/report.template.html
 RUN cargo build --release --manifest-path golem-rs/Cargo.toml
 
@@ -59,12 +59,21 @@ COPY --from=build /src/golem-rs/target/release/golem /usr/local/bin/golem
 COPY engines/llama.cpp /golem/engines/llama.cpp
 COPY config /golem/config
 
-# The container's .env: the engine binds 0.0.0.0 because the port is
-# published, not loopback, and the backend is a build decision rather than
-# a detection because no card exists at build time. compose.yml mounts the
-# host's .env over this and pins the bind with GOLEM_LOCAL_AI_HOST; a bare
-# `docker run` is served by these defaults.
-RUN printf 'LOCAL_AI_HOST="0.0.0.0"\nGPU_BACKEND="%s"\nMODELS_PRESET="config/models.ini"\nMODEL_ALIAS="ornith-1.5-35b"\n' "$GPU_BACKEND" > /golem/.env
+# The container's configuration: the template, with the four keys a
+# container has to differ on. The engine binds 0.0.0.0 because the port is
+# published rather than loopback, the backend is a build decision rather
+# than a detection because no card exists at build time, and the preset
+# mode points the engine at the image's own presets. compose.yml mounts the
+# host's golem.toml over this; a bare `docker run` is served by it.
+COPY golem.toml.example /golem/golem.toml
+RUN sed -i \
+      -e 's|^LOCAL_AI_HOST = "127.0.0.1"|LOCAL_AI_HOST = "0.0.0.0"|' \
+      -e "s|^GPU_BACKEND = \"auto\"|GPU_BACKEND = \"$GPU_BACKEND\"|" \
+      -e 's|^#MODELS_PRESET = "config/models.ini"|MODELS_PRESET = "config/models.ini"|' \
+      -e 's|^MODEL_ALIAS = "local-model"|MODEL_ALIAS = "ornith-1.5-35b"|' \
+      /golem/golem.toml \
+    && grep -q '^MODELS_PRESET' /golem/golem.toml \
+    && grep -q "^GPU_BACKEND = \"$GPU_BACKEND\"" /golem/golem.toml
 
 # Bake the pinned engine in: a container start must not be a download. This
 # is exactly `golem install`'s job - the release the adapter names for this

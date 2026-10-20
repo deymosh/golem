@@ -141,23 +141,27 @@ fn selected_returns_the_action_the_marker_is_on() {
 }
 
 #[test]
-fn next_wraps_from_the_last_entry_to_the_first() {
+fn the_marker_stops_at_the_last_entry() {
+    // A list, not a wheel: the ends are worth being able to feel for, and a
+    // marker that jumps from Quit back to Status reads as a glitch.
     let mut app = App::new();
-    for _ in 0..app.items().len() {
+    for _ in 0..app.items().len() + 3 {
         app.next();
     }
-    assert_eq!(app.selected(), Action::Status);
+    assert_eq!(app.selected(), Action::Quit, "the last entry is the end of it");
 }
 
 #[test]
-fn previous_wraps_from_the_first_entry_to_the_last() {
+fn the_marker_stops_at_the_first_entry() {
     let mut app = App::new();
-    app.previous();
-    assert_eq!(app.selected(), Action::Quit);
+    for _ in 0..3 {
+        app.previous();
+    }
+    assert_eq!(app.selected(), Action::Status, "the first entry is the start of it");
 }
 
 #[test]
-fn the_selection_marker_moves_and_wraps() {
+fn the_selection_marker_moves_and_stops_at_the_ends() {
     let mut app = App::new();
     assert!(marked_row(&screen(&app)).contains("Status"));
 
@@ -167,11 +171,16 @@ fn the_selection_marker_moves_and_wraps() {
     app.previous();
     assert!(marked_row(&screen(&app)).contains("Status"));
 
-    app.previous(); // past the first: wraps to the last
-    assert!(marked_row(&screen(&app)).contains("Quit"));
-
-    app.next(); // past the last: wraps to the first
+    app.previous(); // past the first: stays on it
     assert!(marked_row(&screen(&app)).contains("Status"));
+
+    for _ in 0..app.items().len() {
+        app.next();
+    }
+    assert!(marked_row(&screen(&app)).contains("Quit"), "the last entry is the end");
+
+    app.next(); // past the last: stays on it
+    assert!(marked_row(&screen(&app)).contains("Quit"));
 }
 
 // ---- the message line --------------------------------------------------

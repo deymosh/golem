@@ -20,6 +20,8 @@
 
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -94,6 +96,21 @@ const LOG_MAX: usize = 6;
 /// segment reports on.
 const WEB_PORT: u16 = 8787;
 
+/// How long the loop waits for a key before looking at what else happened.
+///
+/// The loop has a second job now - an action running on its own thread - and
+/// blocking in `event::read()` would only notice it when the user pressed
+/// something. Short enough that a finished action is on screen at once.
+const POLL: Duration = Duration::from_millis(80);
+
+/// How long a machine reading the header shows is reused.
+///
+/// `ram_free_gb` spawns PowerShell, which costs ~0.4s measured, and the
+/// header is refreshed after every action - so a figure a few seconds old is
+/// a much better trade than a screen that stalls every time. `r` forces a
+/// fresh read for a person who wants the live number.
+const FACTS_TTL: Duration = Duration::from_secs(10);
+
 /// What the header says about the machine, read once per refresh.
 ///
 /// Never per frame: `vram_mib` runs nvidia-smi and `web_up` opens a socket,
@@ -133,6 +150,9 @@ pub struct App {
     facts: Facts,
     runs: Vec<String>,
     log: Vec<String>,
+    /// When the expensive machine readings in `facts` were taken, so a
+    /// redraw does not pay for them again. See [`FACTS_TTL`].
+    read_at: Option<Instant>,
 }
 
 impl Default for App {
@@ -153,7 +173,13 @@ impl App {
             facts: Facts::default(),
             runs: Vec::new(),
             log: Vec::new(),
+            read_at: None,
         }
+    }
+
+    /// The label of the entry the marker is on, for a message about it.
+    pub fn selected_label(&self) -> &'static str {
+        self.items[self.selected].0
     }
 
     // The four accessors below are the test's window into the app: the
@@ -172,14 +198,20 @@ impl App {
         self.items[self.selected].1
     }
 
-    /// Move down one entry, wrapping past the last back to the first.
+    /// Move down one entry, and stop at the last.
+    ///
+    /// A list, not a wheel: wrapping from Quit back to Status reads as the
+    /// marker jumping rather than moving, and the ends are worth being able
+    /// to feel for.
     pub fn next(&mut self) {
-        self.selected = (self.selected + 1) % self.items.len();
+        if self.selected + 1 < self.items.len() {
+            self.selected += 1;
+        }
     }
 
-    /// Move up one entry, wrapping past the first back to the last.
+    /// Move up one entry, and stop at the first.
     pub fn previous(&mut self) {
-        self.selected = (self.selected + self.items.len() - 1) % self.items.len();
+        self.selected = self.selected.saturating_sub(1);
     }
 
     /// Replace the message line with the result of the last action.
@@ -211,18 +243,31 @@ impl App {
     /// One pass over the world per call, never per frame: two sockets, an
     /// nvidia-smi, a PowerShell round trip for the free memory, and the
     /// results file.
-    fn refresh(&mut self, home: &Path) {
+    ///
+    /// `force` re-reads the machine even when a value is fresh; the automatic
+    /// refreshes after an action leave the expensive readings alone for
+    /// [`FACTS_TTL`], and `r` forces them.
+    fn refresh(&mut self, home: &Path, force: bool) {
         let status = engine::status(home);
+        let fresh = self.read_at.is_some_and(|at| at.elapsed() < FACTS_TTL);
+        let expensive = force || !fresh;
         self.facts = Facts {
             up: status.up,
             // Only worth asking when something is loaded, and only then does
             // the number mean anything.
-            vram_mib: if status.up { state::vram_mib() } else { None },
-            ram_free_gb: state::ram_free_gb(),
+            vram_mib: if status.up && expensive {
+                state::vram_mib()
+            } else {
+                self.facts.vram_mib
+            },
+            ram_free_gb: if expensive { state::ram_free_gb() } else { self.facts.ram_free_gb },
             alias: state::env_value(home, "MODEL_ALIAS").unwrap_or_default(),
             engine: state::env_value(home, "ENGINE").unwrap_or_else(|| "llama.cpp".to_string()),
             web_up: state::web_up(WEB_PORT),
         };
+        if expensive {
+            self.read_at = Some(Instant::now());
+        }
         self.runs = run_lines(home);
         self.log = log_lines(home);
     }
@@ -479,12 +524,32 @@ impl Drop for RawTerminal {
 /// `act` is the one thing this does not decide for itself: it is handed each
 /// chosen action and returns the line to show. Quit never reaches it - the
 /// loop returns on its own - so `act` never has to know the TUI exists.
-pub fn run(home: &Path, mut act: impl FnMut(Action) -> String) -> io::Result<()> {
+///
+/// **An action runs on a thread of its own.** `up` installs an engine and
+/// fetches a model before it answers, and a screen that stops drawing for the
+/// minutes that takes cannot be told from one that has crashed - which is
+/// what it looked like. The loop keeps drawing, the message line says what is
+/// running, and the result lands when it lands. One at a time, as everywhere
+/// else: two of these would fight over one engine, one pid file and one card.
+pub fn run(
+    home: &Path,
+    act: impl Fn(Action) -> String + Send + Sync + 'static,
+) -> io::Result<()> {
     let mut app = App::new();
-    app.refresh(home); // the state at start-up
 
     let _terminal = RawTerminal::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+
+    // The menu is up before the machine is read. Reading it costs about a
+    // second - the PowerShell call for free memory alone is ~0.4s - and a
+    // blank window for that long reads as a screen that is not starting. The
+    // header fills in on the next frame.
+    terminal.draw(|frame| draw(&app, frame))?;
+    app.refresh(home, true); // the state at start-up
+
+    let act = Arc::new(act);
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let mut running: Option<&'static str> = None;
 
     loop {
         // Every turn of the loop draws, which is also what makes a resize
@@ -492,47 +557,66 @@ pub fn run(home: &Path, mut act: impl FnMut(Action) -> String) -> io::Result<()>
         // ratatui reads the new size on the way through.
         terminal.draw(|frame| draw(&app, frame))?;
 
-        let key = match event::read()? {
-            Event::Key(key) => key,
-            // One notch of the wheel moves one row, like an arrow key. The
-            // shell's screen scrolls the same way.
-            Event::Mouse(mouse) => {
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => app.previous(),
-                    MouseEventKind::ScrollDown => app.next(),
-                    _ => {}
+        // Polled, not blocking: a finished action has to reach the screen
+        // even when nobody is typing.
+        if event::poll(POLL)? {
+            let key = match event::read()? {
+                Event::Key(key) => key,
+                // One notch of the wheel moves one row, like an arrow key. The
+                // shell's screen scrolls the same way.
+                Event::Mouse(mouse) => {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => app.previous(),
+                        MouseEventKind::ScrollDown => app.next(),
+                        _ => {}
+                    }
+                    continue;
                 }
+                _ => continue,
+            };
+            // Windows reports a key's press and its release; acting on both
+            // would run every action twice.
+            if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                 continue;
             }
-            _ => continue,
-        };
-        // Windows reports a key's press and its release; acting on both would
-        // run every action twice.
-        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-            continue;
+
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => app.previous(),
+                KeyCode::Down | KeyCode::Char('j') => app.next(),
+                // The facts are read at start-up and after an action; a machine
+                // that changed under the screen - a game started, a download
+                // ended - is what this is for. `r` re-reads the expensive ones
+                // too, which the automatic refresh leaves alone for a while.
+                KeyCode::Char('r') => app.refresh(home, true),
+                KeyCode::Enter => {
+                    let action = app.selected();
+                    if action == Action::Quit {
+                        break;
+                    }
+                    if let Some(busy) = running {
+                        app.set_message(format!("{busy}: still running (one action at a time)"));
+                    } else {
+                        let (tx, act) = (tx.clone(), Arc::clone(&act));
+                        running = Some(app.selected_label());
+                        app.set_message(format!("{}: running...", app.selected_label()));
+                        std::thread::spawn(move || {
+                            let _ = tx.send(act(action));
+                        });
+                    }
+                }
+                // Ctrl+C is a key event, not a signal, once raw mode is on, so it
+                // is caught here or not at all.
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                KeyCode::Char('q') | KeyCode::Esc => break,
+                _ => {}
+            }
         }
 
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => app.previous(),
-            KeyCode::Down | KeyCode::Char('j') => app.next(),
-            // The facts are read at start-up and after an action; a machine
-            // that changed under the screen - a game started, a download
-            // ended - is what this is for.
-            KeyCode::Char('r') => app.refresh(home),
-            KeyCode::Enter => {
-                let action = app.selected();
-                if action == Action::Quit {
-                    break;
-                }
-                let result = act(action);
-                app.set_message(result);
-                app.refresh(home); // the action changed things
-            }
-            // Ctrl+C is a key event, not a signal, once raw mode is on, so it
-            // is caught here or not at all.
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-            KeyCode::Char('q') | KeyCode::Esc => break,
-            _ => {}
+        // The action's answer, whenever it arrives.
+        if let Ok(message) = rx.try_recv() {
+            running = None;
+            app.set_message(message);
+            app.refresh(home, false); // the action changed things
         }
     }
     Ok(())

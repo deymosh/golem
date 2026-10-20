@@ -260,14 +260,17 @@ async fn cmd_tui() -> ExitCode {
     let log = home.join("logs/web-job.log");
     let console = Console::new(home.clone());
     let handle = tokio::runtime::Handle::current();
+    // The closure owns everything it touches: `tui::run` hands it to a
+    // thread per action, so nothing here can borrow from this function.
+    let act_home = home.clone();
 
-    let outcome = tui::run(&home, |action| match action {
+    let outcome = tui::run(&home, move |action| match action {
         tui::Action::Web => console.start(&handle),
         // `run` returns on Quit without asking, so this arm is unreachable;
         // it exists because the match has to be total.
         tui::Action::Quit => String::new(),
         other => match verb_of(other) {
-            Some(verb) => describe(verb, runner::run(&home, verb, "", &log)),
+            Some(verb) => describe(verb, runner::run(&act_home, verb, "", &log)),
             None => format!("{other:?} has no action"),
         },
     });
