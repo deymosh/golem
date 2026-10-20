@@ -1,8 +1,9 @@
 # Plan: the launchers move into the binary
 
-Status: **decided 2026-10-20**, not started. This is the last piece of
-[plan-portable-binary.md](plan-portable-binary.md)'s configuration migration, and the reason
-it exists is one sentence from that plan: *a key moves when the binary owns every reader*.
+Status: **decided 2026-10-20**, and most of it is built - see "Where this stands" at the
+bottom. This is the last piece of [plan-portable-binary.md](plan-portable-binary.md)'s
+configuration migration, and the reason it exists is one sentence from that plan: *a key
+moves when the binary owns every reader*.
 
 ## Why
 
@@ -49,7 +50,11 @@ Two details from the launcher that a port must keep, both of which bite:
 - **The server logs to its own `--log-file`; its stdout/stderr must be closed.** The launcher
   redirects them only for Strata. Handing the child our pipes leaves the pipe open as long
   as the server runs, and anything reading our output (`./golem up | tail`) waits for EOF
-  that never comes.
+  that never comes. **The port does this and the pipe still stays open on Windows** -
+  `Stdio::null()` cannot stop the child inheriting the caller's pipe as an extra handle, and
+  neither can the alternatives that were measured. It is the one known gap in the port, it
+  costs a piped `up` (not a typed one, and not one whose output goes to a file), and
+  [plan-service.md](plan-service.md) sets out the three ways to close it.
 - **Health is a deadline plus an early-exit check**: ten minutes, `/health` every three
   seconds, and the moment the child has exited, print its log tail and fail with the exit
   code - instead of polling a dead process for ten minutes.
@@ -83,12 +88,13 @@ is bsdtar, and bsdtar reads zip. **So no new crate.** Two details:
    `golem down` kills the tree and waits for the VRAM, and `./golem` / `golem.cmd` hand
    `down` / `stop` to it.
 2. `up` for **router mode only**, then single-model. Router mode is what this box serves.
-   **Half done**: `up --dry-run` resolves everything and prints the command line, and it
-   already agrees with `start-windows.ps1 -DryRun` flag for flag (only a path separator
-   differs). What is missing is the two things it would then *do*: install the pinned build
-   when it is absent, and spawn/poll/pid.
-3. The installer (the zip path), verified against a fresh `.local/engines/`.
-4. `restart`, then the Linux and docker drivers.
+   **Done**: `plan` resolves both shapes (router passes `--models-preset`, a single-model
+   engine gets the section's flags translated through the adapter), and `up` installs,
+   spawns, writes the pid and polls health. What is left is the live paired start below.
+3. The installer (the zip path), verified against a fresh `.local/engines/`. **Done** - the
+   zip path ran against the real release in a scratch home, and the tree it produced is the
+   one the script produces.
+4. `restart`, **done**; the Linux and docker drivers are not started.
 
 ## How it gets verified
 
@@ -98,6 +104,90 @@ is bsdtar, and bsdtar reads zip. **So no new crate.** Two details:
   `/props` args** - the command line is the thing worth diffing, not the banner.
 - A paired bench on each, because the launch flags decide the speed.
 - The clean-machine walk again, this time with no PowerShell in the path at all.
+
+### Where this stands (2026-10-20, later)
+
+**Done and measured.** `down` kills the tree and waits for the card. `up` resolves the whole
+command line, installs the pinned build when it is absent, spawns the server with its own
+`--log-file` and its stdout/stderr closed, writes the pid, and waits for `/health` with a
+deadline *and* an early exit. `restart` is the two. Windows and native mode both take this
+path; docker, an engine that installs itself (`launcher = strata`) and single-model mode
+with no preset still hand the work to the shell launcher, which is why neither script is
+deleted yet. (The last of those three is ported now - see below.)
+
+- **The command line agrees.** `./golem.exe up --dry-run` and
+  `scripts/start-windows.ps1 -DryRun` print the same line flag for flag; the only difference
+  is the separator in two paths (`data/tuned/...` against `data\tuned\...`).
+- **The installer agrees.** `release::ensure` run against the real b11379 release in a
+  scratch home downloaded `llama-b11379-bin-win-cuda-13.4-x64.zip` (146 MB) and
+  `cudart-llama-bin-win-cuda-13.4-x64.zip` (404 MB), extracted both with
+  `%SystemRoot%\System32\tar.exe`, landed a working `llama-server.exe`, wrote the `BUILD`
+  marker, and did nothing at all on a second call. The 56 files it left are the same 56 the
+  script's own install of that build holds, name for name. It needed **no new crate**: the
+  transport is curl, which `pull.rs` already uses, and the extractor is System32's bsdtar -
+  Git's GNU tar on PATH cannot read a zip at all.
+
+Two things the port found on the way, both silent if left:
+
+- **The tuner's per-run overrides.** `plan` read `ENGINE`, `MODELS_PRESET` and `MODEL_ALIAS`
+  straight from the configuration, while the launcher reads all three through
+  `$env:GOLEM_*` - which is how `tune.rs` points one run at one candidate. A sweep would
+  have restarted the same preset for every candidate and the gate would have scored
+  whatever `.env` names. Fixed, and tested in `tests/launch_plan.rs`, which runs the real
+  binary in its own process because these are process-environment variables.
+- **Two shapes `up` resolved wrongly rather than refusing**: a single-model engine whose
+  preset has no section for `MODEL_ALIAS` (the launcher refuses; the plan built a line with
+  no `--model` on it), and no preset at all. Both now say so and hand the work back, the
+  same way Strata does.
+
+**The live paired start has run** (2026-10-20). `golem up` brought the engine up in router
+mode on b11379, `down` stopped it and returned the card to the desktop, and
+`start-windows.ps1` then started the same engine: **the two `/props` answers are identical**
+(`role: router`, `max_instances: 1`, `models_autoload: true`, the same `build_info`), the
+same pid file is written, and the banner and the `$env:` block match the launcher's line for
+line. The paired bench is not run: the two command lines are already identical, so it would
+measure the same configuration twice. What the run did find is the pipe above, which is why
+`up` is not handed over yet.
+
+**The model fetch is in too.** `up` reads the preset's `; Download:` comments before it
+starts anything, exactly as `cmd_up`'s `ensure_models` and `start-windows.ps1` do: the
+default section's missing files are fetched, another section's are a warning naming
+`golem pull <section>`, a preset whose alias names no section is fetched whole (a new
+preset), and a section that names a model no `; Download:` comment covers is fatal for the
+section being served and a warning for the rest. The download itself is `pull.rs`'s - one
+downloader, one completeness rule, so a model fetched by `up` and one fetched by `pull` are
+the same bytes.
+
+Measured on a scratch home with the engine junctioned in (no 550 MB install) and a
+deliberately empty `data/models`: `up` warned about the other section, fetched the 0.5B
+(379 MB, size-checked, `.sha256` written), and then started the engine - a fresh machine's
+first `up` is a download and then a working server, which is what the launchers promise.
+`up --dry-run` reports what a real one would fetch, since it installs and downloads nothing.
+
+**Single-model mode with no preset is ported too**, which is the shape a fresh clone has
+(`.env.example` ships `MODELS_PRESET` commented out). `up` builds that command line from
+`.env` the way the launcher does - `MODEL_FILE`, `CONTEXT_SIZE`, `GPU_LAYERS`, `jinja`,
+`flash-attn on`, the cache types, `LOAD_MODE`, `SPEC_TYPE`, `DRAFT_FILE`, then `EXTRA_ARGS`
+verbatim and last - and the closing line names the model *file* there and the alias when a
+preset chose the model, as the launcher's does.
+
+Measured in a scratch clone with `data/models` and `.local` junctioned in: `up --dry-run`
+and `start-windows.ps1 -DryRun` print the same line flag for flag, `EXTRA_ARGS` included and
+both absolute paths included, with the path separator the only difference. That is the
+verification this item was waiting on, and it needed the clone because the script reads
+`.env` from the checkout it sits in.
+
+**Still to do, in order.**
+
+1. **The piped `up`**, above: the one place the port does not behave like the launcher, and
+   the reason `./golem` and `golem.cmd` keep their `up`/`restart` arms and both scripts stay.
+   [plan-service.md](plan-service.md) sets out the three ways to close it - and records that
+   the service alone does *not*, because the inheritance happens at whichever process calls
+   `CreateProcess`, not at whichever process owns the engine.
+2. **The Linux and docker drivers.** Linux is the same code as Windows with different asset
+   keys and no zip to work around. Docker is a larger question than a driver:
+   [plan-deploy-modes.md](plan-deploy-modes.md) argues it stops being a deploy mode at all and becomes an
+   image whose entrypoint is golem - which is another reason the service comes first.
 
 ## What stays
 

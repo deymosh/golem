@@ -36,6 +36,12 @@ pub mod tune;
 /// Rust; the rest is downloading a release and spawning a process.
 pub mod adapter;
 
+/// The regex subset the adapters' `windows_asset_*` keys use, applied the way
+/// PowerShell's `-match` applies them. The binary has no regex crate and will
+/// not gain one, so this is the whole of what those patterns need - and a
+/// construct outside it is an error, not a silent literal.
+pub mod pattern;
+
 /// `golem.toml`: the TOML subset the binary's own configuration file uses,
 /// read and written line by line so the comments survive.
 pub mod config;

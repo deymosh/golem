@@ -61,6 +61,33 @@ what arithmetic already knows.
    different contexts give VRAM per context token exactly. From that, the largest context
    that fits under the wall is arithmetic. The ladder then *confirms* the prediction with one
    point, instead of doubling four times to discover it.
+
+   **What that confirmation must not do, on the way to being written.** The obvious wiring is
+   predict, measure, and on a failure fall back to the ladder's existing rule - one midpoint
+   between the last context that fit and the attempt. That rule is right for a ladder, where
+   `current` is a rung one doubling below the attempt, and wrong for a prediction, where
+   `current` is the calibration point near the *bottom*: seed 4096, prediction 240000,
+   failure, midpoint 122048. The ladder would have reached 249344. A tuner that finds a
+   worse context in fewer loads is not a win.
+
+   So the fallback has to re-predict rather than bisect once, and the failed point is what it
+   re-predicts from:
+
+   - **A failure over the VRAM wall** is a real third point - the model loaded and the card
+     went past the wall - so the two highest points, the failed one included, give a steeper
+     slope and a second prediction that lands near the true ceiling.
+   - **A failure by the decode floor** is not a point at all: the model spilled to system
+     memory, and its VRAM reading describes where the spill ended up rather than what the
+     context costs. There the honest answer is a bisection between the last context that fit
+     and the failed attempt.
+
+   Which of the two a failure is, is already decided - `maximize_ctx` computes `over_wall`
+   and `under_floor` separately today. What is new is that the two now lead somewhere
+   different.
+
+   This is worth settling before the code, and it is also why step 4 is not optional: the
+   margin between "predicts the ceiling" and "predicts one the card refuses" is a property of
+   this machine's card, and only a measured run says which way it lands.
 4. **Refine only the knobs that can still matter.** Threads: one point, and only when the
    observed decode is within reach of the floor. Batch/ubatch: `ub` is the prefill lever and
    the collapse test already catches a bad one - one alternative, not three. Spec decoding:

@@ -151,11 +151,30 @@ As of 2026-10-20 (`experiment/token-machine`):
 - **The clean-machine walk ran**: a scratch clone with the binary shipped and the models
   already present starts and drives an engine with no shell at all. **The missing piece is a
   release asset** - see the walk section.
-- **The launcher port has started** (2026-10-20, later): `golem down` kills the process
-  tree and waits for the card itself, `up --dry-run` resolves the whole command line and
-  agrees with `start-windows.ps1 -DryRun` flag for flag, and `golem_core::adapter` is the
-  flag translation `flag.*` / `map.*` describes. `docs/plan-launchers.md` has the rest:
-  install, spawn, restart, then the Linux and docker drivers.
+- **The launchers are the binary's for Windows and native mode** (2026-10-20, later):
+  `golem down` kills the process tree and waits for the card; `golem up` resolves the whole
+  command line, **installs the pinned build when it is missing**, **fetches the model the
+  preset needs** (the default section's, with the others warned about rather than pulled),
+  spawns the server with its own `--log-file` and its stdout/stderr closed, writes the pid,
+  and waits for `/health` with a ten-minute deadline *and* an early exit - the moment the
+  child is gone it prints the tail of the server's own log and fails with its exit code,
+  instead of polling a corpse. `restart` is `down` then `up`. `golem_core::adapter` is the flag translation `flag.*` / `map.*`
+  describes, and `golem_core::pattern` is the regex subset the adapters' `windows_asset_*`
+  keys need - the binary gained no crate for either.
+  Docker keeps its launcher (`docker compose up -d` is a different thing) and so does an
+  engine that installs itself - Strata's `launcher = strata` is a git clone and a Python
+  setup, and `up` says so and hands the work back rather than breaking it. Those two are
+  the only hand-backs left: single-model mode with no preset - the shape a fresh clone has -
+  is the binary's now, and its command line matches `-DryRun` flag for flag. That is why no
+  launcher script is deleted yet, and why `./golem` / `golem.cmd` still keep their
+  `up`/`restart` arms.
+  **Measured**: `up --dry-run` and `start-windows.ps1 -DryRun` print the same line flag for
+  flag (only a path separator differs), and `release::ensure` against the real b11379 release
+  in a scratch home produced the same 56 files the script's own install of that build holds.
+  **Not yet measured**: the live paired start - same pid file, same `/props`, benched within
+  noise - which is a 20 GB load and waits for the desktop. `up` also does not fetch a missing
+  model yet, which `cmd_up` and `start-windows.ps1` both do. `docs/plan-launchers.md` has
+  both, in order.
 - **The direction after this page (2026-10-20, from the user)**: *the binary is the app* -
   download, configure, tune and serve with no script behind any of it, because every script
   is a place that needs Git Bash, or WSL, or a second implementation for the other OS. The
@@ -166,7 +185,10 @@ As of 2026-10-20 (`experiment/token-machine`):
   and refine spends one probe per knob). A **native UI** is a direction the user raised, not
   a task: the page stays until something better exists, and `tui.rs` is the proof that the
   console's data is a plain struct with actions as callbacks.
-- **Next**: the re-bench on a quiet desktop from an emptied database, then `./golem report`.
+- **Next**: the launcher port's live paired start (the binary's `up` against
+  `start-windows.ps1`, same `/props`, same pid file, a paired bench), then the model fetch
+  `up` still owes - after which the handover and the scripts go under the migration gate.
+  Then a release asset, so a fresh clone can reach any of this at all.
 - Worth borrowing when the console grows a LAN face: a `Host`-header check, since the
   current console binds 127.0.0.1 only and that is the reason it needs none today.
 

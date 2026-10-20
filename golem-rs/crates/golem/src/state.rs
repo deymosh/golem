@@ -53,6 +53,24 @@ pub fn override_value(home: &Path, override_key: &str, key: &str) -> Option<Stri
     env_value(home, key)
 }
 
+/// The deploy mode for this invocation.
+///
+/// The front door's `--native` / `--docker` / `--windows` wins: `main`
+/// resolves it into `GOLEM_DEPLOY_MODE` before dispatching, exactly as the
+/// shell resolves it before a `cmd_*` runs - so `./golem install --native` is
+/// a native install even on a box whose `.env` says `windows`. `.env` is the
+/// fallback and `native` the default, and an empty assignment counts as
+/// unset, because the shell's `:-` treats it that way.
+///
+/// One reader for the rule, because two commands that disagree about the mode
+/// disagree about everything downstream: `install` builds for one platform
+/// and `up` starts a server for one.
+pub fn deploy_mode(home: &Path) -> String {
+    override_value(home, "GOLEM_DEPLOY_MODE", "DEPLOY_MODE")
+        .filter(|mode| !mode.is_empty())
+        .unwrap_or_else(|| "native".to_string())
+}
+
 /// Write `key="value"` into the home's `.env`.
 ///
 /// Every line that assigns `key` is replaced - including a commented-out one,
@@ -537,6 +555,21 @@ mod tests {
             "TUNE_RUNS=\"3\"\n"
         );
         assert_eq!(env_value(&dir, "TUNE_RUNS").as_deref(), Some("9"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_deploy_mode_comes_from_the_env_file_and_defaults_to_native() {
+        let dir = home("mode");
+        // No `.env` at all: native, which is what the shell defaults to.
+        assert_eq!(deploy_mode(&dir), "native");
+
+        std::fs::write(dir.join(".env"), "DEPLOY_MODE=\"windows\"\n").expect("write");
+        assert_eq!(deploy_mode(&dir), "windows");
+
+        // An empty assignment is unset here too.
+        std::fs::write(dir.join(".env"), "DEPLOY_MODE=\n").expect("write");
+        assert_eq!(deploy_mode(&dir), "native");
         std::fs::remove_dir_all(&dir).ok();
     }
 

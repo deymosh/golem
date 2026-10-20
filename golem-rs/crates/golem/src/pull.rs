@@ -105,11 +105,34 @@ fn run_inner(home: &Path, preset: Option<&str>, log: &mut Log) -> Result<(), Str
     Ok(())
 }
 
+/// Fetch these `(repo, file)` pairs into `data/models`, with one log for the
+/// whole run.
+///
+/// `up`'s half of the downloader, and deliberately the same bytes: `golem
+/// pull` decides *what* to fetch and prints its banner, `up` decides what the
+/// preset needs before anything may start and fetches only that. A second
+/// download path would be a second completeness rule, and the two would
+/// disagree about a model the day one of them changed.
+pub fn fetch_all(home: &Path, jobs: &[(String, String)]) -> Result<(), String> {
+    let models_dir = home.join("data/models");
+    std::fs::create_dir_all(&models_dir)
+        .map_err(|e| format!("cannot create {}: {e}", models_dir.display()))?;
+    let token = env_value(home, "HF_TOKEN");
+    let mut log = Log::open(home);
+    for (repo, file) in jobs {
+        hf_get(&mut log, &models_dir, repo, file, token.as_deref())?;
+    }
+    Ok(())
+}
+
 /// The `(repo, file)` pairs `download-model.sh` fetches with no argument.
+///
+/// Public because `up` fetches the same pair when there is no preset: `.env`
+/// names the model there, and the launcher's model section reads this list.
 ///
 /// The draft comes first, as the shell does it, and only when `DRAFT_FILE` is
 /// set; its repo is `DRAFT_HF_REPO` when that is set, otherwise the model's.
-fn default_jobs(home: &Path) -> Vec<(String, String)> {
+pub fn default_jobs(home: &Path) -> Vec<(String, String)> {
     let repo = env_value(home, "HF_REPO").unwrap_or_else(|| DEFAULT_REPO.to_string());
     let model = env_value(home, "MODEL_FILE").unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let mut jobs = Vec::new();

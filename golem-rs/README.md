@@ -74,9 +74,12 @@ owns.
 
 Every command the shell used to have is the binary's now - `logs`, `pull`, `bench`,
 `eval`, `claude`, `env`, `menu`, `setup`, `install` and `tune --auto` alongside the
-phases above. What is left of the shell is the engine drivers (`up` / `down` /
-`restart`, which the binary runs *through* the launchers, so they cannot be handed
-back), `web status` / `web stop`, and the scripts those launchers run.
+phases above, and since 2026-10-20 `up` / `down` / `restart` as well: the binary
+installs the pinned engine build from its GitHub release, spawns the server with its
+own `--log-file`, writes the pid file and waits for `/health` itself. What is left of
+the shell is `web status` / `web stop`, the launchers' helpers, the no-binary
+fallbacks, and the two cases `up` hands back - docker mode, and an engine that
+installs itself (Strata's git-clone-and-Python setup).
 
 The recorder is `golem-core::record` plus `src/facts.rs`: the row a bench or an eval
 writes to `bench/results.jsonl`, verified byte-identical to what
@@ -97,8 +100,22 @@ The measurement no longer needs a shell - `bench`, `eval` and `tune` are `bench.
 on 2026-10-20 under the migration gate. The scripts that remain are the launchers'
 helpers and the no-binary fallbacks.
 
-The launchers are being ported too, and the first step is in: `golem down` kills the
-process tree and waits for the card itself, and `golem up --dry-run` resolves the whole
-command line (verified flag for flag against `start-windows.ps1 -DryRun`). The plan is
-[docs/plan-launchers.md](../docs/plan-launchers.md); when `up` is the binary's, the last
-`.env` keys move to `golem.toml` and there is no shell left anywhere.
+The launchers are ported for Windows and native mode: `golem up` resolves the command
+line, installs the pinned build when it is absent (`release.rs`, over curl and
+`%SystemRoot%\System32\tar.exe` - no new crate, and Git's GNU tar on PATH cannot read a
+zip), fetches the model the preset needs before starting (`pull.rs`'s downloader, so
+`up` and `pull` fetch the same bytes by the same rule), spawns the server, writes the
+pid and polls `/health` with a deadline and an early exit; `down` kills the process tree
+and waits for the card; `restart` is the two. Docker, Strata and single-model mode with
+no preset keep the shell launcher.
+
+The live paired start has run: `golem up` and `start-windows.ps1` produce the same
+`/props`, the same pid file and the same banner, and in a scratch clone `up --dry-run`
+matches `-DryRun` flag for flag for both single-model shapes. What keeps `./golem` and
+`golem.cmd` owning their `up`/`restart` arms is one measured gap - on Windows the engine
+inherits the caller's stdout pipe, so a *piped* `up` returns only when the engine stops
+([plan-service.md](../docs/plan-service.md) is the fix) - plus docker, which
+[plan-deploy-modes.md](../docs/plan-deploy-modes.md) argues should stop being a mode at all. The plan
+is -
+[docs/plan-launchers.md](../docs/plan-launchers.md) has them in order. After that the
+last `.env` keys move to `golem.toml` and there is no shell left anywhere.

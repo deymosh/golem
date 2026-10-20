@@ -19,10 +19,9 @@ tuner had just chosen. The scripts have no such guard.
 ## The idea
 
 Today `tune <preset>` answers "what flags run *this* model fastest here?". It should
-answer the question the user actually asks on a new machine:
-
-> Give me the smartest model I can run, at the biggest context it can truly serve,
-> without falling below usable speed.
+answer the question a user actually asks on a new machine: give me the smartest model this
+box can run, at the largest context it can genuinely serve, without dropping below a speed
+that is still usable.
 
 Three changes, in order of size:
 

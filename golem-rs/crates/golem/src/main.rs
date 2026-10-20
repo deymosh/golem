@@ -24,6 +24,7 @@ mod measure;
 mod models;
 mod paths;
 mod pull;
+mod release;
 mod setup;
 mod state;
 mod tune;
@@ -44,7 +45,7 @@ Commands (phased in, docs/plan-portable-binary.md):
   report [--no-open|--md]  Static page for sharing, or RESULTS.md for GitHub
   web              Web console: results, controls, live  (phases 2-3)
   status           Is the engine up, and what is it serving
-  up / down        Start / stop through the shell launchers
+  up / down        Start / stop the engine (up installs the pinned build)
   restart          Down then up
   logs [--lines N] Follow the inference log
   pull [preset]    Download the model's GGUF from Hugging Face
@@ -194,16 +195,15 @@ fn take_mode_flags(args: &mut Vec<String>) -> Option<String> {
     mode
 }
 
-/// `golem up|down|restart`: ask the launchers that already know how.
+/// `golem up|down|restart`: the engine, started and stopped.
 ///
-/// Starting an engine is the riskiest code in the project - three deploy
-/// modes, a pinned build, a router preset - and it works; phase 3 reuses it
-/// rather than reimplementing it, and phase 6 decides what to own.
-///
-/// `up` and `down` are this binary's words and `start`/`stop` are
-/// `golem.cmd`'s; [`driver::Driver::verb`] translates whichever it is given,
-/// which is what makes `golem up` work on Windows at all - `golem.cmd` has
-/// no `up`, so the verb used to reach it as an unknown command.
+/// `up`, `down` and `restart` are the binary's for Windows and native mode
+/// (docs/plan-launchers.md); the shell launchers keep docker, and any engine
+/// whose adapter says it installs itself some other way. `up` and `down` are
+/// this binary's words and `start`/`stop` are `golem.cmd`'s; the launcher path
+/// below translates whichever it is given through [`driver::Driver::verb`],
+/// which is what makes `golem up` reach `golem.cmd` at all - it has no `up`,
+/// so the verb used to arrive as an unknown command.
 ///
 /// A mode flag the user typed is handed to the launcher as the launcher's own
 /// flag: the launcher reads `DEPLOY_MODE` from `.env`, so a mode that lived
@@ -211,21 +211,15 @@ fn take_mode_flags(args: &mut Vec<String>) -> Option<String> {
 /// `./golem up --docker` would start a native server.
 fn cmd_driver(action: &str, mode: Option<&str>, rest: &[String]) -> ExitCode {
     let home = prepare_home();
+    let deploy = state::deploy_mode(&home);
 
     // `up --dry-run` resolves everything and starts nothing - the launcher's
     // `-DryRun`, and the check a port of `up` needs: the command line is the
-    // thing worth diffing, not the banner.
+    // thing worth diffing, not the banner. It answers in every mode, as it did
+    // before the port: it is a resolution report, not a start.
     if matches!(action, "up" | "start") && rest.iter().any(|a| a == "--dry-run") {
-        return match launch::plan(&home) {
-            Ok(plan) => {
-                for (key, value) in &plan.dropped {
-                    println!("[WARN] this engine has no equivalent of --{key} {value}, dropped");
-                }
-                println!("[ OK ] dry run: \"{}\" {}", plan.program.display(), plan.args.join(" "));
-                println!("       (working directory: {})", plan.workdir.display());
-                println!("       serving: {}  -> pid {}", plan.served, plan.pid_file.display());
-                ExitCode::SUCCESS
-            }
+        return match launch::up(&home, true) {
+            Ok(_) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("[FAIL] {e}");
                 ExitCode::from(1)
@@ -233,13 +227,30 @@ fn cmd_driver(action: &str, mode: Option<&str>, rest: &[String]) -> ExitCode {
         };
     }
 
+    // The port's own verbs. Docker keeps its launcher (`docker compose up -d`
+    // is a different thing), and an engine the binary cannot install says so
+    // and falls through to the shell below rather than failing.
+    if deploy != "docker" && matches!(action, "up" | "start" | "restart") {
+        let outcome = if action == "restart" {
+            launch::restart(&home)
+        } else {
+            launch::up(&home, false)
+        };
+        match outcome {
+            Ok(launch::Outcome::Started) => return ExitCode::SUCCESS,
+            Ok(launch::Outcome::NeedsLauncher(why)) => println!("[ .. ] {why}"),
+            Err(e) => {
+                eprintln!("[FAIL] {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+
     // `down` is the binary's own, for windows and native mode. Stopping is a
     // process tree and a wait for the card, and neither needs a launcher - the
     // first step of the launchers' port, and the one with the correctness rule
     // (kill the children, then wait for the VRAM). Docker keeps the launcher:
     // its stop is `docker compose down`, which is a different thing.
-    let deploy = state::override_value(&home, "GOLEM_DEPLOY_MODE", "DEPLOY_MODE")
-        .unwrap_or_else(|| "native".to_string());
     if matches!(action, "down" | "stop") && deploy != "docker" {
         return code(launch::down(&home));
     }

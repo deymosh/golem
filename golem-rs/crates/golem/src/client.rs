@@ -46,21 +46,46 @@ fn alias(home: &Path) -> String {
         .unwrap_or_else(|| "local-model".to_string())
 }
 
+/// The four values both export blocks carry.
+///
+/// One reader for the two spellings: `export` for a POSIX shell and `$env:`
+/// for PowerShell are the same four facts, and a second copy of the defaults
+/// is how `up` would end up pointing a client at a different port than `env`
+/// does.
+fn values(home: &Path) -> (String, String, String, String) {
+    (host(home), port(home), api_key(home), alias(home))
+}
+
 /// `golem env`: the exports, as a shell would source them.
 ///
 /// Byte for byte what `cmd_env`'s heredoc prints, including the comment line
 /// above the four exports and the trailing newline.
 pub fn exports(home: &Path) -> String {
-    let host = host(home);
-    let port = port(home);
-    let key = api_key(home);
-    let alias = alias(home);
+    let (host, port, key, alias) = values(home);
     format!(
         "# Point Claude Code at Golem:\n\
          export ANTHROPIC_BASE_URL=\"http://{host}:{port}\"\n\
          export ANTHROPIC_AUTH_TOKEN=\"{key}\"\n\
          export ANTHROPIC_MODEL=\"{alias}\"\n\
          export ANTHROPIC_SMALL_FAST_MODEL=\"{alias}\"\n"
+    )
+}
+
+/// The same four exports, in the syntax the shell that ran the launcher
+/// reads.
+///
+/// `golem up` prints this in Windows mode because the launcher it replaces
+/// prints it: `start-windows.ps1` ends on a `$env:` block, and `up` is
+/// typed in PowerShell or `cmd`, where `export` is not a command. Native
+/// mode keeps [`exports`], which is what `cmd_up` ends on there.
+pub fn powershell_exports(home: &Path) -> String {
+    let (host, port, key, alias) = values(home);
+    format!(
+        "# Point Claude Code at Golem:\n\
+         $env:ANTHROPIC_BASE_URL = \"http://{host}:{port}\"\n\
+         $env:ANTHROPIC_AUTH_TOKEN = \"{key}\"\n\
+         $env:ANTHROPIC_MODEL = \"{alias}\"\n\
+         $env:ANTHROPIC_SMALL_FAST_MODEL = \"{alias}\"\n"
     )
 }
 
@@ -156,6 +181,29 @@ mod tests {
         let dir = home("real-host");
         std::fs::write(dir.join(".env"), "LOCAL_AI_HOST=\"192.168.1.5\"\n").expect("write");
         assert!(exports(&dir).contains("http://192.168.1.5:8000"), "{}", exports(&dir));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_powershell_block_is_the_same_four_values() {
+        // `up` in Windows mode ends on the block `start-windows.ps1` prints,
+        // which is the same four facts in the syntax the shell it was typed
+        // in actually reads.
+        let dir = home("powershell");
+        std::fs::write(
+            dir.join(".env"),
+            "LOCAL_AI_HOST=\"0.0.0.0\"\nLOCAL_AI_PORT=\"8080\"\n\
+             LOCAL_AI_API_KEY=\"secret\"\nMODEL_ALIAS=\"ornith-1.5-35b\"\n",
+        )
+        .expect("write");
+        assert_eq!(
+            powershell_exports(&dir),
+            "# Point Claude Code at Golem:\n\
+             $env:ANTHROPIC_BASE_URL = \"http://127.0.0.1:8080\"\n\
+             $env:ANTHROPIC_AUTH_TOKEN = \"secret\"\n\
+             $env:ANTHROPIC_MODEL = \"ornith-1.5-35b\"\n\
+             $env:ANTHROPIC_SMALL_FAST_MODEL = \"ornith-1.5-35b\"\n"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

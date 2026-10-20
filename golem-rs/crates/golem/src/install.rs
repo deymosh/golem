@@ -89,7 +89,7 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
     // The two mode guards come first, before anything is looked at or
     // created. In those modes there is no build to do, and the useful answer
     // is the one that names where it does happen.
-    let mode = deploy_mode(home);
+    let mode = state::deploy_mode(home);
     if let Some(message) = mode_guard(&mode) {
         eprintln!("[ERROR] {message}");
         return 1;
@@ -364,17 +364,6 @@ fn env_or(home: &Path, override_key: &str, key: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
-/// The deploy mode for this invocation.
-///
-/// The front door's `--native` / `--docker` / `--windows` wins: `main`
-/// resolves it into `GOLEM_DEPLOY_MODE` before dispatching, exactly as the
-/// shell resolves it before `cmd_install` runs - so `./golem install --native`
-/// is a native install even on a box whose `.env` says `windows`. `.env` is
-/// the fallback and `native` the default.
-fn deploy_mode(home: &Path) -> String {
-    env_or(home, "GOLEM_DEPLOY_MODE", "DEPLOY_MODE", "native")
-}
-
 /// Whether `tool` is on PATH - the shell's `command -v`.
 ///
 /// The PATH walk itself rather than `where`/`which`: those are not the same
@@ -543,18 +532,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn the_deploy_mode_comes_from_the_env_file_and_defaults_to_native() {
-        let dir = home("mode");
-        // No `.env` at all: native, which is what the shell defaults to.
-        assert_eq!(deploy_mode(&dir), "native");
-
-        std::fs::write(dir.join(".env"), "DEPLOY_MODE=\"windows\"\n").expect("write");
-        assert_eq!(deploy_mode(&dir), "windows");
-
-        // An empty assignment is unset here too.
-        std::fs::write(dir.join(".env"), "DEPLOY_MODE=\n").expect("write");
-        assert_eq!(deploy_mode(&dir), "native");
-        std::fs::remove_dir_all(&dir).ok();
-    }
+    // The deploy-mode rule itself is tested where it lives now
+    // (`state::deploy_mode`): `install` and `up` must not disagree about the
+    // mode they are running in, so there is one reader for both.
 }
