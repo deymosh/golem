@@ -30,13 +30,15 @@ Each fact about a model then lives in one place:
 
 | File | Holds | Written by |
 |---|---|---|
-| `config/models.ini` | llama-server flags only | golem, on pull; the tuner overlays its own |
-| `data/models/<file>.json` | repo, revision, size, sha256, base model, licence, date | golem, beside the file |
+| `config/models.ini` | llama-server flags, and the `; Download:` lines `up` fetches from | golem, on pull; the tuner overlays its own |
+| `data/models/<file>.json` | repo, revision, quant, files, size, base model, licence, date | golem, beside the file |
 | `config/library.ini` | curated models: repo, quant, role, vendor score and its source | shipped with golem |
 
-The `; Download:` and `; Quality:` comments are read for one release and then dropped.
-The Hub publishes no benchmark scores, so a model outside the library ranks in
-`tune --auto` by measured speed and size.
+`golem pull owner/repo[:quant]` writes the first two (`golem_core::hub`); the library is
+compiled into the binary, `golem pull <name>` fetches a library model by name, and `tune
+--auto` ranks by its scores. Still to do: the console's pull box, and ranking a model
+outside the library by measured speed and size, since the Hub publishes no benchmark
+scores.
 
 ## 3. The mark and one look
 

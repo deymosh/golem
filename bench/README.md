@@ -53,7 +53,7 @@ while something was downloading or building carry `"quiet": false` and the page 
 
 | What | How |
 |---|---|
-| Server page, always current | `golem web` → http://127.0.0.1:8787 (live from `results.jsonl`, controls, models, engine log) |
+| Server page, always current | the console `golem service` hosts → http://127.0.0.1:8787 (live from `results.jsonl`, controls, models, engine log) |
 | Static page for sharing | `golem report` → `bench/report.html`, one self-contained file (no server, no CDN) |
 | Markdown for GitHub | `golem report --md` → `bench/RESULTS.md`: a section per machine, a block per model, a row per context |
 

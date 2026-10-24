@@ -1,4 +1,5 @@
-//! The web console (`golem web`): results, models, controls, the live log.
+//! The console `golem service` hosts: results, models, controls, the live
+//! log.
 //!
 //! The results page, served live from `results.jsonl`, and the raw file the
 //! page polls so the jsonl stays the single source of truth; the controls

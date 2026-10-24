@@ -49,7 +49,7 @@ command line. The binary's layers, top to bottom:
 
 | Layer | Modules | Owns |
 |---|---|---|
-| Front ends | `main`, `tui`, `web`, `runner` | the CLI, the full-screen console, the web console; `runner` is the one path a menu entry or a page button takes |
+| Front ends | `main`, `desktop`, `tui`, `web`, `runner` | the CLI, which front end a bare `golem` opens, the full-screen screen, the console; `runner` is the one path a menu entry or a page button takes |
 | Commands | `bench`, `eval`, `measure`, `tune`, `auto_tune`, `pull`, `install`, `setup`, `logs`, `client` | one command each; `measure` records a row after `bench`/`eval` |
 | Engine | `service`, `launch`, `release`, `engine` | who owns the engine, how it is started and stopped, how its build is installed, how it is spoken to |
 | Foundation | `config`, `paths`, `machine`, `proc`, `state`, `facts`, `models` | the configuration, the home's files, the hardware probes, child processes, what the console shows, what a row says |
@@ -60,9 +60,18 @@ need a GPU are thin.
 
 ## The service owns the engine
 
-`golem service` is the only process that starts the engine. `up`, `down`, `restart` and
-`status` from the CLI, the screen's menu and the console's buttons are all clients of it:
-they send a verb, the service runs it (`launch.rs`), and the output streams back.
+`golem service` is the only process that starts the engine, and it hosts the console
+(`CONSOLE_HOST`:`CONSOLE_PORT`, `127.0.0.1:8787` by default) for as long as it runs. The
+console has no login; listening beyond loopback is a configuration choice the service
+warns about at every start. `up`, `down`,
+`restart` and `status` from the CLI, the screen's menu and the console's buttons are all
+clients of it: they send a verb, the service runs it (`launch.rs`), and the output streams
+back.
+
+A bare `golem` picks its front end from how it was started (`desktop.rs`): double-clicked
+on a desktop (Explorer as the parent on Windows; a graphical session with no terminal on
+Linux), it starts the service if needed and opens the console in the browser; in a
+terminal, the full-screen screen; with neither, the usage.
 
 Why a long-lived owner rather than an `up` that spawns and exits:
 

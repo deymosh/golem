@@ -271,7 +271,7 @@ fn model_jobs(home: &Path, plan: &Startup, out: &mut dyn Write) -> Result<Vec<(S
     let mut jobs: Vec<(String, String)> = Vec::new();
     for section in &preset.sections {
         for download in &section.downloads {
-            if models.join(&download.file).is_file() {
+            if models.join(download.name()).is_file() {
                 continue;
             }
             // A section that is not the default one is not fetched: a router
@@ -283,7 +283,7 @@ fn model_jobs(home: &Path, plan: &Startup, out: &mut dyn Write) -> Result<Vec<(S
                 let _ = writeln!(
                     out,
                     "[WARN] preset [{}] is missing {} - fetch it with: golem pull {}",
-                    section.name, download.file, section.name
+                    section.name, download.name(), section.name
                 );
             }
         }
@@ -296,7 +296,7 @@ fn model_jobs(home: &Path, plan: &Startup, out: &mut dyn Write) -> Result<Vec<(S
     let sourced: Vec<&str> = preset
         .sections
         .iter()
-        .flat_map(|section| section.downloads.iter().map(|d| d.file.as_str()))
+        .flat_map(|section| section.downloads.iter().map(|d| d.name()))
         .collect();
     let mut fatal: Vec<&str> = Vec::new();
     for section in &preset.sections {

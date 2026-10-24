@@ -49,10 +49,11 @@ build and the model it needs, and starts serving.
 golem up                     # install the engine if missing, fetch the model, start inference
 golem status                 # health check
 golem claude                 # launch Claude Code pointed at the local model
+golem pull owner/repo        # any GGUF repo on Hugging Face: picks the quant, writes the preset
 golem bench                  # speed: decode + prefill tok/s
 golem eval --long 200000     # quality gate: tool calls + 200K needle
 golem tune                   # auto-tune the offload split for this machine
-golem web                    # console: results, models, start/stop/bench/eval/tune
+golem                        # double-clicked: the console in the browser; in a terminal: the screen
 golem down                   # stop the engine (the service stays; `golem service stop` ends it)
 ```
 
@@ -71,10 +72,14 @@ serves changes until the gate passes; `--adopt` then points `golem.toml` at the 
 `golem tune --auto` picks the best installed model first. How it decides:
 [docs/tuning.md](docs/tuning.md).
 
-**Console** (`golem web`) serves a local page on `127.0.0.1:8787` that stays up whether or
-not an engine is running: live results from `bench/results.jsonl`, every preset with its
-file and state, start/stop/restart/bench/eval/tune buttons, the running engine's log, and a
-form to add a model from a Hugging Face repo. Nothing is exposed beyond localhost.
+**Console.** `golem service` hosts a page on `127.0.0.1:8787` (`CONSOLE_HOST`,
+`CONSOLE_PORT`) for as long as it runs, whether or not an engine is up: live results from
+`bench/results.jsonl`, every preset with its file and state, start/stop/restart/bench/eval/
+tune buttons, the running engine's log, and pulling a model from Hugging Face. It stays on
+localhost unless `CONSOLE_HOST` says otherwise; it has no login, so only open it to a
+network you trust. Double-clicking `golem` on a desktop starts the service if needed and opens the
+console in the browser; typed in a terminal, a bare `golem` opens the full-screen screen
+instead, and on a machine with no screen at all it prints the usage.
 
 **The engine belongs to `golem service`.** `up`, `down`, `restart` and `status` are executed
 by that process and the commands are clients of it, so a killed run cannot leave a model
@@ -97,16 +102,15 @@ commands.
 |---|---|
 | `setup` | machine report, build deps, directory scaffold |
 | `install` | put the pinned engine build on this machine (~600 MB, no compiler needed) |
-| `pull` | download `MODEL_FILE` from `HF_REPO` into `data/models/` (`up` does this automatically for anything missing) |
+| `pull [preset \| name \| owner/repo[:quant]]` | fetch a preset's files, a library model, or any GGUF repo on Hugging Face (picks the quant, writes the preset); with no argument `MODEL_FILE` from `HF_REPO` (`up` fetches anything missing itself) |
 | `up` / `down` / `restart` | start / stop / cycle the engine, through the service that owns it |
 | `status` | health of inference, and whether a service owns it |
-| `service [--up\|stop]` | run the engine owner in the foreground (a container's PID 1), or stop it |
+| `service [--up\|stop]` | run the engine owner, and the console it hosts, in the foreground (a container's PID 1), or stop it |
 | `logs` | follow the inference log |
 | `bench [--runs N] [--prefill TOKENS]` | speed: decode best/median + MTP acceptance, prefill on a ~30K prompt |
 | `eval [--long TOKENS]` | quality gate: arithmetic, tool calls, throughput, needle + decode at depth |
 | `report [--no-open] [--md]` | build `bench/report.html` (self-contained) from the recorded runs; `--md` writes `bench/RESULTS.md` for GitHub instead |
-| `web [--port N]` | console on `127.0.0.1:8787`: live results, models, controls, engine log |
-| `tui` | the same console in the terminal |
+| `tui` | the full-screen screen in the terminal (what a bare `golem` opens there) |
 | `tune [preset] [--adopt] [--dry-run]` / `tune --auto` | the fastest gated setup for this model (or the best installed model) on this machine |
 | `claude [args…]` | `exec claude` with `ANTHROPIC_*` already set |
 | `env` | print those exports |

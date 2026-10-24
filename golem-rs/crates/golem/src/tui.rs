@@ -1,9 +1,11 @@
 //! The full-screen console (`golem tui`, and `golem` with no command).
 //!
-//! The look: the `▟█▙` mark, the status segments that drop off one by one
-//! when the window narrows, the bars, the `▸` marker on the selected entry,
-//! the recent-runs and engine-log panes, and the hint on the last line. The
-//! screen is a list of styled lines, and ratatui does the drawing.
+//! The look: the two-line mark (`golem_core::mark`, the same cells as the
+//! icon), the status segments beside it that drop off one by one when the
+//! window narrows, thin rules, the `▸` marker on the selected entry, the
+//! recent-runs and engine-log panes, and the hint on the last line. State
+//! has one colour per meaning, as on the page: green serving, grey stopped.
+//! The screen is a list of styled lines, and ratatui does the drawing.
 //!
 //! The split that makes it testable is the one the console already uses:
 //! [`screen`] builds the lines from `&App` and touches no I/O, so a test
@@ -35,6 +37,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::{Frame, Terminal};
 
+use golem_core::mark;
 use golem_core::results::{self, Kind};
 
 use crate::config;
@@ -55,7 +58,7 @@ pub enum Action {
     Eval,
     Tune,
     Report,
-    Web,
+    Console,
     Quit,
 }
 
@@ -71,15 +74,13 @@ const ITEMS: &[(&str, Action)] = &[
     ("Eval", Action::Eval),
     ("Tune", Action::Tune),
     ("Report", Action::Report),
-    ("Web", Action::Web),
+    ("Console", Action::Console),
     ("Quit", Action::Quit),
 ];
 
 /// The message line before anything has run.
 const HINT: &str = "up/down move   enter run   mouse wheel scroll   r refresh   q quit";
 
-/// The mark the header opens with.
-const MARK: &str = "\u{259f}\u{2588}\u{2599}"; // ▟█▙
 /// The selection marker.
 const POINTER: &str = "\u{25b8}"; // ▸
 /// The "there are more entries than rows" marker, with the direction to go.
@@ -92,9 +93,6 @@ const RUNS_MAX: usize = 4;
 /// How much of the engine's log the pane can show.
 const LOG_TAIL: usize = 40;
 const LOG_MAX: usize = 6;
-/// The console's port: `web.port`'s default, and what the header's `web`
-/// segment reports on.
-const WEB_PORT: u16 = 8787;
 
 /// How long the loop waits for a key before looking at what else happened.
 ///
@@ -120,10 +118,14 @@ const FACTS_TTL: Duration = Duration::from_secs(10);
 pub struct Facts {
     pub up: bool,
     pub vram_mib: Option<u64>,
+    /// The card's size, for the `used/total` reading.
+    pub vram_total_mib: Option<u64>,
     pub ram_free_gb: Option<f64>,
     pub alias: String,
     pub engine: String,
     pub web_up: bool,
+    /// The port the service hosts the console on.
+    pub console_port: u16,
 }
 
 impl Default for Facts {
@@ -133,10 +135,12 @@ impl Default for Facts {
         Facts {
             up: false,
             vram_mib: None,
+            vram_total_mib: None,
             ram_free_gb: None,
             alias: String::new(),
             engine: "llama.cpp".to_string(),
             web_up: false,
+            console_port: crate::desktop::CONSOLE_PORT,
         }
     }
 }
@@ -247,19 +251,22 @@ impl App {
         let status = engine::status(home);
         let fresh = self.read_at.is_some_and(|at| at.elapsed() < FACTS_TTL);
         let expensive = force || !fresh;
+        // Only worth asking when something is loaded, and only then does the
+        // number mean anything.
+        let gpu = if status.up && expensive { machine::gpu() } else { None };
         self.facts = Facts {
             up: status.up,
-            // Only worth asking when something is loaded, and only then does
-            // the number mean anything.
-            vram_mib: if status.up && expensive {
-                machine::vram_used_mib()
+            vram_mib: if expensive { gpu.as_ref().map(|g| g.used_mib) } else { self.facts.vram_mib },
+            vram_total_mib: if expensive {
+                gpu.as_ref().map(|g| g.total_mib)
             } else {
-                self.facts.vram_mib
+                self.facts.vram_total_mib
             },
             ram_free_gb: if expensive { machine::ram_free_gb() } else { self.facts.ram_free_gb },
             alias: config::get(home, "MODEL_ALIAS").unwrap_or_default(),
             engine: config::get(home, "ENGINE").unwrap_or_else(|| "llama.cpp".to_string()),
-            web_up: state::web_up(WEB_PORT),
+            web_up: state::web_up(crate::desktop::console_port(home)),
+            console_port: crate::desktop::console_port(home),
         };
         if expensive {
             self.read_at = Some(Instant::now());
@@ -334,9 +341,8 @@ fn screen(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
     let hint_rows = if h >= 3 { 2 } else { 0 };
 
     if header_rows > 0 {
-        out.push(bar('=', w));
-        out.push(header(app, w));
-        out.push(bar('-', w));
+        out.extend(header(app, w));
+        out.push(rule(w));
     }
 
     let count = app.items.len();
@@ -349,7 +355,7 @@ fn screen(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
         if i == app.selected {
             out.push(Line::from(Span::styled(
                 format!("  {POINTER} {label}"),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default().fg(PATINA).add_modifier(Modifier::BOLD),
             )));
         } else {
             out.push(Line::from(format!("    {label}")));
@@ -374,7 +380,7 @@ fn screen(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
     // The rule that closes the menu only when something is drawn under it: an
     // empty window is better off with the row.
     if run_rows > 0 || log_rows > 0 {
-        out.push(bar('-', w));
+        out.push(rule(w));
         if run_rows > 0 {
             out.push(section("recent runs"));
             out.extend(tail(&app.runs, run_rows));
@@ -386,7 +392,7 @@ fn screen(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
     }
 
     if hint_rows > 0 {
-        out.push(bar('-', w));
+        out.push(rule(w));
         // The last line is the hint until an action replaces it with its result.
         out.push(Line::from(Span::styled(format!("  {}", app.message), dim())));
     }
@@ -418,9 +424,20 @@ fn window(selected: usize, count: usize, room: usize) -> (usize, usize) {
     (start, shown)
 }
 
-/// A full-width rule.
-fn bar(ch: char, width: usize) -> Line<'static> {
-    Line::from(Span::styled(ch.to_string().repeat(width), dim()))
+/// A full-width thin rule.
+fn rule(width: usize) -> Line<'static> {
+    Line::from(Span::styled("\u{2500}".repeat(width), dim()))
+}
+
+/// The selection's colour: the page's patina accent.
+const PATINA: Color = Color::Rgb(0x4d, 0xbf, 0xab);
+/// Serving, as on the page and in the tray.
+const SERVING: Color = Color::Rgb(0x55, 0xc2, 0x7a);
+
+/// The mark's body colour, from the mark itself.
+fn clay() -> Style {
+    let [r, g, b] = mark::CLAY;
+    Style::default().fg(Color::Rgb(r, g, b))
 }
 
 /// A pane's heading.
@@ -432,41 +449,50 @@ fn dim() -> Style {
     Style::default().add_modifier(Modifier::DIM)
 }
 
-/// The top line: what the machine is doing, as segments - the mark, up or
-/// down, VRAM in use, the alias, the engine, the console, free memory.
+/// The two header lines: the mark, and what the machine is doing beside it.
 ///
-/// Segments are dropped from the right until the line fits: a segment is
-/// either whole on the line or not there, never cut mid-word.
-fn header(app: &App, width: usize) -> Line<'static> {
+/// The first line is the state, the model, the VRAM and the engine; the
+/// second the console and the free memory. Segments are dropped from the
+/// right until a line fits: a segment is either whole on the line or not
+/// there, never cut mid-word.
+fn header(app: &App, width: usize) -> Vec<Line<'static>> {
     let facts = &app.facts;
-    let mut segments: Vec<(String, Style)> = vec![(
-        format!("{MARK} GOLEM"),
-        Style::default().add_modifier(Modifier::BOLD),
-    )];
-    segments.push(if facts.up {
-        ("  \u{25cf} up".to_string(), Style::default().fg(Color::Green))
+    let mut first: Vec<(String, Style)> = vec![
+        (mark::GLYPHS[0].to_string(), clay()),
+        (" GOLEM".to_string(), Style::default().add_modifier(Modifier::BOLD)),
+    ];
+    first.push(if facts.up {
+        ("   \u{25cf} serving".to_string(), Style::default().fg(SERVING))
     } else {
-        ("  \u{25cb} down".to_string(), Style::default().fg(Color::Red))
+        ("   \u{25cb} stopped".to_string(), dim())
     });
-    if let Some(vram) = facts.vram_mib {
-        segments.push((format!("   {vram} MiB VRAM"), Style::default()));
-    }
     if !facts.alias.is_empty() {
-        segments.push((
-            format!("   {}", facts.alias),
-            Style::default().add_modifier(Modifier::BOLD),
-        ));
+        first.push((format!("   {}", facts.alias), Style::default().add_modifier(Modifier::BOLD)));
     }
-    segments.push((format!("  [{}]", facts.engine), dim()));
-    segments.push(if facts.web_up {
-        ("  web up".to_string(), Style::default().fg(Color::Green))
+    let gb = |mib: u64| mib as f64 / 1024.0;
+    match (facts.vram_mib, facts.vram_total_mib) {
+        (Some(used), Some(total)) => {
+            first.push((format!("   {:.1}/{:.1} GB VRAM", gb(used), gb(total)), Style::default()))
+        }
+        (Some(used), None) => first.push((format!("   {:.1} GB VRAM", gb(used)), Style::default())),
+        _ => {}
+    }
+    first.push((format!("   [{}]", facts.engine), dim()));
+
+    let mut second: Vec<(String, Style)> = vec![(mark::GLYPHS[1].to_string(), clay())];
+    second.push(if facts.web_up {
+        (format!(" console :{}", facts.console_port), Style::default().fg(SERVING))
     } else {
-        ("  web down".to_string(), dim())
+        (" console off".to_string(), dim())
     });
     if let Some(ram) = facts.ram_free_gb {
-        segments.push((format!("   {ram:.1} GB free"), Style::default()));
+        second.push((format!("   {ram:.1} GB free"), dim()));
     }
+    vec![fit(first, width), fit(second, width)]
+}
 
+/// The segments that fit in `width` after the two-column indent, whole.
+fn fit(segments: Vec<(String, Style)>, width: usize) -> Line<'static> {
     let mut used = 2;
     let mut spans = vec![Span::raw("  ")];
     for (text, style) in segments {

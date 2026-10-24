@@ -6,13 +6,11 @@
 //! on first run). The modules are the `golem` library's (`lib.rs`); this file
 //! only parses the arguments and picks the verb.
 
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use golem::config::Overrides;
+use golem::desktop::{self, FrontEnd, Launch};
 use golem::{
     auto_tune, client, install, launch, logs, measure, paths, pull, runner, service, setup, tui,
     tune, web,
@@ -23,7 +21,8 @@ golem - serve one local model to Claude Code and any OpenAI client
 
 Usage: golem [command] [args]
 
-With no command the full-screen console opens (the same as `golem tui`).
+With no command: double-clicked on a desktop, the console opens in the
+browser; in a terminal, the full-screen screen (`golem tui`).
 
 Serving:
   up [--dry-run]   Start the engine (installs the pinned build and the
@@ -32,7 +31,9 @@ Serving:
   restart          Down, then up
   status           Is the engine up, and what is it serving
   service [--up|stop]
-                   The process that owns the engine; up/down/restart ask it
+                   The process that owns the engine and hosts the console
+                   (127.0.0.1:8787 by default); up/down/restart
+                   ask it
   logs [--lines N] Follow the engine's log
   claude [args]    Launch Claude Code pointed at this server
   env              Print the exports for a shell
@@ -49,8 +50,7 @@ Measuring:
   tune --auto      Pick the best installed model, then tune it
 
 Results:
-  web [--port N]   Console: results, models, controls, live log
-  tui              The same console in the terminal
+  tui              The full-screen screen in the terminal
   report [--md]    Static results page (or bench/RESULTS.md)
   results          List the recorded rows
   version          Print the version
@@ -68,22 +68,19 @@ async fn main() -> ExitCode {
             print!("{USAGE}");
             ExitCode::SUCCESS
         }
-        // Bare `golem` is the screen, so double-clicking the binary opens
-        // the console. Piped or scripted there is no screen to
-        // open and raw mode cannot be had, so the usage is the answer that
-        // is actually useful there.
-        None => {
-            if std::io::stdout().is_terminal() {
-                cmd_tui().await
-            } else {
+        // Bare `golem`: the console for a double-click, the screen in a
+        // terminal, the usage when piped (`desktop::front_end`).
+        None => match desktop::front_end(Launch::read()) {
+            FrontEnd::Console => cmd_open_console().await,
+            FrontEnd::Screen => cmd_tui().await,
+            FrontEnd::Usage => {
                 print!("{USAGE}");
                 ExitCode::SUCCESS
             }
-        }
+        },
         Some("report") => cmd_report(&args[1..]),
         Some("results") => cmd_results(&args[1..]),
-        Some("web") => cmd_web(&args[1..]).await,
-        Some("tui" | "menu") => cmd_tui().await,
+        Some("tui") => cmd_tui().await,
         Some("status") => cmd_status(),
         Some("bench") => code(measure::bench(&prepare_home(), &args[1..])),
         Some("eval") => code(measure::eval(&prepare_home(), &args[1..])),
@@ -193,24 +190,39 @@ fn cmd_driver(action: &str, rest: &[String]) -> ExitCode {
     ExitCode::from(2)
 }
 
-/// `golem tui`: the full-screen console, with every action routed through the
+/// A double-clicked `golem`: the service (which hosts the console) and the
+/// console in the browser. When that fails there is a console window to
+/// fall back to, so the screen opens there and says why.
+async fn cmd_open_console() -> ExitCode {
+    let home = prepare_home();
+    match desktop::open_console(&home, &mut std::io::sink()) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("[FAIL] cannot open the console: {e}");
+            cmd_tui().await
+        }
+    }
+}
+
+/// `golem tui`: the full-screen screen, with every action routed through the
 /// service that owns the engine, or run as this binary's own verbs.
 ///
 /// The screen decides *which* action; what an action does is this function's
-/// business, which is the seam `tui::run` takes a callback for. One entry is
-/// not an action - `Web` starts this binary's own console, in this
-/// process, so it lives exactly as long as the screen that asked for it.
+/// business, which is the seam `tui::run` takes a callback for. `Console` is
+/// not a verb: it opens the console the service hosts, starting the service
+/// when there is none.
 async fn cmd_tui() -> ExitCode {
     let home = prepare_home();
     let log = paths::job_log(&home);
-    let console = Console::new(home.clone());
-    let handle = tokio::runtime::Handle::current();
     // The closure owns everything it touches: `tui::run` hands it to a
     // thread per action, so nothing here can borrow from this function.
     let act_home = home.clone();
 
     let outcome = tui::run(&home, move |action| match action {
-        tui::Action::Web => console.start(&handle),
+        tui::Action::Console => match desktop::open_console(&act_home, &mut std::io::sink()) {
+            Ok(url) => format!("console on {url}"),
+            Err(e) => format!("console: {e}"),
+        },
         // `run` returns on Quit without asking, so this arm is unreachable;
         // it exists because the match has to be total.
         tui::Action::Quit => String::new(),
@@ -242,7 +254,7 @@ fn verb_of(action: tui::Action) -> Option<&'static str> {
         tui::Action::Eval => Some("eval"),
         tui::Action::Tune => Some("tune"),
         tui::Action::Report => Some("report"),
-        tui::Action::Web | tui::Action::Quit => None,
+        tui::Action::Console | tui::Action::Quit => None,
     }
 }
 
@@ -252,54 +264,6 @@ fn describe(verb: &str, code: i32) -> String {
     match code {
         0 => format!("{verb}: done"),
         code => format!("{verb}: exit {code} - see logs/web-job.log"),
-    }
-}
-
-/// The console the TUI's Web entry starts, at most once per process.
-struct Console {
-    home: PathBuf,
-    started: Arc<AtomicBool>,
-}
-
-impl Console {
-    fn new(home: PathBuf) -> Console {
-        Console { home, started: Arc::new(AtomicBool::new(false)) }
-    }
-
-    /// Start the console and return the line to show.
-    ///
-    /// The socket is bound here, synchronously, rather than inside the task
-    /// that serves it: a message line that promises a console which then
-    /// fails to bind is worse than no console at all, and the bind is the
-    /// only part that can fail for a reason worth reporting.
-    fn start(&self, handle: &tokio::runtime::Handle) -> String {
-        let cfg = web::Config {
-            results: paths::results(&self.home),
-            template: paths::template(&self.home),
-            home: self.home.clone(),
-            ..web::Config::default()
-        };
-        let address = web::address(&cfg);
-        if self.started.load(Ordering::SeqCst) {
-            return format!("console already on http://{address}");
-        }
-        let listener = match std::net::TcpListener::bind(&address) {
-            Ok(listener) => listener,
-            Err(e) => return format!("console cannot bind {address}: {e}"),
-        };
-        let _ = listener.set_nonblocking(true);
-        // `from_std` wants a reactor, which is what entering the handle gives.
-        let _guard = handle.enter();
-        match tokio::net::TcpListener::from_std(listener) {
-            Ok(listener) => {
-                self.started.store(true, Ordering::SeqCst);
-                handle.spawn(async move {
-                    let _ = web::serve_on(listener, cfg).await;
-                });
-                format!("console on http://{address}")
-            }
-            Err(e) => format!("console cannot start: {e}"),
-        }
     }
 }
 
@@ -316,45 +280,6 @@ fn code(status: i32) -> ExitCode {
 fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     let i = args.iter().position(|a| a == flag)?;
     args.get(i + 1).map(String::as_str)
-}
-
-/// The console, on `--host`/`--port` (127.0.0.1:8787 by default).
-async fn cmd_web(args: &[String]) -> ExitCode {
-    let home = prepare_home();
-    // The console comes up whether or not anything has been measured: on a
-    // fresh machine that is the point - it is where you see the first result.
-    let results = results_path(args).unwrap_or_else(|| paths::results(&home));
-    if !results.is_file() {
-        println!("[ .. ] no results yet at {} - the page starts empty", results.display());
-    }
-    let template = paths::template(&home);
-    if !template.is_file() {
-        eprintln!("[FAIL] no report template at {}", template.display());
-        return ExitCode::from(1);
-    }
-
-    let mut cfg = web::Config { results, template, home, ..web::Config::default() };
-    if let Some(port) = arg_value(args, "--port") {
-        match port.parse() {
-            Ok(p) => cfg.port = p,
-            Err(_) => {
-                eprintln!("[FAIL] --port wants a number, got {port:?}");
-                return ExitCode::from(1);
-            }
-        }
-    }
-    if let Some(host) = arg_value(args, "--host") {
-        cfg.host = host.to_string();
-    }
-
-    println!("[ OK ] golem web UI on http://{}:{}  (Ctrl+C to stop)", cfg.host, cfg.port);
-    match web::serve(cfg).await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("[FAIL] {e}");
-            ExitCode::from(1)
-        }
-    }
 }
 
 /// The records to read: `--results <path>` when given (any file, which is
@@ -396,33 +321,6 @@ fn read_rows(results: &Path) -> Option<Vec<golem_core::results::Row>> {
             None
         }
     }
-}
-
-/// Open a file with the desktop's own handler, best effort: the page is
-/// written either way, and a machine with no opener - a server, a bare
-/// container - must not turn a written report into a failed command.
-fn open_in_browser(path: &Path) {
-    let mut command = if cfg!(windows) {
-        // `start` is a cmd.exe builtin and its first argument is the window
-        // title: without the empty one, a quoted path is taken as the title
-        // and nothing opens.
-        let mut command = std::process::Command::new("cmd");
-        command.args(["/c", "start", ""]).arg(path);
-        command
-    } else if cfg!(target_os = "macos") {
-        let mut command = std::process::Command::new("open");
-        command.arg(path);
-        command
-    } else {
-        let mut command = std::process::Command::new("xdg-open");
-        command.arg(path);
-        command
-    };
-    let _ = command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
 }
 
 fn cmd_report(args: &[String]) -> ExitCode {
@@ -479,7 +377,7 @@ fn cmd_report(args: &[String]) -> ExitCode {
     // The page is for looking at; --no-open is for a script (and for anyone
     // who asked for it in a terminal they are already looking at).
     if !args.iter().any(|a| a == "--no-open") {
-        open_in_browser(&out);
+        desktop::open(&out);
     }
     ExitCode::SUCCESS
 }

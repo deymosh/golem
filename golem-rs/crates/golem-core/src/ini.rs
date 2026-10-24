@@ -42,7 +42,17 @@ impl Entry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Download {
     pub repo: String,
+    /// The file's path in the repository, which may be in a subdirectory
+    /// (a split model's shards often are).
     pub file: String,
+}
+
+impl Download {
+    /// The name the file is stored under in `data/models`: the path's last
+    /// part, so a split model's shards land side by side.
+    pub fn name(&self) -> &str {
+        self.file.rsplit('/').next().unwrap_or(&self.file)
+    }
 }
 
 /// One `[section]` of the file.

@@ -72,8 +72,12 @@ pub fn plan(action: &str, arg: &str) -> Option<Plan> {
             "--long".to_string(),
             "200000".to_string(),
         ])),
-        // Both name a preset; with no name each falls back to the default
-        // model, which is what an empty field means.
+        // Both name what to work on - a preset, and for pull also a library
+        // model or owner/repo[:quant]; with no name each falls back to the
+        // default model, which is what an empty field means. A value that
+        // starts with `-` would reach the command as a flag, so it is no
+        // action at all.
+        "tune" | "pull" if arg.starts_with('-') => None,
         "tune" | "pull" if !arg.is_empty() => {
             Some(Plan::Command(vec![action.to_string(), arg.to_string()]))
         }
@@ -216,6 +220,19 @@ mod tests {
         // No name: the verb alone, not an empty argument.
         assert_eq!(plan("tune", ""), Some(command(&["tune"])));
         assert_eq!(plan("pull", ""), Some(command(&["pull"])));
+        // A repository, as the console's pull box sends it.
+        assert_eq!(
+            plan("pull", "unsloth/Qwen3.5-9B-GGUF:Q6_K"),
+            Some(command(&["pull", "unsloth/Qwen3.5-9B-GGUF:Q6_K"]))
+        );
+    }
+
+    #[test]
+    fn an_argument_that_looks_like_a_flag_is_refused() {
+        // `tune --adopt` from a page would change what serves without the
+        // person at the screen asking for it.
+        assert_eq!(plan("tune", "--adopt"), None);
+        assert_eq!(plan("pull", "-x"), None);
     }
 
     #[test]

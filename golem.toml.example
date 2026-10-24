@@ -101,6 +101,12 @@ GPU_BACKEND = "auto"
 LOCAL_AI_HOST = "127.0.0.1"
 LOCAL_AI_PORT = "8000"
 
+# The console `golem service` hosts beside the engine. It has no login, and
+# its buttons start engines and delete model files: keep it on 127.0.0.1
+# unless the network it faces is trusted. "0.0.0.0" listens everywhere.
+CONSOLE_HOST = "127.0.0.1"
+CONSOLE_PORT = "8787"
+
 # The engine's own shared secret (`llama-server --api-key`). OpenAI clients
 # send it as a Bearer token, Anthropic clients as ANTHROPIC_AUTH_TOKEN or
 # x-api-key. Change it before exposing the port.

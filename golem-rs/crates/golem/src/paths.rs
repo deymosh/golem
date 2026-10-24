@@ -33,6 +33,18 @@ const EMBEDDED_TEMPLATE: &str = include_str!("../../../../bench/report.template.
 /// because it holds the port, the key and the model this machine serves.
 const EMBEDDED_CONFIG: &str = include_str!("../../../../golem.toml.example");
 
+/// The library (`config/library.ini`), compiled in: the curated models are
+/// part of what a release knows. A home's own copy takes its place
+/// ([`library`]).
+pub const EMBEDDED_LIBRARY: &str = include_str!("../../../../config/library.ini");
+
+/// The library this home uses: its own `config/library.ini` when there is
+/// one, else the compiled-in copy.
+pub fn library(home: &Path) -> Vec<golem_core::library::Entry> {
+    let own = std::fs::read_to_string(home.join("config/library.ini"));
+    golem_core::library::parse(own.as_deref().unwrap_or(EMBEDDED_LIBRARY))
+}
+
 /// The directories the binary expects under the home. Created on demand.
 const DIRS: [&str; 5] = ["bench", "data/models", "data/cache", "data/tuned", "logs"];
 

@@ -48,6 +48,14 @@ pub mod record;
 /// The date stamps a preset comment and a tuned overlay carry.
 pub mod time;
 
+/// Hugging Face as `golem pull owner/repo[:quant]` reads it: the reference,
+/// the Hub's answer, the quant for this machine, and the preset section.
+pub mod hub;
+
+/// The library: the curated models shipped with golem, their roles and the
+/// vendor scores `tune --auto` ranks by.
+pub mod library;
+
 /// The mark: one grid for the terminal glyphs, the icon's pixels and its
 /// `.ico` file.
 pub mod mark;

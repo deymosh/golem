@@ -52,10 +52,12 @@ fn app_with_facts() -> App {
     app.show_facts(Facts {
         up: true,
         vram_mib: Some(11000),
+        vram_total_mib: Some(12288),
         ram_free_gb: Some(8.4),
         alias: "ornith-1.5-35b".to_string(),
         engine: "llama.cpp".to_string(),
         web_up: true,
+        console_port: 8787,
     });
     app
 }
@@ -76,7 +78,7 @@ fn the_menu_is_in_the_documented_order() {
     let labels: Vec<&str> = App::new().items().iter().map(|&(label, _)| label).collect();
     assert_eq!(
         labels,
-        ["Status", "Start", "Stop", "Restart", "Bench", "Eval", "Tune", "Report", "Web", "Quit"]
+        ["Status", "Start", "Stop", "Restart", "Bench", "Eval", "Tune", "Report", "Console", "Quit"]
     );
 }
 
@@ -183,24 +185,36 @@ fn a_window_too_small_for_the_panes_still_shows_the_menu() {
 fn the_header_names_the_engine_state() {
     let text = screen(&App::new());
     assert!(text.contains("GOLEM"), "the header title is missing:\n{text}");
-    assert!(text.contains("down"), "a fresh app reports the engine down:\n{text}");
+    assert!(text.contains("stopped"), "a fresh app reports the engine stopped:\n{text}");
 }
 
 #[test]
 fn the_header_carries_every_fact() {
-    // The mark, the state, the VRAM, the alias, the engine, the console and
-    // the free memory. Wide enough for all of them - at 80 columns the
-    // free-memory segment is
-    // the one that does not fit, which is the next test's subject.
+    // Two lines beside the two-line mark: the state, the alias, the VRAM and
+    // the engine on the first; the console and the free memory on the
+    // second.
     let text = screen_at(&app_with_facts(), 120, 24);
-    let header = text.lines().nth(1).expect("the header is the second line");
-    assert!(header.contains("\u{259f}\u{2588}\u{2599} GOLEM"), "{header:?}");
-    assert!(header.contains("\u{25cf} up"), "{header:?}");
-    assert!(header.contains("11000 MiB VRAM"), "{header:?}");
-    assert!(header.contains("ornith-1.5-35b"), "{header:?}");
-    assert!(header.contains("[llama.cpp]"), "{header:?}");
-    assert!(header.contains("web up"), "{header:?}");
-    assert!(header.contains("8.4 GB free"), "{header:?}");
+    let mut lines = text.lines();
+    let first = lines.next().expect("the header's first line");
+    let second = lines.next().expect("the header's second line");
+    assert!(first.contains("\u{259f}\u{2588}\u{2599} GOLEM"), "{first:?}");
+    assert!(first.contains("\u{25cf} serving"), "{first:?}");
+    assert!(first.contains("ornith-1.5-35b"), "{first:?}");
+    assert!(first.contains("10.7/12.0 GB VRAM"), "{first:?}");
+    assert!(first.contains("[llama.cpp]"), "{first:?}");
+    assert!(second.contains("\u{259c}\u{2588}\u{259b}"), "{second:?}");
+    assert!(second.contains("console :8787"), "{second:?}");
+    assert!(second.contains("8.4 GB free"), "{second:?}");
+}
+
+#[test]
+fn the_header_mark_is_the_icons_grid() {
+    let text = screen(&App::new());
+    let mut lines = text.lines();
+    for glyphs in golem_core::mark::GLYPHS {
+        let line = lines.next().expect("a header line");
+        assert!(line.starts_with(&format!("  {glyphs}")), "{line:?}");
+    }
 }
 
 #[test]
@@ -209,18 +223,19 @@ fn a_narrow_header_drops_whole_segments_from_the_right() {
     // matter most are on the left.
     let app = app_with_facts();
     let narrow = screen_at(&app, 40, 24);
-    let header = narrow.lines().nth(1).expect("the header");
+    let header = narrow.lines().next().expect("the header");
     assert!(header.contains("GOLEM"), "the mark survives:\n{header:?}");
-    assert!(header.contains("\u{25cf} up"), "so does the state:\n{header:?}");
-    assert!(!header.contains("GB free"), "the last segment goes first:\n{header:?}");
-    assert!(header.chars().count() <= 40, "and it fits: {header:?}");
+    assert!(header.contains("\u{25cf} serving"), "so does the state:\n{header:?}");
+    assert!(!header.contains("[llama.cpp]"), "the last segment goes first:\n{header:?}");
+    assert!(header.trim_end().chars().count() <= 40, "and it fits: {header:?}");
 }
 
 #[test]
-fn the_bars_span_the_window() {
+fn the_rules_span_the_window() {
     let text = screen_at(&App::new(), 60, 24);
-    assert!(text.lines().next().is_some_and(|l| l == "=".repeat(60)), "a full-width rule opens the screen");
-    assert!(text.lines().any(|l| l == "-".repeat(60)), "and rules separate the parts");
+    let rule = "\u{2500}".repeat(60);
+    assert_eq!(text.lines().nth(2), Some(rule.as_str()), "a rule closes the header");
+    assert!(text.lines().filter(|l| *l == rule).count() >= 2, "and rules separate the parts");
 }
 
 // ---- the panes ---------------------------------------------------------

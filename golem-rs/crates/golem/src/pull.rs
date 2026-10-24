@@ -1,13 +1,19 @@
-//! `golem pull [preset]`: fetch a model's GGUF from Hugging Face.
+//! `golem pull [preset | owner/repo[:quant]]`: fetch a model from Hugging
+//! Face, the one model source.
 //!
 //! Transport is `curl`, which ships with Windows 10+ and with every Linux and
 //! macOS this repository supports, so the binary needs no TLS or HTTP crate
 //! for an HTTPS-only host.
 //!
-//! Two shapes. With no argument it fetches what golem.toml names (`HF_REPO`
-//! + `MODEL_FILE`, plus `DRAFT_FILE`); with a preset
-//! name it walks the preset file's `; Download:` comments and fetches the
-//! files of that one section that `data/models` is missing.
+//! Three shapes. With no argument it fetches what golem.toml names
+//! (`HF_REPO` + `MODEL_FILE`, plus `DRAFT_FILE`). With a preset name it walks
+//! the preset file's `; Download:` comments and fetches the files of that one
+//! section that `data/models` is missing; a library name that is not a
+//! preset yet is pulled from its repository. With a repository it asks the Hub
+//! what is there, picks the quant this machine can hold (or the one named),
+//! fetches it with its vision projector, and writes the preset section - the
+//! `; Download:` lines included - so nothing about the model is typed by hand.
+//! The decisions are `golem_core::hub`'s.
 
 use std::fs::File;
 use std::io::Write;
@@ -15,10 +21,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use golem_core::ini;
+use golem_core::{hub, ini};
 use golem_core::time::civil_from_days;
 
-use crate::config;
+use crate::{config, machine, state};
 
 /// The free space the download refuses to start below, in GB - the biggest
 /// preset model plus its `.part` wants a generous margin.
@@ -31,18 +37,36 @@ const FLOOR_FALLBACK: u64 = 1_000_000_000;
 const DEFAULT_REPO: &str = "unsloth/Qwen3.6-35B-A3B-GGUF";
 const DEFAULT_MODEL: &str = "Qwen3.6-35B-A3B-UD-Q3_K_M.gguf";
 
-/// `golem pull [preset]`.
+/// `golem pull [preset | owner/repo[:quant]]`.
 pub fn run(home: &Path, args: &[String]) -> i32 {
     let mut out = std::io::stdout();
-    let preset = match parse_args(args) {
-        Ok(preset) => preset,
+    let target = match parse_args(args) {
+        Ok(target) => target,
         Err(message) => {
             let _ = writeln!(out, "[ERROR] {message}");
             return 1;
         }
     };
     let mut log = Log::open(home, &mut out);
-    match run_inner(home, preset.as_deref(), &mut log) {
+    let result = match &target {
+        Some(text) if text.contains('/') => match hub::parse_ref(text) {
+            Ok(reference) => pull_ref(home, &reference, None, &mut log),
+            Err(message) => Err(message),
+        },
+        // A library model that is not a preset yet: fetched from its repo
+        // under the library's name.
+        Some(name) if !is_preset(home, name) => {
+            match crate::paths::library(home).into_iter().find(|e| &e.name == name) {
+                Some(entry) => {
+                    let reference = hub::Ref { repo: entry.repo, quant: entry.quant };
+                    pull_ref(home, &reference, Some(name), &mut log)
+                }
+                None => run_inner(home, Some(name), &mut log),
+            }
+        }
+        preset => run_inner(home, preset.as_deref(), &mut log),
+    };
+    match result {
         Ok(()) => 0,
         Err(message) => {
             log.error(&message);
@@ -52,8 +76,14 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
     }
 }
 
-/// The preset to pull, or `None` for the golem.toml model. More than one argument
-/// (or a flag) is a usage error.
+/// Whether the served preset has a section `name`.
+fn is_preset(home: &Path, name: &str) -> bool {
+    ini::Document::read(&state::preset_path(home))
+        .is_ok_and(|doc| doc.preset_names().iter().any(|n| n == name))
+}
+
+/// The preset, library model or repository to pull, or `None` for the golem.toml model. More
+/// than one argument (or a flag) is a usage error.
 fn parse_args(args: &[String]) -> Result<Option<String>, String> {
     match args {
         [] => Ok(None),
@@ -103,6 +133,172 @@ fn run_inner(home: &Path, preset: Option<&str>, log: &mut Log) -> Result<(), Str
     log.line("");
     log.ok("Model download completed successfully.");
     Ok(())
+}
+
+/// `golem pull owner/repo[:quant]`: ask the Hub, pick, fetch, write the
+/// preset section and the provenance file. `name` is the preset's name when
+/// the library gave one; otherwise it comes from the repository's.
+///
+/// The section goes to the base preset (`MODELS_PRESET`, or the repository's
+/// own when that is the tuner's effective file) and, when the served preset
+/// is the effective one, there too: the effective file is the base with this
+/// machine's overlays merged in, and a new model has none yet. A preset that
+/// already has the name is refused - pulling must not retune a model that is
+/// already there - and nothing is downloaded before that is known.
+fn pull_ref(home: &Path, reference: &hub::Ref, name: Option<&str>, log: &mut Log) -> Result<(), String> {
+    log.section("MODEL FROM HUGGING FACE");
+    if !have_tool("curl") {
+        return Err("curl is required (present on every supported platform)".to_string());
+    }
+    let token = config::get(home, "HF_TOKEN");
+    let repo_id = &reference.repo;
+
+    log.info(&format!("asking huggingface.co about {repo_id}..."));
+    let answer = curl_text(&format!("https://huggingface.co/api/models/{repo_id}?blobs=true"), token.as_deref())?;
+    // The Hub answers a repository it will not show this caller - missing,
+    // private or gated - with an authentication error, whatever the reason.
+    let repo = hub::parse_repo(&answer).map_err(|e| {
+        format!(
+            "{repo_id}: the Hub answered \"{e}\" - check the name; a private or gated \
+             repository needs HF_TOKEN in golem.toml"
+        )
+    })?;
+    let quants = hub::quants(&repo);
+    let moe = hub::is_moe(&repo);
+    let params = repo.params.map(|p| format!("{:.1}B", p as f64 / 1e9)).unwrap_or_else(|| "size unknown".into());
+    log.ok(&format!(
+        "{} - {} {params} {} - trained context {}",
+        repo.id,
+        repo.arch.as_deref().unwrap_or("unknown architecture"),
+        if moe { "mixture of experts" } else { "dense" },
+        repo.ctx_train.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into()),
+    ));
+
+    let vram_mib = machine::gpu().map(|g| g.total_mib).unwrap_or(0);
+    let ram_mib = machine::ram_total_gb() * 1024;
+    let budget = hub::budget(moe, vram_mib, ram_mib);
+    let (quant, fits) = hub::pick(&quants, reference.quant.as_deref(), budget)?;
+    let gb = |bytes: u64| bytes as f64 / 1e9;
+    let why = match (&reference.quant, fits) {
+        (Some(_), _) => "as named".to_string(),
+        (None, true) => format!("the largest of {} that fits {:.1} GB", quants.len(), gb(budget)),
+        (None, false) => format!("the smallest of {}; none fits {:.1} GB", quants.len(), gb(budget)),
+    };
+    log.ok(&format!("quant {} ({:.1} GB, {why})", quant.label, gb(quant.size())));
+    if !fits {
+        log.warn(&format!(
+            "{} is larger than this machine offers ({:.1} GB of VRAM and RAM for weights) - it may not load",
+            quant.label,
+            gb(budget)
+        ));
+    }
+    let projector = hub::projector(&repo);
+    if let Some(p) = projector {
+        log.ok(&format!("vision: {} ({:.1} GB)", p.name(), gb(p.size)));
+    }
+
+    let name = name.map_or_else(|| hub::preset_name(&repo.id), str::to_string);
+    let base = home.join(crate::tune::base_preset(home));
+    let served = state::preset_path(home);
+    for preset in [&base, &served] {
+        let doc = ini::Document::read(preset).map_err(|e| format!("cannot read {}: {e}", preset.display()))?;
+        if doc.preset_names().iter().any(|n| n == &name) {
+            return Err(format!(
+                "a preset [{name}] is already in {} - `golem pull {name}` fetches its files",
+                preset.display()
+            ));
+        }
+    }
+
+    // Sampling from the base model the GGUF was made from; a repo without
+    // one, or a base that is gated, leaves the preset's shared defaults.
+    let sampling = match &repo.base_model {
+        Some(base_model) => {
+            let url = format!("https://huggingface.co/{base_model}/resolve/main/generation_config.json");
+            let found = curl_text(&url, token.as_deref()).map(|t| hub::sampling(&t)).unwrap_or_default();
+            if found.is_empty() {
+                log.info(&format!("no sampling defaults from {base_model}; the preset's shared ones apply"));
+            } else {
+                let shown: Vec<String> = found.iter().map(|(k, v)| format!("{k} {v}")).collect();
+                log.ok(&format!("sampling from {base_model}: {}", shown.join(", ")));
+            }
+            found
+        }
+        None => Vec::new(),
+    };
+
+    let files: Vec<&hub::File> = quant.files.iter().chain(projector).collect();
+    let need = files.iter().map(|f| f.size).sum::<u64>();
+    let need_gb = need.div_ceil(1_000_000_000) + 2;
+    match free_gb(home) {
+        Some(free) if free >= need_gb => log.ok(&format!("disk: {free} GB free, {need_gb} GB needed")),
+        Some(free) => return Err(format!("{free} GB free on disk, {need_gb} GB needed")),
+        None => log.warn("cannot read free disk space; downloading anyway"),
+    }
+
+    let models_dir = home.join("data/models");
+    std::fs::create_dir_all(&models_dir).map_err(|e| format!("cannot create {}: {e}", models_dir.display()))?;
+    for file in &files {
+        hf_get(log, &models_dir, &repo.id, &file.path, token.as_deref())?;
+    }
+
+    let provenance = models_dir.join(format!("{}.json", quant.files[0].name()));
+    if let Err(e) = std::fs::write(&provenance, provenance_json(&repo, quant, projector)) {
+        log.warn(&format!("cannot write {}: {e}", provenance.display()));
+    }
+
+    let block = format!("\n{}", hub::section(&name, &repo, quant, projector, &sampling));
+    let mut written: Vec<&PathBuf> = vec![&base];
+    if served != base {
+        written.push(&served);
+    }
+    for preset in written {
+        let doc = ini::Document::read(preset).map_err(|e| format!("cannot read {}: {e}", preset.display()))?;
+        std::fs::write(preset, doc.append(&block)).map_err(|e| format!("cannot write {}: {e}", preset.display()))?;
+        log.ok(&format!("preset [{name}] written to {}", preset.strip_prefix(home).unwrap_or(preset).display()));
+    }
+    log.line("");
+    log.ok(&format!("next: golem tune {name}   (finds the split and context for this machine)"));
+    Ok(())
+}
+
+/// Where a pulled model came from, beside it in `data/models`: enough to
+/// find the same bytes again and to tell when the repository moved on.
+fn provenance_json(repo: &hub::Repo, quant: &hub::Quant, projector: Option<&hub::File>) -> String {
+    use golem_core::json::quote;
+    let files: Vec<String> = quant.files.iter().chain(projector).map(|f| quote(&f.path)).collect();
+    let optional = |v: &Option<String>| v.as_deref().map(quote).unwrap_or_else(|| "null".into());
+    format!(
+        "{{\n  \"repo\": {},\n  \"revision\": {},\n  \"quant\": {},\n  \"files\": [{}],\n  \"bytes\": {},\n  \
+         \"base_model\": {},\n  \"license\": {},\n  \"pulled\": {}\n}}\n",
+        quote(&repo.id),
+        quote(&repo.sha),
+        quote(&quant.label),
+        files.join(", "),
+        quant.size() + projector.map_or(0, |p| p.size),
+        optional(&repo.base_model),
+        optional(&repo.license),
+        quote(&golem_core::time::now_iso()),
+    )
+}
+
+/// The body of a small HTTPS GET (`curl -sL`), the Hub's API and config files.
+fn curl_text(url: &str, token: Option<&str>) -> Result<String, String> {
+    let mut command = Command::new("curl");
+    command.args(["-sL", "--retry", "3"]);
+    if let Some(token) = token {
+        command.arg("-H").arg(format!("Authorization: Bearer {token}"));
+    }
+    let out = command
+        .arg(url)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run curl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("curl failed for {url} (exit {:?})", out.status.code()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Fetch these `(repo, file)` pairs into `data/models`, with one log for the
@@ -167,7 +363,7 @@ fn preset_jobs(home: &Path, name: &str) -> Result<Vec<(String, String)>, String>
         }
         found = true;
         // Already here: only what is missing is fetched.
-        if models_dir.join(&file).is_file() {
+        if models_dir.join(local_name(&file)).is_file() {
             continue;
         }
         jobs.push((repo, file));
@@ -195,20 +391,28 @@ fn preset_downloads(text: &str) -> Vec<(String, String, String)> {
     out
 }
 
+/// The name a repository path is stored under in `data/models`: its last
+/// part, so a split model's shards land side by side.
+fn local_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
 /// Fetch one GGUF into `models_dir`, resuming a leftover `.part`.
 ///
-/// Completeness is judged against the size Hugging Face reports
+/// `path` is the file's path in the repository; it is stored under its last
+/// part. Completeness is judged against the size Hugging Face reports
 /// (`x-linked-size`), so small models are fine; the 1 GB floor is only the
 /// fallback when the server does not say.
 fn hf_get(
     log: &mut Log,
     models_dir: &Path,
     repo: &str,
-    file: &str,
+    path_in_repo: &str,
     token: Option<&str>,
 ) -> Result<(), String> {
+    let file = local_name(path_in_repo);
     let path = models_dir.join(file);
-    let url = format!("https://huggingface.co/{repo}/resolve/main/{file}");
+    let url = format!("https://huggingface.co/{repo}/resolve/main/{path_in_repo}");
     let expected = linked_size(&url, token);
     let floor = floor_of(expected);
     let expected_mb = expected.unwrap_or(0) / 1_048_576;
@@ -625,6 +829,35 @@ model = tiny.gguf
         let err = preset_jobs(&dir, "a").unwrap_err();
         assert!(err.contains("MODELS_PRESET"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_provenance_file_is_json_naming_the_files_and_revision() {
+        let repo = hub::Repo {
+            id: "org/m-GGUF".into(),
+            sha: "abc123".into(),
+            files: Vec::new(),
+            arch: None,
+            ctx_train: None,
+            params: None,
+            base_model: Some("org/m".into()),
+            license: None,
+        };
+        let file = |path: &str, size| hub::File { path: path.into(), size };
+        let quant = hub::Quant { label: "Q4_K_M".into(), files: vec![file("m-Q4_K_M.gguf", 10)] };
+        let projector = file("mmproj-F16.gguf", 2);
+        let text = provenance_json(&repo, &quant, Some(&projector));
+        let doc = golem_core::json::parse(&text).expect("valid JSON");
+        assert_eq!(doc.get("revision").and_then(|v| v.as_str()), Some("abc123"));
+        assert_eq!(doc.get("bytes").and_then(|v| v.as_f64()), Some(12.0));
+        assert!(doc.get("license").is_some_and(|v| v.is_null()));
+        assert!(text.contains("\"mmproj-F16.gguf\""), "{text}");
+    }
+
+    #[test]
+    fn a_shard_in_a_subdirectory_is_stored_by_its_name() {
+        assert_eq!(local_name("BF16/m-BF16-00001-of-00002.gguf"), "m-BF16-00001-of-00002.gguf");
+        assert_eq!(local_name("m.gguf"), "m.gguf");
     }
 
     #[test]

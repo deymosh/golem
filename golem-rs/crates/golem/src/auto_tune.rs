@@ -10,9 +10,11 @@
 //! 1. every preset whose GGUF is already in `data/models` gets a cheap sweep
 //!    (no gate; the refine points are the user's to skip with
 //!    `--no-refine`), its output in `data/tuned/auto-<preset>.log`;
-//! 2. the presets are ranked by their `; Quality: <score>` comment - a vendor
-//!    number that is only ever a RANKING input, never an adoption reason -
-//!    else by parameter count, then the context they reached, then decode;
+//! 2. the presets are ranked by their vendor score - the library's
+//!    (`config/library.ini`), else a `; Quality: <score>` comment in the
+//!    preset; a number that is only ever a RANKING input, never an adoption
+//!    reason - else by parameter count, then the context they reached, then
+//!    decode;
 //! 3. the best-ranked preset is tuned fully (refine + gate) and adopted; if
 //!    it fails the gate, the next ranked preset is tried.
 //!
@@ -24,7 +26,7 @@ use std::cmp::Ordering;
 use std::path::Path;
 
 use golem_core::gguf;
-use golem_core::ini;
+use golem_core::{ini, library};
 
 use crate::config;
 use crate::tune;
@@ -129,6 +131,7 @@ fn auto_tune(home: &Path, opts: &Options) -> Result<(), String> {
     let text = std::fs::read_to_string(&preset_path)
         .map_err(|_| format!("preset file not found: {}", preset_path.display()))?;
     let doc = ini::parse(&text);
+    let library = crate::paths::library(home);
     let models_dir = home.join("data/models");
 
     // ---- 1. the installed presets, in file order ------------------------
@@ -144,7 +147,7 @@ fn auto_tune(home: &Path, opts: &Options) -> Result<(), String> {
             println!("  {name}: skipped - {model} is not downloaded (golem pull {name})");
             continue;
         }
-        installed.push(Candidate::installed(name, model, &text, &models_dir));
+        installed.push(Candidate::installed(name, model, &text, &models_dir, &library));
     }
     if installed.is_empty() {
         return Err(format!(
@@ -161,7 +164,7 @@ fn auto_tune(home: &Path, opts: &Options) -> Result<(), String> {
         "  floors      decode >= {} t/s, prefill >= {} t/s, at-depth >= {} t/s",
         opts.min_decode, opts.min_prefill, opts.min_depth_decode
     );
-    println!("  ranking     ; Quality: <score> when the preset has one, else parameters");
+    println!("  ranking     the library's vendor score when the model has one, else parameters");
     println!();
 
     // ---- 2. a cheap sweep per preset, into its own log ------------------
@@ -319,7 +322,8 @@ fn shared_args(args: &mut Vec<String>, opts: &Options) {
 struct Candidate {
     preset: String,
     model: String,
-    /// The vendor `; Quality:` score, when the preset carries one.
+    /// The vendor score: the library's, else a `; Quality:` comment in the
+    /// preset.
     quality: Option<String>,
     /// Total parameters, in billions (`params_total / 1e9`).
     params_b: f64,
@@ -329,12 +333,23 @@ struct Candidate {
 }
 
 impl Candidate {
-    fn installed(preset: String, model: String, preset_text: &str, models_dir: &Path) -> Candidate {
+    fn installed(
+        preset: String,
+        model: String,
+        preset_text: &str,
+        models_dir: &Path,
+        library: &[library::Entry],
+    ) -> Candidate {
         // The GGUF header's `params_total`, in billions.
         let params_b = gguf::read(&models_dir.join(&model))
             .map(|f| f.params_total as f64 / 1e9)
             .unwrap_or(0.0);
-        let quality = quality_of(preset_text, &preset);
+        let quality = library
+            .iter()
+            .find(|e| e.name == preset)
+            .and_then(|e| e.quality)
+            .map(|q| q.to_string())
+            .or_else(|| quality_of(preset_text, &preset));
         Candidate { preset, model, quality, params_b, decode: 0.0, ctx: 0 }
     }
 }
@@ -453,18 +468,17 @@ mod tests {
     }
 
     #[test]
-    fn the_quality_comment_is_read_from_the_real_preset_file() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../config/models.ini");
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-        assert_eq!(quality_of(&text, "ornith-1.5-35b").as_deref(), Some("79"));
-        assert_eq!(quality_of(&text, "qwen3.6-35b-a3b").as_deref(), Some("73.4"));
-        assert_eq!(quality_of(&text, "nemotron-3.5-lightning-30b").as_deref(), Some("52"));
-        // The quant variant and the smoke test carry no score, so they can
-        // never outrank a recommended one.
-        assert_eq!(quality_of(&text, "ornith-1.5-35b-mtp"), None);
-        assert_eq!(quality_of(&text, "qwen3.5-9b"), None);
-        assert_eq!(quality_of(&text, "qwen2.5-0.5b-instruct"), None);
+    fn the_scores_come_from_the_shipped_library() {
+        let library = library::parse(crate::paths::EMBEDDED_LIBRARY);
+        let score = |name: &str| library.iter().find(|e| e.name == name).and_then(|e| e.quality);
+        assert_eq!(score("ornith-1.5-35b"), Some(79.0));
+        assert_eq!(score("qwen3.6-35b-a3b"), Some(73.4));
+        // The everyday model and the smoke test carry no score, so they can
+        // never outrank a recommended coder; a rejected experiment is not in
+        // the library at all.
+        assert_eq!(score("qwen3.5-9b"), None);
+        assert_eq!(score("qwen2.5-0.5b-instruct"), None);
+        assert_eq!(score("nemotron-3.5-lightning-30b"), None);
     }
 
     #[test]

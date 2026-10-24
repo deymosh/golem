@@ -323,6 +323,48 @@ fn start_engine(home: &Path) -> i32 {
     }
 }
 
+/// Host the console beside the engine, for as long as the service runs.
+///
+/// On `CONSOLE_HOST`, loopback unless the configuration says otherwise. The
+/// console has no login and its buttons start engines and delete model
+/// files, so listening beyond this machine is said out loud every time. A
+/// port that is taken - another console, another program - is a warning:
+/// the service owns the engine either way, and that is its first job.
+fn start_console(home: &Path) {
+    let cfg = crate::web::Config {
+        results: crate::paths::results(home),
+        template: crate::paths::template(home),
+        home: home.to_path_buf(),
+        host: crate::desktop::console_host(home),
+        port: crate::desktop::console_port(home),
+    };
+    if !crate::desktop::is_loopback(&cfg.host) {
+        println!(
+            "[WARN] the console listens on {} - anyone who can reach it can start, stop and \
+             delete models; CONSOLE_HOST = \"127.0.0.1\" keeps it on this machine",
+            cfg.host
+        );
+    }
+    let address = crate::web::address(&cfg);
+    let listener = match TcpListener::bind(&address) {
+        Ok(listener) => listener,
+        Err(e) => {
+            println!("[WARN] the console cannot bind {address}: {e} - serving the engine without it");
+            return;
+        }
+    };
+    let _ = listener.set_nonblocking(true);
+    match tokio::net::TcpListener::from_std(listener) {
+        Ok(listener) => {
+            tokio::spawn(async move {
+                let _ = crate::web::serve_on(listener, cfg).await;
+            });
+            println!("[ OK ] console on http://{address}/");
+        }
+        Err(e) => println!("[WARN] the console cannot start: {e}"),
+    }
+}
+
 /// The service itself: bind, announce, and serve until told to stop.
 fn serve(home: &Path, start_now: bool) -> i32 {
     let listener = match TcpListener::bind("127.0.0.1:0") {
@@ -339,13 +381,16 @@ fn serve(home: &Path, start_now: bool) -> i32 {
             return 1;
         }
     };
+    // The console first: once the endpoint file says the service is up, a
+    // client may open the console straight away.
+    start_console(home);
     let endpoint = Endpoint { port, token: new_token() };
     if let Err(e) = Endpoint::write(home, &endpoint) {
         eprintln!("[ERROR] cannot write {}: {e}", Endpoint::path(home).display());
         return 1;
     }
     println!("[ OK ] golem service on 127.0.0.1:{port} (engine home: {})", home.display());
-    println!("       stop it with: golem down");
+    println!("       stop it with: golem service stop (golem down stops only the engine)");
 
     // Before serving, for a PID 1 with nobody to ask. Its output is this
     // process's stdout, which in a container is the container's log.

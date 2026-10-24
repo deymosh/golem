@@ -46,6 +46,9 @@ pub struct Model {
     /// `256x8` for a mixture of experts, empty for a dense model.
     pub experts: String,
     pub ctx_train: i64,
+    /// The library's role for it (coder, everyday, ...), empty when the
+    /// library does not list it.
+    pub role: String,
 }
 
 /// Every preset in the home's preset file, in file order.
@@ -53,6 +56,7 @@ pub fn list(home: &Path) -> Vec<Model> {
     let Ok(doc) = ini::Document::read(&state::preset_path(home)) else { return Vec::new() };
     let alias = config::get(home, "MODEL_ALIAS").unwrap_or_default();
     let models_dir = home.join("data/models");
+    let library = crate::paths::library(home);
 
     doc.sections
         .iter()
@@ -64,7 +68,7 @@ pub fn list(home: &Path) -> Vec<Model> {
             let file = section
                 .value("model")
                 .map(str::to_string)
-                .or_else(|| section.downloads.first().map(|d| d.file.clone()))
+                .or_else(|| section.downloads.first().map(|d| d.name().to_string()))
                 .unwrap_or_default();
             let path = models_dir.join(&file);
             let present = !file.is_empty() && path.is_file();
@@ -100,6 +104,11 @@ pub fn list(home: &Path) -> Vec<Model> {
                     String::new()
                 },
                 ctx_train: facts.as_ref().map_or(0, |f| f.n_ctx_train as i64),
+                role: library
+                    .iter()
+                    .find(|e| e.name == section.name)
+                    .and_then(|e| e.role.clone())
+                    .unwrap_or_default(),
             }
         })
         .collect()
@@ -116,7 +125,7 @@ pub fn to_json(models: &[Model]) -> String {
             format!(
                 "{{\"Name\": {}, \"File\": {}, \"Repo\": {}, \"Ctx\": {}, \"NcMoe\": {}, \
                  \"Mtp\": {}, \"Present\": {}, \"Gb\": {}, \"Default\": {}, \"ParamsB\": {}, \
-                 \"ParamsActiveB\": {}, \"Moe\": {}, \"Experts\": {}, \"CtxTrain\": {}}}",
+                 \"ParamsActiveB\": {}, \"Moe\": {}, \"Experts\": {}, \"CtxTrain\": {},                  \"Role\": {}}}",
                 json::quote(&m.name),
                 json::quote(&m.file),
                 json::quote(&m.repo),
@@ -131,6 +140,7 @@ pub fn to_json(models: &[Model]) -> String {
                 m.moe,
                 json::quote(&m.experts),
                 m.ctx_train,
+                json::quote(&m.role),
             )
         })
         .collect();

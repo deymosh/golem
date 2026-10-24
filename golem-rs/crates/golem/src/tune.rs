@@ -477,7 +477,7 @@ fn sweep_with(home: &Path, opts: Options, mut out: Box<dyn Write>) -> Result<Ver
 /// effective preset a previous tune wrote - then the repository's own. A tune
 /// from the effective file would merge an overlay over an overlay, and the
 /// candidates would inherit the last tune's answers as their starting point.
-fn base_preset(home: &Path) -> String {
+pub(crate) fn base_preset(home: &Path) -> String {
     match config::get(home, "MODELS_PRESET") {
         Some(preset) if !preset.is_empty() && preset != paths::EFFECTIVE_PRESET => preset,
         _ => paths::BASE_PRESET.to_string(),
