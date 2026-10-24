@@ -1,11 +1,9 @@
-//! The full-screen console (phase 5 of docs/plan-portable-binary.md).
+//! The full-screen console (`golem tui`, and `golem` with no command).
 //!
-//! A ratatui mirror of `scripts/tui.sh`, down to the look: the `▟█▙` mark,
-//! the status segments that drop off one by one when the window narrows, the
-//! bars, the `▸` marker on the selected entry, the recent-runs and engine-log
-//! panes, and the hint on the last line. The shell composed that as one
-//! string by hand and reprinted it every frame; here the same thing is a list
-//! of styled lines and ratatui does the drawing.
+//! The look: the `▟█▙` mark, the status segments that drop off one by one
+//! when the window narrows, the bars, the `▸` marker on the selected entry,
+//! the recent-runs and engine-log panes, and the hint on the last line. The
+//! screen is a list of styled lines, and ratatui does the drawing.
 //!
 //! The split that makes it testable is the one the console already uses:
 //! [`screen`] builds the lines from `&App` and touches no I/O, so a test
@@ -39,8 +37,10 @@ use ratatui::{Frame, Terminal};
 
 use golem_core::results::{self, Kind};
 
+use crate::config;
 use crate::engine;
 use crate::paths;
+use crate::machine;
 use crate::state;
 
 /// What a menu entry does. `main.rs` matches on this to run the real work;
@@ -78,7 +78,7 @@ const ITEMS: &[(&str, Action)] = &[
 /// The message line before anything has run.
 const HINT: &str = "up/down move   enter run   mouse wheel scroll   r refresh   q quit";
 
-/// The mark in the header, the same one the shell screen opens with.
+/// The mark the header opens with.
 const MARK: &str = "\u{259f}\u{2588}\u{2599}"; // ▟█▙
 /// The selection marker.
 const POINTER: &str = "\u{25b8}"; // ▸
@@ -98,7 +98,7 @@ const WEB_PORT: u16 = 8787;
 
 /// How long the loop waits for a key before looking at what else happened.
 ///
-/// The loop has a second job now - an action running on its own thread - and
+/// The loop has a second job - an action running on its own thread - and
 /// blocking in `event::read()` would only notice it when the user pressed
 /// something. Short enough that a finished action is on screen at once.
 const POLL: Duration = Duration::from_millis(80);
@@ -129,7 +129,7 @@ pub struct Facts {
 impl Default for Facts {
     fn default() -> Self {
         // The defaults a machine with nothing running would show. Defaulting
-        // here rather than reading `.env` keeps `App::new` free of I/O.
+        // here rather than reading `golem.toml` keeps `App::new` free of I/O.
         Facts {
             up: false,
             vram_mib: None,
@@ -182,13 +182,12 @@ impl App {
         self.items[self.selected].0
     }
 
-    // The four accessors below are the test's window into the app: the
-    // binary drives it through `next`/`previous`/`selected`/`set_message`
-    // and the refresh, and never needs to look inside. Gated so the
-    // binary build does not carry API nothing calls.
+    // `items`, `show_facts`, `set_runs` and `set_log` are the tests' window
+    // into the app (`tests/tui.rs`): the binary drives it through
+    // `next`/`previous`/`selected`/`set_message` and the refresh, and never
+    // needs to look inside.
 
     /// The menu, label and action, in the order it is drawn.
-    #[cfg(test)]
     pub fn items(&self) -> &[(&'static str, Action)] {
         self.items
     }
@@ -221,28 +220,25 @@ impl App {
 
     /// What the header shows, so a test can draw a populated screen without
     /// a machine to read it from.
-    #[cfg(test)]
     pub fn show_facts(&mut self, facts: Facts) {
         self.facts = facts;
     }
 
     /// The runs pane's rows, newest last.
-    #[cfg(test)]
     pub fn set_runs(&mut self, runs: Vec<String>) {
         self.runs = runs;
     }
 
     /// The engine-log pane's rows.
-    #[cfg(test)]
     pub fn set_log(&mut self, log: Vec<String>) {
         self.log = log;
     }
 
-    /// Read everything the screen shows, from the places the shell reads.
+    /// Read everything the screen shows.
     ///
-    /// One pass over the world per call, never per frame: two sockets, an
-    /// nvidia-smi, a PowerShell round trip for the free memory, and the
-    /// results file.
+    /// One pass over the world per call, never per frame: two sockets (the
+    /// engine and the console), an nvidia-smi, a PowerShell round trip for
+    /// the free memory, `golem.toml`, the results file and the engine's log.
     ///
     /// `force` re-reads the machine even when a value is fresh; the automatic
     /// refreshes after an action leave the expensive readings alone for
@@ -256,13 +252,13 @@ impl App {
             // Only worth asking when something is loaded, and only then does
             // the number mean anything.
             vram_mib: if status.up && expensive {
-                state::vram_mib()
+                machine::vram_used_mib()
             } else {
                 self.facts.vram_mib
             },
-            ram_free_gb: if expensive { state::ram_free_gb() } else { self.facts.ram_free_gb },
-            alias: state::env_value(home, "MODEL_ALIAS").unwrap_or_default(),
-            engine: state::env_value(home, "ENGINE").unwrap_or_else(|| "llama.cpp".to_string()),
+            ram_free_gb: if expensive { machine::ram_free_gb() } else { self.facts.ram_free_gb },
+            alias: config::get(home, "MODEL_ALIAS").unwrap_or_default(),
+            engine: config::get(home, "ENGINE").unwrap_or_else(|| "llama.cpp".to_string()),
             web_up: state::web_up(WEB_PORT),
         };
         if expensive {
@@ -273,7 +269,7 @@ impl App {
     }
 }
 
-/// The last few recorded rows, in the shell screen's shape:
+/// The last few recorded rows, one line each:
 /// `  59.3 t/s  ornith-1.5-35b             3.5B act  llama.cpp`.
 fn run_lines(home: &Path) -> Vec<String> {
     let Ok((rows, _)) = results::read(&paths::results(home)) else { return Vec::new() };
@@ -330,11 +326,10 @@ fn screen(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
     let mut out = Vec::with_capacity(h);
 
     // What a small window keeps, in the order it matters: the menu first,
-    // then the hint, then the header, then the panes. The shell clamps its
-    // own size to 10x40 and lets the terminal clip, so a three-row window
-    // shows a header and two rules - and the menu, the one thing the screen
-    // is *for*, is not on it at all. The bounds here are where this port is
-    // allowed to be better than the screen it ports.
+    // then the hint, then the header, then the panes. Drawing top-down and
+    // letting the terminal clip would leave a three-row window showing a
+    // header and two rules - and not the menu, the one thing the screen is
+    // *for*.
     let header_rows = if h >= 8 { 3 } else { 0 };
     let hint_rows = if h >= 3 { 2 } else { 0 };
 
@@ -437,12 +432,11 @@ fn dim() -> Style {
     Style::default().add_modifier(Modifier::DIM)
 }
 
-/// The top line: what the machine is doing, in the shell screen's segments.
+/// The top line: what the machine is doing, as segments - the mark, up or
+/// down, VRAM in use, the alias, the engine, the console, free memory.
 ///
-/// Segments are dropped from the right until the line fits. Cutting a styled
-/// string instead would slice it mid-escape and colour the rest of the
-/// terminal - which is why the shell builds a plain and a coloured copy in
-/// step, and why this drops whole segments.
+/// Segments are dropped from the right until the line fits: a segment is
+/// either whole on the line or not there, never cut mid-word.
 fn header(app: &App, width: usize) -> Line<'static> {
     let facts = &app.facts;
     let mut segments: Vec<(String, Style)> = vec![(
@@ -498,8 +492,7 @@ impl RawTerminal {
         enable_raw_mode()?;
         // Past this point raw mode is on. If the screen switch fails the
         // guard does not exist yet, so undo raw mode here by hand.
-        // Mouse capture is what makes the wheel arrive at all - the shell's
-        // screen turns on the same two modes (`?1000h ?1006h`).
+        // Mouse capture is what makes the wheel arrive at all.
         if let Err(e) =
             execute!(io::stdout(), EnterAlternateScreen, cursor::Hide, EnableMouseCapture)
         {
@@ -527,8 +520,8 @@ impl Drop for RawTerminal {
 ///
 /// **An action runs on a thread of its own.** `up` installs an engine and
 /// fetches a model before it answers, and a screen that stops drawing for the
-/// minutes that takes cannot be told from one that has crashed - which is
-/// what it looked like. The loop keeps drawing, the message line says what is
+/// minutes that takes cannot be told from one that has crashed. The loop
+/// keeps drawing, the message line says what is
 /// running, and the result lands when it lands. One at a time, as everywhere
 /// else: two of these would fight over one engine, one pid file and one card.
 pub fn run(
@@ -562,8 +555,7 @@ pub fn run(
         if event::poll(POLL)? {
             let key = match event::read()? {
                 Event::Key(key) => key,
-                // One notch of the wheel moves one row, like an arrow key. The
-                // shell's screen scrolls the same way.
+                // One notch of the wheel moves one row, like an arrow key.
                 Event::Mouse(mouse) => {
                     match mouse.kind {
                         MouseEventKind::ScrollUp => app.previous(),

@@ -93,8 +93,8 @@ in router mode the preset file carries a section's own flags instead.
 near ~100K context.
 
 **MoE models (the default setup)** — `--cpu-moe` keeps expert FFN weights in system RAM.
-On Windows the WSL2 VM needs headroom for them: set `memory=24GB` in
-`%USERPROFILE%\.wslconfig`. VRAM then holds only attention + dense parts + KV, so 25-35B
+(Under Docker Desktop the WSL2 VM needs that headroom too: `memory=24GB` in
+`%USERPROFILE%\.wslconfig`.) VRAM then holds only attention + dense parts + KV, so 25-35B
 models fit and 256K context fits too. `--n-cpu-moe N` keeps only the first N layers' experts
 in RAM and puts the remaining layers' experts on the GPU — lower N = faster, more VRAM. `--load-mode mlock` reads the whole model into
 locked RAM at boot (best over bind mounts, notably Docker Desktop/WSL2 on Windows;
@@ -275,28 +275,24 @@ give generous `max_tokens` (reasoning eats the budget first) or send
 
 **llama.cpp build gate:** builds are not interchangeable — b11149 (2026-09-24,
 CUDA 13.4 runtime) answered the 200K needle wrong *twice, identically* (tool calls,
-100K needle, throughput and prefill all fine) on Linux, while b10991 passes.
-`compose.yml` pins the known-good image **by digest**; to upgrade, pull the new
-build, point the digest at it, and adopt only if `golem eval --long 200000`
-passes. Windows mode pins its release the same way (`build` in `engines/llama.cpp/engine.ini`, `ENGINE_BUILD` to override; currently
-b11379 — adopted 2026-10-03 after the full gate passed; the Windows build of
-b11149 also passes; the b11149 regression is Linux-build-specific). On Git Bash,
-`golem eval` routes through WSL even when a Windows python3 is visible —
-MSYS path conversion otherwise breaks the needle/depth requests.
+100K needle, throughput and prefill all fine) on Linux, while b10991 passes. So
+the release is pinned - `build` in `engines/llama.cpp/engine.ini`, the one pin
+the native install and the container image both use - and a bump is
+`ENGINE_BUILD = "b<new>"`, `golem restart`, and adoption only if
+`golem eval --long 200000` passes. Currently b11379, adopted 2026-10-03 (the
+Windows build of b11149 also passes; that regression is Linux-build-specific).
 
 ## Candidates and research
 
 The wider landscape — engines and models checked against this box's constraints — lives
-in [engines-and-models.md](engines-and-models.md) (updated on each research pass), and the
-plan for serving Strata's RAM-resident models is [strata-models.md](strata-models.md).
-The short version: nothing measured beats the current defaults in their class; the
-open candidates are an Ornith-1.5-9B everyday-coder preset, Gemma 4 12B QAT in the same
-slot, and a llama.cpp build bump (b11379 → b11687+), each pending a quiet-desktop bench
-and the eval gate.
+in [engines-and-models.md](engines-and-models.md) (updated on each research pass). The
+short version: nothing measured beats the current defaults in their class; the open
+candidates are an Ornith-1.5-9B everyday-coder preset and Gemma 4 12B QAT in the same
+slot, each pending a quiet-desktop bench and the eval gate.
 
 ## Client pairing
 
-- **Claude Code** (200K assumed): needs a server ctx ≥ 200K — the default Qwen3.6 config.
+- **Claude Code** (200K assumed): needs a server ctx ≥ 200K — the default coder serves 249344.
   `golem env` prints the exports.
 - **OpenCode** (context declared per model in `opencode.json` via
   `limit: { context, output }`, auto-compact honours it): pair it with the Gemma 12B

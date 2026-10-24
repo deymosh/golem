@@ -2,10 +2,9 @@
 //!
 //! No calendar dependency: one file wants "today" for the comment it writes
 //! above a preset, another wants an ISO timestamp for an overlay header, and
-//! both are arithmetic on the seconds since the epoch. The scripts use
-//! `date`, which reads the *local* clock - so a stamp made just after
-//! midnight can be a day earlier than the shell's. A comment is not worth a
-//! timezone database; being one day out in one is.
+//! both are arithmetic on the seconds since the epoch, in UTC - so a stamp
+//! made just after local midnight can carry the previous day. A comment is
+//! not worth a timezone database; being one day out in one is.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,7 +14,7 @@ pub fn today() -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
-/// UTC `YYYY-MM-DDTHH:MMZ`, the stamp `scripts/tune.sh` puts on an overlay.
+/// UTC `YYYY-MM-DDTHH:MMZ`, the stamp the tuner puts on an overlay.
 pub fn now_iso() -> String {
     let secs = secs_since_epoch();
     let (year, month, day) = civil_from_days((secs / 86_400) as i64);

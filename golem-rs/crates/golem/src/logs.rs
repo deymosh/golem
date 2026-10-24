@@ -1,9 +1,5 @@
-//! `golem logs`: follow the inference log.
-//!
-//! The port of `cmd_logs` in the `golem` script, and the same file the
-//! console's log pane tails (`state::log_tail`): `logs/llama-server-windows.log`
-//! in windows mode, `logs/local-ai.log` in native mode, and `docker compose
-//! logs -f` in docker mode.
+//! `golem logs`: follow the engine's own log (`logs/llama-server.log`), the
+//! same file the console's log pane tails.
 //!
 //! The follow is done here rather than by shelling out to `tail -f`, which
 //! Windows does not ship: poll the file's size, read what was appended, and
@@ -11,10 +7,10 @@
 //! garbage, so a size that shrank means "start over from the top".
 
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
-use crate::state;
+use crate::paths;
 
 /// How many lines `--no-follow` (and the first screenful of a follow) shows.
 const DEFAULT_LINES: usize = 40;
@@ -32,7 +28,7 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
             return 2;
         }
     };
-    follow(&log_file(home), options.lines, options.follow)
+    follow(&paths::engine_log(home), options.lines, options.follow)
 }
 
 /// The parsed command line.
@@ -66,16 +62,6 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
 
 fn parse_lines(value: &str) -> Result<usize, String> {
     value.parse::<usize>().map_err(|_| format!("--lines wants a number, got {value:?}"))
-}
-
-/// The file to follow, or `None` when the mode has no file at all (docker,
-/// whose log comes from the compose service).
-///
-/// The match is the shell's: `windows` names the pinned llama-server's log,
-/// `docker` is the compose service, and everything else - `native`, or a mode
-/// a future `.env` invents - is the native log the shell's `else` tails.
-fn log_file(home: &Path) -> PathBuf {
-    home.join("logs").join(state::LOG_NAME)
 }
 
 /// Print the tail of `path`, then keep printing what is appended to it.
@@ -217,16 +203,6 @@ mod tests {
         assert!(parse_args(&["--lines".into(), "x".into()]).is_err());
         assert!(parse_args(&["--lines".into()]).is_err(), "a flag with no value");
         assert!(parse_args(&["--nope".into()]).is_err());
-    }
-
-    #[test]
-    fn there_is_one_engine_log_and_it_is_where_up_writes_it() {
-        // It used to depend on the deploy mode, which meant `golem logs` and
-        // the engine could disagree about which file to look at. One name now,
-        // and the constant is shared so they cannot drift again.
-        let home = Path::new("/tmp/golem-home");
-        assert_eq!(log_file(home), home.join("logs").join(state::LOG_NAME));
-        assert_eq!(state::LOG_NAME, "llama-server.log", "and it is not named after a mode");
     }
 
     #[test]

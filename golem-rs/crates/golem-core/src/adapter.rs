@@ -1,10 +1,8 @@
 //! The engine adapter's contract: turning a preset's flags into the arguments
 //! an engine is actually started with.
 //!
-//! This is the part of `scripts/start-windows.ps1` worth having in Rust: the
-//! rest is downloading a release, which `curl` does, and spawning a process,
-//! which `std` does. What is here is the translation, and it has three rules,
-//! all of them the shell's:
+//! Downloading a release and spawning a process live in the binary; what is
+//! here is the translation, and it has three rules:
 //!
 //! - a value of `false` means "do not pass this flag at all";
 //! - `flag.<key> = --other` renames a canonical flag, and `flag.<key> = -`
@@ -18,7 +16,7 @@
 //!
 //! Everything is warning-carrying rather than silent. A flag the engine cannot
 //! take is the difference between "it runs" and "it runs the way you asked",
-//! and the shell says so out loud.
+//! so the start says so out loud.
 
 use crate::ini::Document;
 

@@ -1,22 +1,18 @@
 //! The Markdown report, frozen against a committed fixture.
 //!
-//! Phase 1 proved the Rust report byte-identical to `scripts/report.sh` on the
-//! real results file, and this fixture started as the shell's own output for
-//! the same rows. The report has since moved past the shell - it now groups
-//! hardware first, one section per machine, one block per model, one line per
-//! context at the best setup measured there - so the fixture is a snapshot of
-//! the intended output rather than of the shell's.
-//!
-//! It is still the guard: any change to the format fails here until the
-//! fixture is regenerated deliberately, with:
+//! The report groups hardware first - one section per machine, one block per
+//! model, one line per context at the best setup measured there - and the
+//! fixture is a snapshot of that intended output. It is the guard: any
+//! change to the format fails here until the fixture is regenerated
+//! deliberately, with:
 //!
 //! ```text
-//! cargo run -- report --md --results golem-rs/crates/golem-core/tests/fixtures/results.jsonl
+//! ./golem report --md --results golem-rs/crates/golem-core/tests/fixtures/results.jsonl
 //! ```
 //!
-//! It needs no script and no model files, so it runs anywhere, including CI.
+//! It needs no model files, so it runs anywhere, including CI.
 //!
-//! The fixture covers what a port gets wrong: two rows for one configuration
+//! The fixture covers what a report gets wrong: two rows for one configuration
 //! (the best decode wins), two setups that differ only in the offload split at
 //! one context (the best wins and the split is named in the setup column), the
 //! same model at a second context (its own line), the same model, engine,

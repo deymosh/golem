@@ -1,12 +1,11 @@
 //! `golem pull [preset]`: fetch a model's GGUF from Hugging Face.
 //!
-//! The port of `cmd_pull` in the `golem` script plus `scripts/download-model.sh`.
 //! Transport is `curl`, which ships with Windows 10+ and with every Linux and
-//! macOS this repository supports - the same reason the shell scripts need
-//! only curl and awk, and the reason this command needs no HTTP crate.
+//! macOS this repository supports, so the binary needs no TLS or HTTP crate
+//! for an HTTPS-only host.
 //!
-//! Two shapes, exactly as the shell has them. With no argument it fetches what
-//! `.env` names (`HF_REPO` + `MODEL_FILE`, plus `DRAFT_FILE`); with a preset
+//! Two shapes. With no argument it fetches what golem.toml names (`HF_REPO`
+//! + `MODEL_FILE`, plus `DRAFT_FILE`); with a preset
 //! name it walks the preset file's `; Download:` comments and fetches the
 //! files of that one section that `data/models` is missing.
 
@@ -19,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use golem_core::ini;
 use golem_core::time::civil_from_days;
 
-use crate::state::env_value;
+use crate::config;
 
 /// The free space the download refuses to start below, in GB - the biggest
 /// preset model plus its `.part` wants a generous margin.
@@ -28,7 +27,7 @@ const MIN_FREE_GB: u64 = 25;
 /// The completeness floor when Hugging Face does not report a size.
 const FLOOR_FALLBACK: u64 = 1_000_000_000;
 
-/// The model `download-model.sh` falls back to when `.env` names none.
+/// The model fetched when golem.toml names none.
 const DEFAULT_REPO: &str = "unsloth/Qwen3.6-35B-A3B-GGUF";
 const DEFAULT_MODEL: &str = "Qwen3.6-35B-A3B-UD-Q3_K_M.gguf";
 
@@ -53,7 +52,7 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
     }
 }
 
-/// The preset to pull, or `None` for the `.env` model. More than one argument
+/// The preset to pull, or `None` for the golem.toml model. More than one argument
 /// (or a flag) is a usage error.
 fn parse_args(args: &[String]) -> Result<Option<String>, String> {
     match args {
@@ -87,7 +86,7 @@ fn run_inner(home: &Path, preset: Option<&str>, log: &mut Log) -> Result<(), Str
     std::fs::create_dir_all(&models_dir)
         .map_err(|e| format!("cannot create {}: {e}", models_dir.display()))?;
 
-    let token = env_value(home, "HF_TOKEN");
+    let token = config::get(home, "HF_TOKEN");
 
     let jobs = match preset {
         Some(name) => preset_jobs(home, name)?,
@@ -118,7 +117,7 @@ pub fn fetch_all(home: &Path, jobs: &[(String, String)], out: &mut dyn Write) ->
     let models_dir = home.join("data/models");
     std::fs::create_dir_all(&models_dir)
         .map_err(|e| format!("cannot create {}: {e}", models_dir.display()))?;
-    let token = env_value(home, "HF_TOKEN");
+    let token = config::get(home, "HF_TOKEN");
     let mut log = Log::open(home, out);
     for (repo, file) in jobs {
         hf_get(&mut log, &models_dir, repo, file, token.as_deref())?;
@@ -126,19 +125,20 @@ pub fn fetch_all(home: &Path, jobs: &[(String, String)], out: &mut dyn Write) ->
     Ok(())
 }
 
-/// The `(repo, file)` pairs `download-model.sh` fetches with no argument.
+/// The `(repo, file)` pairs `pull` fetches with no argument.
 ///
-/// Public because `up` fetches the same pair when there is no preset: `.env`
-/// names the model there, and the launcher's model section reads this list.
+/// Public because `up` fetches the same pair when there is no preset:
+/// golem.toml names the model there, and the launcher's model section reads
+/// this list.
 ///
-/// The draft comes first, as the shell does it, and only when `DRAFT_FILE` is
+/// The draft comes first, and only when `DRAFT_FILE` is
 /// set; its repo is `DRAFT_HF_REPO` when that is set, otherwise the model's.
 pub fn default_jobs(home: &Path) -> Vec<(String, String)> {
-    let repo = env_value(home, "HF_REPO").unwrap_or_else(|| DEFAULT_REPO.to_string());
-    let model = env_value(home, "MODEL_FILE").unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let repo = config::get(home, "HF_REPO").unwrap_or_else(|| DEFAULT_REPO.to_string());
+    let model = config::get(home, "MODEL_FILE").unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let mut jobs = Vec::new();
-    if let Some(draft) = env_value(home, "DRAFT_FILE").filter(|f| !f.is_empty()) {
-        let draft_repo = env_value(home, "DRAFT_HF_REPO")
+    if let Some(draft) = config::get(home, "DRAFT_FILE").filter(|f| !f.is_empty()) {
+        let draft_repo = config::get(home, "DRAFT_HF_REPO")
             .filter(|r| !r.is_empty())
             .unwrap_or_else(|| repo.clone());
         jobs.push((draft_repo, draft));
@@ -150,11 +150,11 @@ pub fn default_jobs(home: &Path) -> Vec<(String, String)> {
 /// The `(repo, file)` pairs for one preset section that `data/models` lacks.
 ///
 /// Router mode only: the preset file is `MODELS_PRESET`, and a section with no
-/// `; Download:` comment at all is the shell's own error, verbatim.
+/// `; Download:` comment at all is an error that names the section.
 fn preset_jobs(home: &Path, name: &str) -> Result<Vec<(String, String)>, String> {
-    let preset = env_value(home, "MODELS_PRESET")
+    let preset = config::get(home, "MODELS_PRESET")
         .filter(|p| !p.is_empty())
-        .ok_or("pull <preset> needs router mode (MODELS_PRESET in .env)")?;
+        .ok_or("pull <preset> needs router mode (MODELS_PRESET in golem.toml)")?;
     let text = std::fs::read_to_string(home.join(&preset))
         .map_err(|e| format!("cannot read {preset}: {e}"))?;
 
@@ -166,7 +166,7 @@ fn preset_jobs(home: &Path, name: &str) -> Result<Vec<(String, String)>, String>
             continue;
         }
         found = true;
-        // Already here: the shell fetches only what is missing.
+        // Already here: only what is missing is fetched.
         if models_dir.join(&file).is_file() {
             continue;
         }
@@ -182,7 +182,7 @@ fn preset_jobs(home: &Path, name: &str) -> Result<Vec<(String, String)>, String>
 ///
 /// The parsing itself is `golem_core::ini`, which is what the console's Models
 /// tab reads the same file with; a second scanner here would be a second
-/// answer to "which section owns this comment". The rule is the awk's: a
+/// answer to "which section owns this comment". The rule: a
 /// `; Download:` line belongs to the section header *below* it, and a line
 /// with no `->` pair is not a download at all.
 fn preset_downloads(text: &str) -> Vec<(String, String, String)> {
@@ -270,8 +270,8 @@ fn floor_of(expected: Option<u64>) -> u64 {
     }
 }
 
-/// The `x-linked-size` of `url`, from `curl -sIL`; the last one wins, as the
-/// awk's `tail -n1` takes it.
+/// The `x-linked-size` of `url`, from `curl -sIL`; when more than one hop of
+/// the redirects reports one, the last wins.
 fn linked_size(url: &str, token: Option<&str>) -> Option<u64> {
     let mut command = Command::new("curl");
     command.arg("-sIL");
@@ -348,7 +348,7 @@ fn free_gb(home: &Path) -> Option<u64> {
     }
     let text = String::from_utf8_lossy(&out.stdout);
     // `Filesystem 1024-blocks Used Available Capacity Mounted on`; the fourth
-    // field of the second line is what the shell's awk reads.
+    // field of the second line is the free space.
     let available_kb: u64 = text.lines().nth(1)?.split_whitespace().nth(3)?.parse().ok()?;
     Some(available_kb / 1024 / 1024)
 }
@@ -387,7 +387,7 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// `YYYYmmdd-HHMMSS`, the stamp `download-model.sh` puts on its log file.
+/// `YYYYmmdd-HHMMSS`, the stamp on the pull's log file.
 fn timestamp() -> String {
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let (year, month, day) = civil_from_days((secs / 86_400) as i64);
@@ -400,8 +400,7 @@ fn timestamp() -> String {
     )
 }
 
-/// Everything printed also lands in `logs/download-model-<stamp>.log`, the way
-/// the shell's `exec > >(tee -a ...)` duplicates the run into a file.
+/// Everything printed also lands in `logs/download-model-<stamp>.log`.
 struct Log<'a> {
     path: PathBuf,
     file: Option<File>,
@@ -480,7 +479,7 @@ mod tests {
     fn download_comments_belong_to_the_section_below_them() {
         // Two comments above `[model-a]`, one above `[tiny]`, and one with no
         // arrow (not a download at all). The comments above a header are that
-        // header's - the awk buffers them and prints them at the next header.
+        // header's - they wait for the next header.
         let text = "\
 version = 1
 ; Download: someone/model-GGUF -> model-Q4_K_M.gguf
@@ -513,7 +512,7 @@ model = tiny.gguf
     #[test]
     fn a_comment_before_the_first_header_belongs_to_it() {
         // No section yet when the comment is read, so it waits for the first
-        // header - the awk's `pending` buffer does the same.
+        // header.
         let text = "; Download: org/first-GGUF -> first.gguf\n[first]\nmodel = first.gguf\n";
         assert_eq!(
             preset_downloads(text),
@@ -556,7 +555,7 @@ model = tiny.gguf
     fn the_default_jobs_are_the_env_model_and_its_draft() {
         let dir = home("jobs");
         std::fs::write(
-            dir.join(".env"),
+            dir.join("golem.toml"),
             "HF_REPO=\"org/model-GGUF\"\nMODEL_FILE=\"model.gguf\"\nDRAFT_FILE=\"draft.gguf\"\n",
         )
         .expect("write");
@@ -570,7 +569,7 @@ model = tiny.gguf
 
         // DRAFT_HF_REPO redirects the draft only.
         std::fs::write(
-            dir.join(".env"),
+            dir.join("golem.toml"),
             "HF_REPO=\"org/model-GGUF\"\nMODEL_FILE=\"model.gguf\"\n\
              DRAFT_FILE=\"draft.gguf\"\nDRAFT_HF_REPO=\"other/draft-GGUF\"\n",
         )
@@ -588,7 +587,7 @@ model = tiny.gguf
     #[test]
     fn no_draft_file_means_one_job() {
         let dir = home("no-draft");
-        std::fs::write(dir.join(".env"), "HF_REPO=\"org/m\"\nMODEL_FILE=\"m.gguf\"\n").expect("write");
+        std::fs::write(dir.join("golem.toml"), "HF_REPO=\"org/m\"\nMODEL_FILE=\"m.gguf\"\n").expect("write");
         assert_eq!(default_jobs(&dir), vec![("org/m".to_string(), "m.gguf".to_string())]);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -598,7 +597,7 @@ model = tiny.gguf
         let dir = home("preset");
         std::fs::create_dir_all(dir.join("data/models")).expect("mkdir");
         std::fs::create_dir_all(dir.join("config")).expect("mkdir");
-        std::fs::write(dir.join(".env"), "MODELS_PRESET=\"config/models.ini\"\n").expect("write");
+        std::fs::write(dir.join("golem.toml"), "MODELS_PRESET=\"config/models.ini\"\n").expect("write");
         std::fs::write(
             dir.join("config/models.ini"),
             "; Download: a/a-GGUF -> a.gguf\n[a]\nmodel = a.gguf\n\
@@ -622,7 +621,7 @@ model = tiny.gguf
     #[test]
     fn a_preset_pull_needs_router_mode() {
         let dir = home("no-preset");
-        std::fs::write(dir.join(".env"), "").expect("write");
+        std::fs::write(dir.join("golem.toml"), "").expect("write");
         let err = preset_jobs(&dir, "a").unwrap_err();
         assert!(err.contains("MODELS_PRESET"), "{err}");
         std::fs::remove_dir_all(&dir).ok();

@@ -1,18 +1,14 @@
 //! `golem bench` and `golem eval`: run the measurement, then record it.
 //!
-//! The port of `run_recorded` in the `golem` script. The measurement itself
-//! is the binary's too now - [`crate::bench`] and [`crate::eval`] are ports of
-//! `scripts/benchmark-ai.sh` and `scripts/eval-model.sh`, because a bash
-//! script on this path puts a shell back on the critical path of "clone, one
-//! command, a tuned running model". What lives here is the wrapper the shell
-//! had: the arguments, the tee, and the recording.
+//! The measurement is [`crate::bench`]'s or [`crate::eval`]'s; what lives
+//! here is the wrapper around it: the arguments, the tee, and the recording.
 //!
 //! ## The tee
 //!
-//! The shell's `"$@" 2>&1 | tee "${out}"` does two things at once: the run's
-//! output is shown *live* (a 200K needle takes minutes, and a silent terminal
-//! reads as a hung one) and captured for the recorder. [`Tee`] is both - the
-//! harness writes to it, it echoes to stdout, and it keeps the text.
+//! The run's output has to do two things at once: be shown *live* (a 200K
+//! needle takes minutes, and a silent terminal reads as a hung one) and be
+//! captured for the recorder. [`Tee`] is both - the harness writes to it, it
+//! echoes to stdout, and it keeps the text.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -20,7 +16,7 @@ use std::path::{Path, PathBuf};
 use golem_core::record;
 use golem_core::results::Kind;
 
-use crate::state;
+use crate::config;
 use crate::{bench, eval, facts};
 
 /// `golem bench [--runs N] [--prefill N]`.
@@ -71,8 +67,8 @@ fn run(
     harness: fn(&Path, &[String], &mut dyn Write) -> i32,
 ) -> i32 {
     // `--replay <file>` records a capture that already exists instead of
-    // taking a new measurement. It is how the port of the recorder is checked
-    // against the shell's on the same output, and it is what a backfill needs.
+    // taking a new measurement: what a backfill needs, and how a change to
+    // the recorder is checked against output that is already on disk.
     if let Some(file) = replay_path(args) {
         let captured = match std::fs::read_to_string(&file) {
             Ok(text) => text,
@@ -89,8 +85,7 @@ fn run(
 
     let mut tee = Tee::default();
     let status = harness(home, args, &mut tee);
-    // The shell's `[[ "${status}" == 0 && "${RECORD:-1}" != 0 ]]`: a run that
-    // failed is not a measurement, however much it printed.
+    // A run that failed is not a measurement, however much it printed.
     if status != 0 {
         return status;
     }
@@ -145,25 +140,24 @@ fn record_rejection(home: &Path, captured: &str, args: &[String]) -> i32 {
     0
 }
 
-/// The three names a run resolves before it records, with the shell's
-/// precedence: the per-run override, then `.env`, then a default.
+/// The three names a run resolves before it records: the per-run override,
+/// then golem.toml, then a default.
 ///
 /// `RECORD_MODEL` and `RECORD_NOTE` are overrides only - they are never keys
-/// in `.env`, so they are read from the process alone.
+/// in golem.toml, so they are read from the process alone.
 fn resolved(home: &Path) -> (String, String, String) {
-    let engine = state::override_value(home, "GOLEM_ENGINE", "ENGINE")
+    let engine = config::resolved(home, "ENGINE")
         .unwrap_or_else(|| "llama.cpp".to_string());
     let model = process_var("RECORD_MODEL")
         .or_else(|| process_var("GOLEM_MODEL_ALIAS"))
-        .or_else(|| state::env_value(home, "MODEL_ALIAS"))
+        .or_else(|| config::get(home, "MODEL_ALIAS"))
         .unwrap_or_else(|| "local-model".to_string());
     let preset_rel =
-        state::override_value(home, "GOLEM_MODELS_PRESET", "MODELS_PRESET").unwrap_or_default();
+        config::resolved(home, "MODELS_PRESET").unwrap_or_default();
     (engine, model, preset_rel)
 }
 
-/// Build the row for `captured`, append it, and say so - `run_recorded`'s
-/// second half.
+/// Build the row for `captured`, append it, and say so.
 fn record_capture(home: &Path, kind: Kind, captured: &str) -> i32 {
     // `RECORD=0` skips the recording and keeps the run, which is what a
     // throwaway measurement wants.
@@ -172,15 +166,15 @@ fn record_capture(home: &Path, kind: Kind, captured: &str) -> i32 {
     }
     // A file with no RESULT line is not a measurement (a failed or
     // interrupted run): recording it would put a null row in the database.
-    // The shell's recorder says exactly this and exits 0, so a run that
-    // measured nothing is not an error.
+    // It is a warning and exit 0: a run that measured nothing is not an
+    // error.
     if !captured.lines().any(|line| line.starts_with("RESULT")) {
         eprintln!("[WARN] no RESULT line in the captured output - nothing recorded");
         return 0;
     }
 
-    // The four names the shell resolves before it calls the recorder, with
-    // the same precedence: the per-run override, then `.env`, then a default.
+    // The names the row carries: the per-run override, then golem.toml,
+    // then a default.
     let (engine, model, preset_rel) = resolved(home);
     let note = process_var("RECORD_NOTE").unwrap_or_default();
 
@@ -194,7 +188,7 @@ fn record_capture(home: &Path, kind: Kind, captured: &str) -> i32 {
             0
         }
         // A row that cannot be built is not a failed run: the measurement
-        // happened, and the shell's recorder treated this the same way.
+        // happened, and its output is on the screen.
         Err(e) => {
             eprintln!("[WARN] {e}");
             0
@@ -208,7 +202,7 @@ fn record_capture(home: &Path, kind: Kind, captured: &str) -> i32 {
 /// This is the seam the tuner needs: it measures a *candidate* preset that
 /// nothing in the environment names, so it cannot go through the
 /// env-resolving path above. It prints nothing - the sweep's own output is
-/// the user's, and the shell sent the recorder's chatter to a log file.
+/// the user's.
 pub fn record_with(
     home: &Path,
     kind: Kind,
@@ -237,9 +231,8 @@ fn word(kind: Kind) -> &'static str {
 
 /// A per-invocation variable from this process's environment.
 ///
-/// The shell's `${NAME:-default}` for the names a caller sets and `.env`
-/// never holds - `RECORD`, `RECORD_NOTE`, `RECORD_MODEL`. An empty value
-/// counts as unset, as `${NAME:-}` does.
+/// For the names a caller sets and golem.toml never holds - `RECORD`,
+/// `RECORD_NOTE`, `RECORD_MODEL`. An empty value counts as unset.
 fn process_var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }

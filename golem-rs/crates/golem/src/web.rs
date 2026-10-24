@@ -1,11 +1,9 @@
-//! The web console (phases 2 and 3 of docs/plan-portable-binary.md).
+//! The web console (`golem web`): results, models, controls, the live log.
 //!
-//! It replaces the surface of `scripts/web.ps1`: the results page, served
-//! live from `results.jsonl`, and the raw file the page polls so the jsonl
-//! stays the single source of truth; the controls (`/api/state`, `/api/logs`,
-//! `/api/run`); and the Models tab (`/api/models` and the three edits behind
-//! it). The page is the same file the shell console serves, so a bookmark, a
-//! poll and a button all keep working across the switch.
+//! The results page, served live from `results.jsonl`, and the raw file the
+//! page polls so the jsonl stays the single source of truth; the controls
+//! (`/api/state`, `/api/logs`, `/api/run`); and the Models tab
+//! (`/api/models` and the three edits behind it).
 //!
 //! The page is the template with the records inlined, exactly as
 //! `./golem report` does it: the file's own lines, not a
@@ -26,14 +24,15 @@ use axum::routing::{get, post};
 
 use golem_core::json;
 
+use crate::config;
 use crate::runner;
 use crate::models;
 use crate::state::{self, Job, SharedJob};
 
 /// Where the console reads from and how it binds.
 ///
-/// `host` and `port` default to `127.0.0.1` and `8787` (the `web.port`
-/// default in the shell); the paths point at the repository's own files.
+/// `host` and `port` default to `127.0.0.1` and `8787`; the paths point at
+/// the home's own files.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// e.g. `bench/results.jsonl`
@@ -44,8 +43,8 @@ pub struct Config {
     pub host: String,
     /// default `8787`
     pub port: u16,
-    /// The home the console reads the engine's state from (`.env`, the
-    /// preset file, the logs) and runs the launchers in.
+    /// The home the console reads the engine's state from (golem.toml, the
+    /// preset file, the logs) and runs its jobs in.
     pub home: PathBuf,
 }
 
@@ -63,8 +62,8 @@ impl Default for Config {
 
 /// The routes' shared state: the configuration and the one job slot.
 ///
-/// The shell console runs one job at a time and says so; so does this one,
-/// because one engine and one measurement cannot be two things at once.
+/// One job at a time, and the console says so: one engine and one
+/// measurement cannot be two things at once.
 struct App {
     cfg: Config,
     job: SharedJob,
@@ -310,8 +309,8 @@ async fn api_delpreset(State(app): State<Arc<App>>, body: Bytes) -> Response {
 /// One of the preset edits, off the async runtime.
 ///
 /// All three answer the page the same way - `{"result": "..."}`, with the
-/// script's own words (`added`, `deleted`, `removed`, `bad-input`) because
-/// that is what the page's JavaScript tests for. A failure to write is a
+/// words `added`, `deleted`, `removed`, `bad-input`, because that is what
+/// the page's JavaScript tests for. A failure to write is a
 /// 500: the page cannot tell one from a refusal, but a person reading the
 /// response can.
 async fn edit<F>(app: Arc<App>, change: F) -> Response
@@ -333,15 +332,14 @@ fn result_json(result: &str) -> String {
 
 /// `POST /api/run` with `action=<verb>&arg=<...>`.
 ///
-/// One job at a time, the same rule the shell console has: the engine is a
-/// single resource and two benchmarks at once measure each other. The reply
-/// comes back immediately; the page follows the job through `api/state`.
+/// One job at a time: the engine is a single resource and two benchmarks at
+/// once measure each other. The reply comes back immediately; the page
+/// follows the job through `api/state`.
 ///
-/// Two actions never reach a verb: `alias` and `engine` rewrite `.env`,
-/// which the shell console also answers in-process. Everything else goes
-/// through `runner::run` - the engine verbs to the service that owns the
-/// engine, the rest as this binary's own commands - so the controls work in
-/// a folder with no scripts in it.
+/// Two actions never reach a verb: `alias` and `engine` rewrite golem.toml,
+/// answered in-process. Everything else goes through `runner::run` - the
+/// engine verbs to the service that owns the engine, the rest as this
+/// binary's own commands.
 async fn api_run(State(app): State<Arc<App>>, body: Bytes) -> Response {
     let form = parse_form(&body);
     let action = form.get("action").cloned().unwrap_or_default();
@@ -383,12 +381,12 @@ async fn api_run(State(app): State<Arc<App>>, body: Bytes) -> Response {
 }
 
 /// `action=alias` / `action=engine`: point the setup at another preset or
-/// another engine, by rewriting `.env`.
+/// another engine, by rewriting golem.toml.
 ///
 /// The value is checked against what is actually there first - the same two
 /// lists the page's dropdowns are filled from - so a hand-made request
 /// cannot leave the configuration pointing at a model or an engine that does
-/// not exist. Answers the shell console's own `applied` / `bad-input`.
+/// not exist. Answers `applied` / `bad-input`, which the page reads.
 async fn apply_setting(app: &Arc<App>, action: &str, arg: &str) -> Response {
     let home = app.cfg.home.clone();
     let action = action.to_string();
@@ -401,7 +399,7 @@ async fn apply_setting(app: &Arc<App>, action: &str, arg: &str) -> Response {
         if !installed.iter().any(|name| name == &arg) {
             return Ok("bad-input");
         }
-        state::env_set(&home, key, &arg).map(|()| "applied")
+        config::set(&home, key, &arg).map(|()| "applied")
     })
     .await;
     match outcome {

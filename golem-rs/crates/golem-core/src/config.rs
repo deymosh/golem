@@ -53,9 +53,9 @@ impl Document {
 
     /// The value of `key`, as text with any quotes removed.
     ///
-    /// Text, not a typed value, on purpose: every reader in this binary wants
-    /// what the shell's `source .env` gave it - a string it parses itself -
-    /// so the migration from `.env` is a change of file, not of meaning.
+    /// Text, not a typed value, on purpose: every reader in this binary
+    /// parses its own key (a port, a path, a list of flags), and `5` and
+    /// `"5"` in the file mean the same thing to all of them.
     pub fn get(&self, key: &str) -> Option<String> {
         for line in &self.lines {
             let body = strip_comment(line).trim();
@@ -185,47 +185,25 @@ pub fn read(path: &std::path::Path) -> Option<Result<Document, String>> {
     Some(Document::parse(&text))
 }
 
-/// One value from a home's configuration: `golem.toml` first, then `.env`.
+/// One value from a home's `golem.toml`.
 ///
-/// The one place the rule lives. `golem.toml` is the binary's own surface and
-/// `.env` is the compatibility shim the shell drivers source; a key is in one
-/// file and never both, so "first" only decides what a hand-duplicated key
-/// means. Every reader goes through here rather than parsing either file
-/// itself - a reader with its own copy of the rule is a reader that stops
-/// seeing a key on the day it moves, which is exactly the failure the split
-/// is meant to avoid.
-///
-/// A file that will not parse reads as absent: a broken config should not take
-/// out the command that was only trying to read one setting from it.
+/// The one place the rule lives: every reader goes through here rather than
+/// parsing the file itself. A file that will not parse reads as absent - a
+/// broken config should not take out a command that was only trying to read
+/// one setting from it - and [`check`] is where it gets said out loud.
 pub fn value(home: &std::path::Path, key: &str) -> Option<String> {
-    if let Some(text) = std::fs::read_to_string(home.join("golem.toml")).ok() {
-        if let Ok(document) = Document::parse(&text) {
-            if let Some(value) = document.get(key) {
-                return Some(value);
-            }
-        }
-    }
-    dotenv_value(home, key)
+    let text = std::fs::read_to_string(home.join("golem.toml")).ok()?;
+    Document::parse(&text).ok()?.get(key)
 }
 
-/// One value from a `.env`, quotes stripped.
-///
-/// Not a shell parser: `KEY="value"` and `KEY=value` are the two shapes the
-/// file uses, a `#` line is a comment, and everything else is ignored.
-fn dotenv_value(home: &std::path::Path, key: &str) -> Option<String> {
-    let text = std::fs::read_to_string(home.join(".env")).ok()?;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('#') {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=') {
-            if k.trim() == key {
-                return Some(v.trim().trim_matches('"').trim_matches('\'').to_string());
-            }
-        }
+/// `Err` with the parser's reason when the home's `golem.toml` exists and
+/// will not parse. Every key would silently fall back to its default
+/// otherwise, which reads as "my edit did nothing".
+pub fn check(home: &std::path::Path) -> Result<(), String> {
+    match read(&home.join("golem.toml")) {
+        Some(Err(e)) => Err(format!("golem.toml: {e}")),
+        _ => Ok(()),
     }
-    None
 }
 
 #[cfg(test)]
@@ -346,40 +324,30 @@ MODEL_ALIAS = \"ornith-1.5-35b\"
     }
 
     #[test]
-    fn a_value_comes_from_the_toml_file_when_it_has_one() {
+    fn a_value_comes_from_golem_toml_only() {
         let dir = temp("value-first");
-        std::fs::write(dir.join(".env"), "# a comment\nMODEL_ALIAS=\"from-env\"\nLOCAL_AI_PORT=8000\n")
-            .expect("write");
+        // A `.env` beside it is not read at all.
+        std::fs::write(dir.join(".env"), "MODEL_ALIAS=\"from-env\"\n").expect("write");
         std::fs::write(dir.join("golem.toml"), "# the floors\nTUNE_RUNS = 5\n").expect("write");
         assert_eq!(value(&dir, "TUNE_RUNS").as_deref(), Some("5"));
-        // A key the TOML file does not own still comes from the shim, with its
-        // quotes stripped either way.
-        assert_eq!(value(&dir, "MODEL_ALIAS").as_deref(), Some("from-env"));
-        assert_eq!(value(&dir, "LOCAL_AI_PORT").as_deref(), Some("8000"));
-        assert_eq!(value(&dir, "NOTHING"), None);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn no_toml_file_leaves_the_env_file_in_charge() {
-        let dir = temp("value-none");
-        std::fs::write(dir.join(".env"), "TUNE_RUNS=\"7\"\n").expect("write");
-        assert_eq!(value(&dir, "TUNE_RUNS").as_deref(), Some("7"));
-        // And a home with neither file answers nothing rather than failing.
+        assert_eq!(value(&dir, "MODEL_ALIAS"), None);
+        // And a home with no file answers nothing rather than failing.
         let bare = temp("value-bare");
         assert_eq!(value(&bare, "TUNE_RUNS"), None);
+        assert_eq!(check(&bare), Ok(()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&bare).ok();
     }
 
     #[test]
-    fn a_broken_toml_file_falls_back_rather_than_taking_the_reader_out() {
-        // A config file someone mistyped should not stop `status` from
-        // answering; the shim still has the key.
+    fn a_broken_file_reads_as_absent_and_check_says_why() {
+        // A mistyped config should not stop `status` from answering - but the
+        // command has to be able to say that every key just fell back.
         let dir = temp("value-broken");
-        std::fs::write(dir.join(".env"), "LOCAL_AI_PORT=8000\n").expect("write");
-        std::fs::write(dir.join("golem.toml"), "this is not = a valid = line\n").expect("write");
-        assert_eq!(value(&dir, "LOCAL_AI_PORT").as_deref(), Some("8000"));
+        std::fs::write(dir.join("golem.toml"), "LOCAL_AI_PORT = 8000\nnot a line\n").expect("write");
+        assert_eq!(value(&dir, "LOCAL_AI_PORT"), None);
+        let err = check(&dir).expect_err("a broken file is reported");
+        assert!(err.contains("line 2"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

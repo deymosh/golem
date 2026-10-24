@@ -1,24 +1,20 @@
 //! `golem eval`: the quality gate - sanity, tool calls, and the long-context
 //! needle.
 //!
-//! The port of `scripts/eval-model.sh`. It is the gate every adoption passes
-//! (`./golem eval --long 200000`), the tuner's gate, and - with `bench` - the
-//! last thing that needed a shell.
+//! It is the gate every adoption passes (`./golem eval --long 200000`) and
+//! the tuner's gate.
 //!
 //! The `RESULT` lines it prints are a contract: `golem_core::evalparse` reads
 //! them, the recorder turns them into a row, and the tuner decides on them.
 //! Two lines that are not `RESULT` lines are part of the same contract, and
 //! are easy to break by "tidying" them: the recorder takes
 //! `needle : prompt=<N>` for the row's token count, and `[ OK ] tool calling`
-//! for its `tools` field. Everything the script prints, this prints the same
-//! way.
+//! for its `tools` field. The prompts are fixed for the same reason as
+//! `bench`'s: every recorded row was measured with them.
 //!
-//! What is deliberately *not* the script's is the transport: the shell needed
-//! `curl --noproxy '*'` on every call, and this speaks HTTP to the socket
-//! itself (see [`crate::engine`]), so a system proxy cannot be picked up by
-//! accident. The long-context bodies live in memory rather than in
-//! `data/tmp/*.json`, for the same reason they were files at all - curl reads
-//! request bodies from files, and this does not.
+//! The transport is this binary's own HTTP over the socket (see
+//! [`crate::engine`]), so a system proxy cannot be picked up by accident,
+//! and the long-context bodies are built in memory.
 
 use std::io::Write;
 use std::path::Path;
@@ -26,35 +22,35 @@ use std::time::Duration;
 
 use golem_core::json::{self, Value};
 
+use crate::config;
 use crate::engine::{self, Base};
-use crate::state;
 
 // ---------------------------------------------------------------
-// The script's numbers
+// The fixed numbers
 // ---------------------------------------------------------------
 
-/// `curl --max-time 5` on the health check.
+/// The health check: a live engine answers at once.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
-/// `curl --max-time 10` on `/props`.
+/// `/props`.
 const PROPS_TIMEOUT: Duration = Duration::from_secs(10);
-/// `curl --max-time 120` on `/tokenize`.
+/// `/tokenize`, which reads the whole haystack.
 const TOKENIZE_TIMEOUT: Duration = Duration::from_secs(120);
-/// `curl --max-time 600` on the sanity and tool requests.
+/// The sanity and tool requests.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
-/// `curl --max-time 900` on the warmup and on each of the three timed runs.
+/// The warmup, and each of the three timed runs.
 const RUN_TIMEOUT: Duration = Duration::from_secs(900);
-/// `curl --max-time 3600` on the needle and on the depth request: a 200K-token
-/// prefill is minutes of silence, and the read timeout is the whole budget.
+/// The needle and the depth request: a 200K-token prefill is minutes of
+/// silence, and the read timeout is the whole budget.
 const NEEDLE_TIMEOUT: Duration = Duration::from_secs(3600);
 
-/// What `--long` asks for when the flag is given without a value - the shell's
-/// `${2:-32768}`. No `--long` at all is a different thing: no section 5.
+/// What `--long` asks for when the flag is given without a value. No
+/// `--long` at all is a different thing: no section 5.
 const LONG_DEFAULT: &str = "32768";
 
-/// The `.env` fallbacks, as the shell's `${TEMPERATURE:-0.15}`.
+/// The sampling when golem.toml sets none (or sets it empty).
 const DEFAULT_TEMPERATURE: &str = "0.15";
 const DEFAULT_TOP_P: &str = "0.95";
-/// The alias when neither `GOLEM_MODEL_ALIAS` nor `.env` names one.
+/// The alias when neither `GOLEM_MODEL_ALIAS` nor golem.toml names one.
 const DEFAULT_ALIAS: &str = "local-model";
 
 /// The arithmetic question and the number its answer must contain.
@@ -67,7 +63,7 @@ const TOOL_QUESTION: &str = "What is the weather in Munich right now? Use the pr
 const TOOL_NAME: &str = "get_weather";
 const TOOL_CITY: &str = "munich";
 
-/// The `get_weather` tool, verbatim from the script.
+/// The `get_weather` tool.
 const TOOL_SCHEMA: &str = "{\n    \"type\": \"function\",\n    \"function\": {\n      \
      \"name\": \"get_weather\",\n      \"description\": \"Get current weather for a city\",\n      \
      \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \
@@ -75,7 +71,7 @@ const TOOL_SCHEMA: &str = "{\n    \"type\": \"function\",\n    \"function\": {\n
      \"unit\": {\"type\": \"string\", \"enum\": [\"celsius\", \"fahrenheit\"]}\n        },\n        \
      \"required\": [\"city\"]\n      }\n    }\n  }";
 
-/// The throughput prompt, verbatim from the script's heredoc. The `\\n` and
+/// The throughput prompt. The `\\n` and
 /// `\\t` are two characters each: the body is JSON, where they are an escaped
 /// newline and tab, and that is why the prompt can carry Go code at all.
 const REVIEW_PROMPT: &str = "Review this Go snippet for correctness and idiomatic issues. Be \
@@ -85,7 +81,7 @@ const REVIEW_PROMPT: &str = "Review this Go snippet for correctness and idiomati
      severity, then show the fixed version.";
 
 /// The haystack's filler line, its first line, and the one line the question
-/// is about - the script's awk, character for character.
+/// is about.
 const HAYSTACK_LINE: &str =
     "The warehouse holds crates of silicon wafers and the manifests are filed by quarter.";
 const HAYSTACK_HEAD: &str =
@@ -105,23 +101,22 @@ const DEPTH_QUESTION: &str =
 /// purpose: `/tokenize` replaces it with the server's own count.
 const CHARS_PER_TOKEN: f64 = 4.7;
 
-/// `golem eval [--long TOKENS]`, printing what the script prints and
-/// returning the script's exit code.
+/// `golem eval [--long TOKENS]`: 0 when the run completed (the verdicts are
+/// in its lines), 1 when it could not.
 pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
-    // The command line first, as the script's: a bad argument is refused
-    // before anything is printed or any request is made.
+    // The command line first: a bad argument is refused before anything is
+    // printed or any request is made.
     let long = match parse_args(args) {
         Ok(long) => long,
         Err(arg) => {
-            // `echo "unknown arg: $1" >&2` - stderr, so it is not part of
-            // what the recorder captures.
+            // stderr, so it is not part of what the recorder captures.
             eprintln!("unknown arg: {arg}");
             return 1;
         }
     };
 
     let Some(base) = Base::from_home(home) else {
-        let configured = state::env_value(home, "LOCAL_AI_BASE_URL").unwrap_or_default();
+        let configured = config::get(home, "LOCAL_AI_BASE_URL").unwrap_or_default();
         let _ = writeln!(
             out,
             "[FAIL] cannot reach the engine: LOCAL_AI_BASE_URL={configured:?} is not http:// \
@@ -130,12 +125,11 @@ pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
         return 1;
     };
 
-    // The shell's `${GOLEM_MODEL_ALIAS:-${MODEL_ALIAS:-local-model}}`. The
-    // `GOLEM_` name is the per-run override the auto-tuner gates a candidate
-    // with, and it is deliberately never a key in `.env` - reading it from
-    // there is the bug that once gated a 0.5B candidate against the 35B
-    // coder's numbers.
-    let model = state::override_value(home, "GOLEM_MODEL_ALIAS", "MODEL_ALIAS")
+    // The per-run override first (`GOLEM_MODEL_ALIAS`, how the auto-tuner
+    // gates a candidate), then golem.toml. An override that does not reach
+    // this line gates the configured model under the candidate's name - it
+    // once gated a 0.5B candidate against the 35B coder's numbers.
+    let model = config::resolved(home, "MODEL_ALIAS")
         .unwrap_or_else(|| DEFAULT_ALIAS.to_string());
     let temperature = setting(home, "TEMPERATURE", DEFAULT_TEMPERATURE);
     let top_p = setting(home, "TOP_P", DEFAULT_TOP_P);
@@ -146,7 +140,7 @@ pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
 
     section(out, "1. HEALTH + IDENTITY");
 
-    // `curl --fail`: an unhappy status is the same answer as no server at all.
+    // An unhappy status is the same answer as no server at all.
     match engine::get_json(&base, "/health", HEALTH_TIMEOUT) {
         Some(reply) if reply.ok() => {
             let _ = writeln!(out, "[ OK ] /health");
@@ -157,8 +151,8 @@ pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
         }
     }
 
-    // `/props` is read *without* `--fail`: whatever the engine says about
-    // itself is printed, and a field it does not have is the script's `?`.
+    // `/props` is read whatever its status: whatever the engine says about
+    // itself is printed, and a field it does not have is `?`.
     let props = parse_body(&get_body(&base, &format!("/props?model={model}"), PROPS_TIMEOUT));
     let _ = writeln!(
         out,
@@ -178,8 +172,8 @@ pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
     section(out, "2. WARMUP + ARITHMETIC SANITY");
 
     let _ = writeln!(out, "warmup request (first hit may compile CUDA graphs, be patient)...");
-    // A failed warmup is a warning, not a failure: the script's `|| echo`,
-    // because every later request would say the same thing anyway.
+    // A failed warmup is a warning, not a failure: every later request would
+    // say the same thing anyway.
     match engine::post_json(&base, "/v1/chat/completions", &warmup_body(&model), RUN_TIMEOUT) {
         Some(reply) if reply.ok() => {}
         _ => {
@@ -208,8 +202,7 @@ pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
     let mut raw = post_body(&base, &tool_body(&model, false), REQUEST_TIMEOUT);
     // Some templates only emit tool calls with thinking disabled, so an
     // answer that carries none is asked again - and the retry's answer
-    // replaces the first one outright, empty or not, exactly as the script's
-    // assignment does.
+    // replaces the first one outright, empty or not.
     if !has_tool_calls(&raw) {
         raw = post_body(&base, &tool_body(&model, true), REQUEST_TIMEOUT);
     }
@@ -231,11 +224,11 @@ pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
     let body = review_body(&model, &temperature, &top_p);
     let mut speeds: Vec<Option<String>> = Vec::with_capacity(3);
     for i in 1..=3 {
-        // No `--fail` here either: a body that came back with an unhappy
-        // status is still read for its timings, as the script's curl read it.
+        // Any status: a body that came back unhappy is still read for its
+        // timings.
         let Some(reply) = engine::post_json(&base, "/v1/chat/completions", &body, RUN_TIMEOUT)
         else {
-            // The shell's `set -e` aborted here, and so does this.
+            // No answer at all ends the run: there is nothing to time.
             let _ = writeln!(out, "[FAIL] throughput request failed");
             return 1;
         };
@@ -268,11 +261,11 @@ pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
 // The command line
 // ---------------------------------------------------------------
 
-/// `--long TOKENS`, and nothing else - the script's `case "$1"`.
+/// `--long TOKENS`, and nothing else.
 ///
 /// `Ok(None)` is no `--long` at all, which is what skips section 5. A flag
-/// with a missing or empty value is the shell's `${2:-32768}`, and that is a
-/// *different* thing: 32768 tokens, measured.
+/// with a missing or empty value is a *different* thing: 32768 tokens,
+/// measured.
 fn parse_args(args: &[String]) -> Result<Option<String>, String> {
     let mut long = None;
     let mut i = 0;
@@ -293,15 +286,14 @@ fn parse_args(args: &[String]) -> Result<Option<String>, String> {
     Ok(long)
 }
 
-/// One `.env` value with the shell's default: empty counts as unset, as
-/// `${NAME:-default}` has it.
+/// One golem.toml value, or `default` when it is missing or empty.
 fn setting(home: &Path, key: &str, default: &str) -> String {
-    state::env_value(home, key)
+    config::get(home, key)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| default.to_string())
 }
 
-/// The script's `section`: a blank line, a rule, the title, the rule.
+/// A section heading: a blank line, a rule, the title, the rule.
 fn section(out: &mut dyn Write, title: &str) {
     let _ = writeln!(out);
     let _ = writeln!(out, "------------------------------------------------------------");
@@ -314,7 +306,7 @@ fn section(out: &mut dyn Write, title: &str) {
 // ---------------------------------------------------------------
 
 /// The parsed body, or `null` for an answer that is not JSON at all - every
-/// field is then simply missing, which is the script's empty string.
+/// field is then simply missing.
 fn parse_body(text: &str) -> Value {
     json::parse(text).unwrap_or(Value::Null)
 }
@@ -322,16 +314,15 @@ fn parse_body(text: &str) -> Value {
 /// One member of an answer, from the server's per-request `timings` object
 /// first and the top level second.
 ///
-/// The script greps the whole answer for `"key":`, so a `timings` block is
-/// not special to it; llama.cpp puts the counts under `timings`, and this
-/// reads the other shape too rather than reading a perfectly good answer as
+/// llama.cpp puts the counts under `timings`; an engine that puts them at
+/// the top level is read too, rather than reading a perfectly good answer as
 /// "no numbers".
 fn member<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
     value.get("timings").and_then(|timings| timings.get(key)).or_else(|| value.get(key))
 }
 
-/// One number, as the server wrote it - the script's `json_num`, which hands
-/// the literal text on.
+/// One number, as the literal text the server wrote, so it prints exactly
+/// as reported.
 fn number_of(value: &Value, key: &str) -> Option<String> {
     match member(value, key) {
         Some(Value::Number { text, .. }) => Some(text.clone()),
@@ -342,12 +333,10 @@ fn number_of(value: &Value, key: &str) -> Option<String> {
 /// The first `key` anywhere in the document, at any depth, in the order the
 /// server wrote it.
 ///
-/// This is what the script's `grep` over the flattened text finds, and it
-/// matters for `/props`: `model_path` is at the top level there, but `n_ctx`
-/// is not - it lives under `default_generation_settings` - so a top-level
-/// lookup reads a perfectly healthy server as "no answer" and section 1
-/// prints `?` where the script prints the context. Depth-first in member
-/// order is the same first match the flattened text has.
+/// It matters for `/props`: `model_path` is at the top level there, but
+/// `n_ctx` is not - it lives under `default_generation_settings` - so a
+/// top-level lookup reads a perfectly healthy server as "no answer" and
+/// section 1 prints `?` instead of the context.
 fn deep<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
     match value {
         Value::Object(members) => members
@@ -377,16 +366,16 @@ fn timing(value: &Value, key: &str) -> Option<f64> {
 }
 
 /// The assistant's text: `content`, or `reasoning_content` for a thinking
-/// model - the script's `msg_content`.
+/// model.
 ///
-/// An empty `content` is "no text" and falls through to the reasoning, as the
-/// shell's `[[ -n "${c}" ]]` does; an answer that is not JSON at all has no
-/// text either, and both are what make section 2 fall back to its plain body.
+/// An empty `content` is "no text" and falls through to the reasoning; an
+/// answer that is not JSON at all has no text either, and both are what make
+/// section 2 fall back to its plain body.
 fn message_content(text: &str) -> String {
     message_content_of(&parse_body(text))
 }
 
-/// The first choice's `message`, the object `msg_content` looks inside.
+/// The first choice's `message`, the object the text is read from.
 fn choice_message(value: &Value) -> Option<&Value> {
     value.get("choices").and_then(first).and_then(|choice| choice.get("message"))
 }
@@ -398,12 +387,9 @@ fn first(items: &Value) -> Option<&Value> {
     }
 }
 
-/// The first `n` bytes of `text`, cut on a character boundary - the script's
-/// `head -c 200`.
-///
-/// The shell could cut a UTF-8 character in half; this cannot, so it cuts
-/// just before it. One character of a diagnostic line is not worth an
-/// invalid string.
+/// The first `n` bytes of `text`, cut on a character boundary: a cut that
+/// would split a UTF-8 character falls just before it. One character of a
+/// diagnostic line is not worth an invalid string.
 fn head(text: &str, n: usize) -> String {
     if text.len() <= n {
         return text.to_string();
@@ -415,8 +401,8 @@ fn head(text: &str, n: usize) -> String {
     text[..end].to_string()
 }
 
-/// `value` as compact JSON - the shape the script's `json_raw` hands to
-/// `grep`, rebuilt from the parse rather than sliced out of the answer.
+/// `value` as compact JSON, rebuilt from the parse rather than sliced out of
+/// the answer - the text the tool verdict searches.
 fn compact(value: &Value) -> String {
     match value {
         Value::Null => "null".to_string(),
@@ -447,9 +433,9 @@ fn warmup_body(model: &str) -> String {
     )
 }
 
-/// The sanity body. `no_think` is the script's first attempt, which asks the
-/// template for no thinking; the second is the plain body a template without
-/// the kwarg accepts.
+/// The sanity body. `no_think` is the first attempt, which asks the template
+/// for no thinking; the second is the plain body a template without the
+/// kwarg accepts.
 fn sanity_body(model: &str, no_think: bool) -> String {
     let kwargs = if no_think { "  \"chat_template_kwargs\": {\"enable_thinking\": false},\n" } else { "" };
     format!(
@@ -458,8 +444,8 @@ fn sanity_body(model: &str, no_think: bool) -> String {
     )
 }
 
-/// The tool body. The retry adds the `chat_template_kwargs` key the script's
-/// `sed` inserts after `tool_choice`.
+/// The tool body. The retry adds `chat_template_kwargs` after
+/// `tool_choice`, to turn thinking off.
 fn tool_body(model: &str, no_think: bool) -> String {
     let mut body = String::new();
     body.push_str("{\n  \"model\": \"");
@@ -477,7 +463,7 @@ fn tool_body(model: &str, no_think: bool) -> String {
 }
 
 /// The throughput body: the code-review prompt, 192 tokens, caching off, and
-/// the temperature and top_p `.env` names.
+/// the temperature and top_p golem.toml names.
 fn review_body(model: &str, temperature: &str, top_p: &str) -> String {
     format!(
         "{{\n  \"model\": \"{model}\",\n  \"messages\": [{{\"role\": \"user\", \"content\": \
@@ -496,8 +482,7 @@ struct Bodies {
     tokenize: String,
 }
 
-/// Build the haystack and the three bodies that carry it - the script's
-/// `build_bodies`, arithmetic and all.
+/// Build the haystack and the three bodies that carry it.
 ///
 /// The needle goes in the middle, and the count is `target` tokens' worth of
 /// the filler line at `cpt` characters per token; the first pass guesses the
@@ -544,7 +529,7 @@ fn haystack_bodies(model: &str, target: f64, cpt: f64) -> Bodies {
 }
 
 // ---------------------------------------------------------------
-// The transport, as curl had it
+// The transport
 // ---------------------------------------------------------------
 
 /// `GET` a path and hand back the body, or empty when there was no answer.
@@ -552,17 +537,17 @@ fn get_body(base: &Base, path: &str, timeout: Duration) -> String {
     engine::get_json(base, path, timeout).map(|reply| reply.body).unwrap_or_default()
 }
 
-/// `POST` and hand back the body, or empty when the request failed - the
-/// script's `|| true`.
+/// `POST` and hand back the body whatever its status, or empty when there
+/// was no answer.
 fn post_body(base: &Base, body: &str, timeout: Duration) -> String {
     engine::post_json(base, "/v1/chat/completions", body, timeout)
         .map(|reply| reply.body)
         .unwrap_or_default()
 }
 
-/// `POST` and hand back the body only for a 2xx - the script's `--fail` on
-/// the two long-context requests, where an unhappy status is read as no
-/// answer at all rather than as one.
+/// `POST` and hand back the body only for a 2xx - for the two long-context
+/// requests, where an unhappy status is read as no answer at all rather
+/// than as one.
 fn post_body_ok(base: &Base, body: &str, timeout: Duration) -> String {
     engine::post_json(base, "/v1/chat/completions", body, timeout)
         .filter(|reply| reply.ok())
@@ -574,8 +559,7 @@ fn post_body_ok(base: &Base, body: &str, timeout: Duration) -> String {
 // Section 2: arithmetic sanity
 // ---------------------------------------------------------------
 
-/// The arithmetic answer, or `(request failed)` - the script's two attempts
-/// and its fallback text.
+/// The arithmetic answer after at most two attempts, or `(request failed)`.
 ///
 /// The first attempt disables thinking, which is what a Qwen3.x hybrid needs
 /// to answer at all; a template that does not know the kwarg answers with
@@ -599,9 +583,7 @@ fn sanity_answer(base: &Base, model: &str) -> String {
 ///
 /// An absent key, a `null` and an empty array are the same thing here - the
 /// model did not call the tool - which is what decides the retry and the
-/// verdict. (The script's `json_raw` is non-empty for a literal `null`, so
-/// its retry turns on the key being *absent*; asking again whenever there is
-/// no call to show for it is the same test on every answer that has one.)
+/// verdict.
 fn tool_calls(value: &Value) -> Option<&[Value]> {
     match choice_message(value).and_then(|message| message.get("tool_calls")) {
         Some(Value::Array(calls)) if !calls.is_empty() => Some(calls),
@@ -617,11 +599,8 @@ fn has_tool_calls(raw: &str) -> bool {
 /// The two lines section 3 prints for one answer: the `tool_call :` line,
 /// when the model called the tool, and the `[ OK ]`/`[WARN]`/`[FAIL]` line.
 ///
-/// The script greps the text after `"tool_calls"` for the tool's name and for
-/// the city; this greps the same text rebuilt from the parse. The one
-/// deliberate difference is the arguments: the shell's `json_str` stops at the
-/// first quote inside a JSON-encoded arguments string and prints the half of
-/// it before that, where this prints what the model actually sent.
+/// The calls, as compact JSON, are searched for the tool's name and for the
+/// city; the line shows the arguments exactly as the model sent them.
 fn tool_verdict(raw: &str) -> (Option<String>, String) {
     if raw.is_empty() {
         return (None, "[FAIL] tool request returned no response".to_string());
@@ -634,13 +613,8 @@ fn tool_verdict(raw: &str) -> (Option<String>, String) {
     if !text.contains(TOOL_NAME) {
         return (None, no_tool_call(raw));
     }
-    // The first call's arguments. The script reaches them through `json_str`,
-    // whose pattern is `"[^"]*"` - which cannot cross an escaped quote, so it
-    // prints `{\)` for what is really `{"city": "Munich", ...}`. This prints
-    // the arguments the server sent: the line exists to show them, and a
-    // truncated one is the helper's accident rather than the shell's intent.
-    // It is the single line where this port and the script differ, and it is
-    // deliberate.
+    // The first call's arguments, whole: the line exists to show them, and
+    // they are a JSON-encoded string full of escaped quotes.
     let arguments = calls
         .first()
         .and_then(|call| call.get("function"))
@@ -655,7 +629,8 @@ fn tool_verdict(raw: &str) -> (Option<String>, String) {
     }
 }
 
-/// The script's `[FAIL] no tool call emitted; content=<200 bytes>`.
+/// `[FAIL] no tool call emitted; content=<200 bytes>`: the start of what the
+/// model said instead.
 fn no_tool_call(raw: &str) -> String {
     format!("[FAIL] no tool call emitted; content={}", head(&message_content(raw), 200))
 }
@@ -664,12 +639,12 @@ fn no_tool_call(raw: &str) -> String {
 // Section 4: throughput
 // ---------------------------------------------------------------
 
-/// The script's `timings_line`: the server's own per-request numbers, with
-/// the draft acceptance appended when speculative decoding was on.
+/// One run's line: the server's own per-request numbers, with the draft
+/// acceptance appended when speculative decoding was on.
 ///
-/// A count the server did not report is the script's `0`, and a speed it did
-/// not report is `0`/`0.0` - a model that answered without `timings` still
-/// prints a line, and the line still says what was missing.
+/// A count or speed the server did not report prints as `0`/`0.0` - a model
+/// that answered without `timings` still prints a line, and the line still
+/// says what was missing.
 fn timings_line(value: &Value) -> String {
     let prompt_n = number_of(value, "prompt_n").unwrap_or_else(|| "0".to_string());
     let prompt_tps = timing(value, "prompt_per_second").unwrap_or(0.0);
@@ -677,9 +652,8 @@ fn timings_line(value: &Value) -> String {
     let gen_tps = timing(value, "predicted_per_second").unwrap_or(0.0);
     let mut line =
         format!("prompt={prompt_n} tok @ {prompt_tps:.0} t/s, gen={gen_n} tok @ {gen_tps:.1} t/s");
-    // The shell's `[[ -n "${draft_n}" && "${draft_n}" != "0" ]]`: a model
-    // without speculative decoding has no `draft_n` at all, and one that has
-    // it but drew no drafts prints no acceptance either.
+    // A model without speculative decoding has no `draft_n` at all, and one
+    // that has it but drew no drafts prints no acceptance either.
     if let Some(draft_n) = number_of(value, "draft_n").filter(|n| n != "0") {
         let accepted = timing(value, "draft_n_accepted").unwrap_or(0.0);
         let drafted: f64 = draft_n.parse().unwrap_or(0.0);
@@ -689,9 +663,8 @@ fn timings_line(value: &Value) -> String {
     line
 }
 
-/// The largest of the three decode speeds, as the script's
-/// `sort -g | tail -n1` takes it: the number the server wrote, or nothing at
-/// all when no run reported one.
+/// The largest of the three decode speeds: the number the server wrote (the
+/// last of equals), or nothing at all when no run reported one.
 fn best_of(speeds: &[Option<String>]) -> String {
     let mut best: Option<(&str, f64)> = None;
     for text in speeds.iter().flatten() {
@@ -722,8 +695,8 @@ fn long_context(out: &mut dyn Write, base: &Base, model: &str, long: &str) {
     let mut counted = tokenize_count(base, &bodies.tokenize);
     if counted.is_some_and(|count| count > 0) {
         if counted != Some(target as u64) {
-            // `awk 'BEGIN {printf "%.3f", cpt * want / got}'`, rounded on the
-            // way through the string, as the shell's argument was.
+            // The corrected ratio, rounded to three decimals so a rerun
+            // builds the same haystack.
             let corrected = format!("{:.3}", CHARS_PER_TOKEN * target / counted.unwrap_or(1) as f64);
             bodies = haystack_bodies(model, target, corrected.parse().unwrap_or(CHARS_PER_TOKEN));
             counted = tokenize_count(base, &bodies.tokenize);
@@ -787,9 +760,9 @@ fn message_content_of(value: &Value) -> String {
 /// How many tokens the server sees in the tokenize body, or `None` when the
 /// engine has no `/tokenize` (then the estimate stands).
 ///
-/// The script counts the ids in the `tokens` array with `grep -c`; the array
-/// is the same count read properly. Never fails: a missing endpoint, an
-/// unreadable answer and an empty array are all "no count".
+/// The count is the length of the answer's `tokens` array. Never fails: a
+/// missing endpoint, an unreadable answer and an empty array are all "no
+/// count".
 fn tokenize_count(base: &Base, body: &str) -> Option<u64> {
     let reply = engine::post_json(base, "/tokenize", body, TOKENIZE_TIMEOUT)?;
     match parse_body(&reply.body).get("tokens") {
@@ -806,13 +779,13 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
 
-    /// A home with a `.env` naming `port`, so `Base::from_home` points the
+    /// A home whose golem.toml names `port`, so `Base::from_home` points the
     /// run at a fake engine rather than the real one.
     fn home(tag: &str, port: u16) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("golem-rs-eval-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp");
-        std::fs::write(dir.join(".env"), format!("LOCAL_AI_PORT=\"{port}\"\n")).expect("write");
+        std::fs::write(dir.join("golem.toml"), format!("LOCAL_AI_PORT=\"{port}\"\n")).expect("write");
         dir
     }
 
@@ -886,7 +859,7 @@ mod tests {
         let props = parse_body(body);
         assert_eq!(props_string(&props, "model_path").as_deref(), Some("/m/a.gguf"));
         assert_eq!(props_number(&props, "n_ctx").as_deref(), Some("249344"));
-        // The first match in document order, as the flattened grep takes it.
+        // The first match in document order, depth first.
         let twice = parse_body("{\"a\":{\"n_ctx\":1},\"n_ctx\":2}");
         assert_eq!(props_number(&twice, "n_ctx").as_deref(), Some("1"));
         // And a key that is not there at any depth is still absent.
@@ -943,11 +916,10 @@ mod tests {
     // -----------------------------------------------------------
 
     #[test]
-    fn the_command_line_takes_the_scripts_long_flag() {
+    fn the_command_line_takes_only_the_long_flag() {
         // No `--long`: no long-context section at all.
         assert_eq!(parse_args(&[]), Ok(None));
-        // `--long` with no value, and with an empty one: the shell's
-        // `${2:-32768}` makes both ask for 32768.
+        // `--long` with no value, and with an empty one: both ask for 32768.
         assert_eq!(parse_args(&args(&["--long"])), Ok(Some("32768".to_string())));
         assert_eq!(parse_args(&args(&["--long", ""])), Ok(Some("32768".to_string())));
         assert_eq!(parse_args(&args(&["--long", "200000"])), Ok(Some("200000".to_string())));
@@ -966,7 +938,7 @@ mod tests {
         let dir = home("unknown-arg", 1);
         let (status, text) = run_out(&dir, &["--bogus"]);
         assert_eq!(status, 1);
-        assert_eq!(text, "", "the refusal goes to stderr, as the script's does");
+        assert_eq!(text, "", "the refusal goes to stderr, out of the recorder's capture");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -983,7 +955,7 @@ mod tests {
     #[test]
     fn an_https_base_url_is_refused_with_the_reason() {
         let dir = home("https", 8000);
-        std::fs::write(dir.join(".env"), "LOCAL_AI_BASE_URL=\"https://example.test/v1\"\n")
+        std::fs::write(dir.join("golem.toml"), "LOCAL_AI_BASE_URL=\"https://example.test/v1\"\n")
             .expect("write");
         let (status, text) = run_out(&dir, &[]);
         assert_eq!(status, 1);
@@ -998,7 +970,7 @@ mod tests {
     // -----------------------------------------------------------
 
     #[test]
-    fn the_whole_run_matches_the_script_line_for_line() {
+    fn the_whole_run_prints_the_contract_line_for_line() {
         let port = serve(short_run("391", tool_reply("Munich")));
         let dir = home("golden", port);
         let (status, text) = run_out(&dir, &[]);
@@ -1036,19 +1008,19 @@ mod tests {
     }
 
     #[test]
-    fn the_alias_in_env_is_the_one_the_banner_names() {
+    fn the_configured_alias_is_the_one_the_banner_names() {
         // The tuner gates a candidate by setting GOLEM_MODEL_ALIAS, which
-        // `override_value` prefers; the `.env` value is what a plain run
-        // uses, and it is the one the banner has to name.
+        // `config::resolved` prefers; the golem.toml value is what a plain
+        // run uses, and it is the one the banner has to name.
         let port = serve(short_run("391", tool_reply("Munich")));
         let dir = home("alias", port);
-        std::fs::write(dir.join(".env"), format!("LOCAL_AI_PORT=\"{port}\"\nMODEL_ALIAS=\"ornith-1.5-35b\"\n"))
+        std::fs::write(dir.join("golem.toml"), format!("LOCAL_AI_PORT=\"{port}\"\nMODEL_ALIAS=\"ornith-1.5-35b\"\n"))
             .expect("write");
         let (status, text) = run_out(&dir, &[]);
         assert_eq!(status, 0);
         assert!(
             text.contains("\n EVAL COMPLETE - ornith-1.5-35b\n"),
-            "the alias .env names is the one printed:\n{text}"
+            "the alias golem.toml names is the one printed:\n{text}"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1069,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn the_tool_verdicts_are_the_scripts_four() {
+    fn there_are_four_tool_verdicts() {
         // No response at all.
         assert_eq!(
             tool_verdict(""),
@@ -1130,7 +1102,7 @@ mod tests {
     // -----------------------------------------------------------
 
     #[test]
-    fn the_timings_line_is_the_scripts() {
+    fn the_timings_line_reports_the_servers_numbers() {
         let value = parse_body(
             "{\"timings\": {\"prompt_n\": 115, \"prompt_per_second\": 7977.4, \
              \"predicted_n\": 192, \"predicted_per_second\": 328.04}}",
@@ -1324,7 +1296,7 @@ mod tests {
     // -----------------------------------------------------------
 
     #[test]
-    fn the_request_bodies_are_the_scripts() {
+    fn the_request_bodies_are_fixed() {
         // The warmup: eight tokens of "hi".
         let warmup = json::parse(&warmup_body("m")).expect("json");
         assert_eq!(warmup.get("max_tokens").and_then(Value::as_f64), Some(8.0));
@@ -1349,7 +1321,7 @@ mod tests {
         );
 
         // The throughput body: 192 tokens, caching off, and the two settings
-        // from `.env` in the request.
+        // from golem.toml in the request.
         let review = json::parse(&review_body("m", "0.15", "0.95")).expect("json");
         assert_eq!(review.get("max_tokens").and_then(Value::as_f64), Some(192.0));
         assert_eq!(review.get("cache_prompt").and_then(Value::as_bool), Some(false));
@@ -1361,11 +1333,11 @@ mod tests {
     }
 
     #[test]
-    fn the_temperature_and_top_p_come_from_env() {
+    fn the_temperature_and_top_p_come_from_the_config() {
         let dir = home("settings", 1);
-        std::fs::write(dir.join(".env"), "TEMPERATURE=\"0.6\"\nTOP_P=\n").expect("write");
+        std::fs::write(dir.join("golem.toml"), "TEMPERATURE=\"0.6\"\nTOP_P=\"\"\n").expect("write");
         assert_eq!(setting(&dir, "TEMPERATURE", DEFAULT_TEMPERATURE), "0.6");
-        // An empty value is unset, as `${NAME:-default}` has it.
+        // An empty value counts as unset.
         assert_eq!(setting(&dir, "TOP_P", DEFAULT_TOP_P), "0.95");
         // And a key the file does not have at all is the same thing.
         assert_eq!(setting(&dir, "NOPE", "0.15"), "0.15");
@@ -1373,7 +1345,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_rebuilds_the_text_the_script_greps() {
+    fn compact_rebuilds_the_text_the_verdict_searches() {
         let value = json::parse("{\"a\": [1, \"two\", null], \"b\": {\"c\": true}}").expect("json");
         assert_eq!(compact(&value), "{\"a\":[1,\"two\",null],\"b\":{\"c\":true}}");
     }

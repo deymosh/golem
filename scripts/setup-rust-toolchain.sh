@@ -37,7 +37,7 @@ DOWNLOAD_DIR="${ROOT_DIR}/data/tmp"
 # root and from golem-rs alike.
 CARGO_CONFIG_DIR="${ROOT_DIR}/.cargo"
 
-# Pinned, like the engine build (LLAMA_WIN_BUILD) and the docker digest: a
+# Pinned, like the engine build in the adapter: a
 # toolchain that changes underfoot makes a test failure mean nothing. Bump
 # deliberately, with the new sha256 from the release's own .sha256 asset.
 WINLIBS_TAG="${GOLEM_MINGW_TAG:-16.2.0posix-23.1.3-14.0.0-ucrt-r3}"

@@ -1,14 +1,13 @@
 //! Parsers for the `RESULT` lines that bench and eval print.
 //!
-//! These lines are the contract between the measuring scripts and everything
-//! that records or decides on a measurement: `record-result.sh` reads them to
-//! write a row, and the tuner reads `long_ctx_<N>=PASS` to decide whether a
-//! candidate passes the gate. The binary must read exactly the same text,
-//! so the parsers here are deliberately as tolerant as the shell ones:
-//! a missing key is "not measured", never an error, and a `%` or a `-` in a
+//! These lines are the contract between the measuring commands and everything
+//! that records or decides on a measurement: the recorder reads them to write
+//! a row, and the tuner reads `long_ctx_<N>=PASS` to decide whether a
+//! candidate passes the gate. The parsers are deliberately tolerant: a
+//! missing key is "not measured", never an error, and a `%` or a `-` in a
 //! value does not stop the rest of the line from being read.
 //!
-//! Shapes (see scripts/benchmark-ai.sh and scripts/eval-model.sh):
+//! Shapes (printed by the binary's `bench.rs` and `eval.rs`):
 //!
 //! ```text
 //! RESULT decode_best=59.6 decode_median=59.3 draft_accept=66% prefill=832 vram=11000
@@ -16,7 +15,7 @@
 //! RESULT long_ctx_7372=PASS prompt_tok_s=19311 gen_tok_s_at_depth=254.3
 //! ```
 
-/// A `key=value` line, split on spaces the way `tr ' ' '\n'` does.
+/// A `key=value` line, split on whitespace.
 pub fn fields(line: &str) -> Vec<(String, String)> {
     let line = line.trim();
     let line = line.strip_prefix("RESULT").unwrap_or(line).trim();
@@ -33,9 +32,8 @@ fn get<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str> {
 /// A number, with whatever unit the line hangs off it, and `-` as
 /// "not measured".
 ///
-/// The scripts read these fields with `grep -o 'vram=[0-9.]*'`, which stops
-/// at the first character that is not a digit or a dot - so the value is the
-/// leading run, and the rest of the token is a unit: the bench prints
+/// The value is the leading run of digits and dots, and the rest of the
+/// token is a unit: the bench prints
 /// `vram=1209MiB` and `draft_accept=66%`. Parsing the whole token instead
 /// rejects both, and a rejected `vram` reads as "the bench produced no
 /// usable result" on a bench that measured perfectly well.
@@ -100,7 +98,7 @@ pub struct Eval {
 
 impl Eval {
     /// Read every RESULT line of a captured eval run. The needle line is the
-    /// last one carrying `long_ctx_<N>=...`, as the shell takes it.
+    /// last one carrying `long_ctx_<N>=...`.
     pub fn parse<'a>(lines: impl IntoIterator<Item = &'a str>) -> Eval {
         let mut out = Eval::default();
         for line in lines {
@@ -152,7 +150,7 @@ mod tests {
     #[test]
     fn a_unit_hanging_off_a_value_does_not_hide_it() {
         // The bench prints the VRAM in MiB and the acceptance as a
-        // percentage; both are the digits, and the scripts' greps say so.
+        // percentage; both values are the digits.
         let b = Bench::parse("RESULT decode_best=338.2 decode_median=338.2 draft_accept=- prefill=- vram=1209MiB");
         assert_eq!(b.vram_mib, Some(1209.0));
         assert_eq!(b.prefill, None, "a skipped prefill is still not measured");
@@ -207,7 +205,7 @@ mod tests {
 
     #[test]
     fn the_last_needle_line_wins() {
-        // A retried run prints more than one; the shell takes the last.
+        // A retried run prints more than one; the last is the verdict.
         let eval = Eval::parse([
             "RESULT long_ctx_7372=FAIL prompt_tok_s=1",
             "RESULT long_ctx_7372=PASS prompt_tok_s=19311",
@@ -224,7 +222,7 @@ mod tests {
 
     #[test]
     fn the_tuners_own_result_line_is_not_confused_for_a_needle() {
-        // `RESULT tune_preset=... ctx=... decode=...` is printed by tune.sh.
+        // `RESULT tune_preset=... ctx=... decode=...` is a tuner line.
         let eval = Eval::parse(["RESULT tune_preset=smoke-high engine=llama.cpp n_cpu_moe=2 ctx=32768 decode=312.5 prefill=18681 vram=1515"]);
         assert!(eval.needle.is_none());
         assert_eq!(eval.gen_tok_s_best, None);

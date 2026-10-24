@@ -1,13 +1,10 @@
 //! The app's actions: the one path the TUI's menu and the console's job
 //! runner run a verb through.
 //!
-//! `service.rs`'s rule is that the service is the only process that spawns
-//! the engine and every verb is a client of it - so that is where the engine
-//! verbs go here, the service started when there is none, and the lines it
-//! streams back land in the same job log the launcher used to fill. The
-//! measuring verbs are this binary's own commands: a child of the app, not
-//! of a shell, which is why a folder with nothing but the binary in it can
-//! run the whole menu.
+//! The engine verbs go to the service that owns the engine (started when
+//! there is none), and the lines it streams back land in the job log the
+//! page and the screen tail. The measuring verbs are this binary's own
+//! commands, run as its children.
 //!
 //! This is also where the console's vocabulary lives - the actions a page may
 //! post and the two it answers in process - because [`plan`] is the same list
@@ -16,8 +13,8 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
-
+use crate::config::Overrides;
+use crate::proc;
 use crate::service;
 
 /// What an action is, decided before anything runs - pure, so the vocabulary
@@ -89,9 +86,7 @@ pub fn plan(action: &str, arg: &str) -> Option<Plan> {
 /// `log`, and its exit code back.
 ///
 /// The log is the console's job pane (`logs/web-job.log`): the page polls it
-/// through `api/state`, so it is where a service's streamed lines belong -
-/// the launcher's stdout used to be the only thing in it, and a reader of
-/// the pane should not care which of the two filled it.
+/// through `api/state`, so it is where a service's streamed lines belong.
 pub fn run(home: &Path, action: &str, arg: &str, log: &Path) -> i32 {
     match plan(action, arg) {
         Some(Plan::Read(verb)) => read(home, verb, log),
@@ -123,24 +118,12 @@ fn read(home: &Path, verb: &str, log: &Path) -> i32 {
 
 /// The engine verbs: ask the service that owns the engine, starting one when
 /// there is none.
-///
-/// A verb the service cannot serve - an engine whose adapter says it installs
-/// itself - comes back as its own failure, with the reason streamed into the
-/// log: there is no shell launcher to hand it to any more, which is what the
-/// `launcher` key in an adapter now means.
 fn through_service(home: &Path, verb: &str, log: &Path) -> i32 {
     let Some(mut out) = open(log) else { return 1 };
-    if let Some(code) = service::send(home, verb, &mut out) {
-        return code;
-    }
-    if let Err(why) = service::ensure_running(home, &mut out) {
-        let _ = writeln!(out, "[FAIL] {why}");
-        return 1;
-    }
-    match service::send(home, verb, &mut out) {
-        Some(code) => code,
-        None => {
-            let _ = writeln!(out, "[FAIL] the golem service started but did not answer");
+    match service::request(home, verb, &Overrides::default(), &mut out) {
+        Ok(code) => code,
+        Err(why) => {
+            let _ = writeln!(out, "[FAIL] {why}");
             1
         }
     }
@@ -149,38 +132,13 @@ fn through_service(home: &Path, verb: &str, log: &Path) -> i32 {
 /// Everything else: this binary's own verb, as a child process with the same
 /// home, its output to the log and its exit code back.
 fn self_run(home: &Path, args: &[String], log: &Path) -> i32 {
-    let Ok(exe) = std::env::current_exe() else {
-        let _ = line(log, "[FAIL] cannot find this binary to run the action");
-        return 1;
-    };
-    let mut command = Command::new(exe);
-    command.args(args).env("GOLEM_HOME", home);
-    match run_command(command, log) {
+    match proc::golem(home, args).and_then(|command| proc::run_to_file(command, log)) {
         Ok(code) => code,
         Err(e) => {
             let _ = line(log, &format!("[FAIL] cannot run golem {}: {e}", args[0]));
             1
         }
     }
-}
-
-/// Run a prepared command, with its output going to `log`.
-///
-/// The one way this binary runs a child: no terminal, output to a file, an
-/// exit code back. The tuner's gate and the app's own verbs both want exactly
-/// that, and the job pane reads the same file either way.
-pub fn run_command(mut command: Command, log: &Path) -> std::io::Result<i32> {
-    if let Some(dir) = log.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let out = std::fs::File::create(log)?;
-    let err = out.try_clone()?;
-    let status = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(out))
-        .stderr(Stdio::from(err))
-        .status()?;
-    Ok(status.code().unwrap_or(-1))
 }
 
 /// The job log, created with its directory, or `None` with the reason said

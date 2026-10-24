@@ -3,9 +3,8 @@
 //! `bench/results.jsonl` is our own file with a known shape: flat objects,
 //! one nested object (`eval`), one nested object of scalars (`flags`). A
 //! full JSON library would be a large dependency for that, and the project
-//! keeps its hot path free of them (the shell scripts read the same file
-//! with awk). What this reader must get right is exactly what the file
-//! contains, plus the escapes a `note` can carry.
+//! keeps its dependency set deliberate. What this reader must get right is
+//! exactly what the file contains, plus the escapes a `note` can carry.
 //!
 //! Objects keep their key order (`Vec`, not a map): the row's order is part
 //! of what makes the file readable, and rows are small enough that a linear

@@ -1,10 +1,10 @@
-//! `up` / `down` / `restart`: the engine, started and stopped by the binary.
+//! `up` / `down` / `restart` / `status`: the engine, started and stopped.
 //!
-//! The port of `scripts/start-windows.ps1` / `stop-windows.ps1` and their
-//! native cousins, and "the binary is the app". These launchers are the last
-//! `.env` readers in the repository, and this is why they exist: to install a
-//! pinned build, to start a server, to kill a process tree, and to wait for
-//! the card. None of it needs PowerShell or bash.
+//! Resolve the command line from `golem.toml`, the adapter and the preset
+//! ([`plan`], pure); install the pinned build and fetch the preset's models
+//! when they are missing; spawn the server; wait for it. These run inside
+//! `golem service`, which owns the engine - the CLI asks it rather than
+//! calling them directly (see `service.rs`).
 //!
 //! ## The rules that are easy to get wrong
 //!
@@ -16,20 +16,12 @@
 //!   `cudaMalloc failed: out of memory` while reporting a perfectly healthy
 //!   pid. "Stopped" has to mean the memory is free, so this waits for the card.
 //! - **The server writes its own log, and its stdout and stderr are closed.**
-//!   The launcher hands them to a file only for Strata, and the reason is not
-//!   tidiness: a child holding our pipes open keeps anything reading our
-//!   output (`./golem up | tail`) waiting for an EOF that never comes.
+//!   A child holding our pipes open keeps anything reading our output
+//!   (`golem up | tail`) waiting for an EOF that never comes.
 //! - **Health is a deadline *and* an early exit.** Ten minutes of polling is
 //!   right for a 20 GB load and wrong for a server that died on its first
 //!   flag: without the exit check, `up` would poll a corpse for ten minutes
 //!   and then report a timeout instead of the reason.
-//!
-//! `up` is the binary's for Windows and native mode; docker stays with its
-//! launcher (`docker compose up -d` is a different thing), and so does an
-//! engine whose adapter says it installs itself some other way - Strata's
-//! `launcher = strata` is a git clone and a Python setup, which is a port of
-//! its own. Both fall back rather than fail: the port is per engine, not per
-//! mode.
 
 use std::io::Write;
 use std::net::ToSocketAddrs;
@@ -41,11 +33,13 @@ use golem_core::adapter;
 use golem_core::ini;
 use golem_core::record;
 
+use crate::config::{self, Overrides};
 use crate::client;
 use crate::engine;
 use crate::pull;
 use crate::release;
-use crate::state;
+use crate::machine;
+use crate::paths;
 
 /// How long the card may take to come back.
 const CARD_SETTLE: Duration = Duration::from_secs(20);
@@ -57,28 +51,27 @@ const CARD_IDLE_MIB: u64 = 2048;
 /// How long the process may take to die.
 const PROCESS_SETTLE: Duration = Duration::from_secs(20);
 
-/// How long the model may take to load: the launcher's ten minutes, which is
+/// How long the model may take to load: ten minutes, which is
 /// a first boot reading 20 GB from a cold page cache and warming the GPU.
 const LOAD_DEADLINE: Duration = Duration::from_secs(600);
 
-/// How often `/health` is asked while it loads. The launcher's three
-/// seconds, which is also about how long a loaded 35B needs to answer once.
+/// How often `/health` is asked while it loads. Three seconds, which is also
+/// about how long a loaded 35B needs to answer once.
 const HEALTH_INTERVAL: Duration = Duration::from_secs(3);
 
 /// How much of the server's own log is shown when it dies during startup.
-/// The launcher's `Get-Content $Log -Tail 15`, and the reason it is shown at
-/// all: a bad flag or a missing model says so in those lines.
+/// It is shown at all because a bad flag or a missing model says so in
+/// those lines.
 const LOG_TAIL: usize = 15;
 
-/// The model an unconfigured `MODEL_FILE` falls back to, as the launcher's is
-/// the same file.
+/// The model an unconfigured `MODEL_FILE` falls back to - the same file
+/// `golem.toml.example` names.
 const DEFAULT_MODEL_FILE: &str = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
 
-/// One `KEY` from the configuration, or the launcher's default when it is
-/// unset or empty - the shell's `if ($Cfg["KEY"]) { ... } else { default }`,
-/// which reads an empty assignment as unset.
+/// One `KEY` from the configuration, or `default` when it is
+/// unset or empty: an empty assignment counts as unset.
 fn setting(home: &Path, key: &str, default: &str) -> String {
-    state::env_value(home, key).filter(|value| !value.is_empty()).unwrap_or_else(|| default.to_string())
+    config::get(home, key).filter(|value| !value.is_empty()).unwrap_or_else(|| default.to_string())
 }
 
 /// `golem down`: stop the engine and wait for the memory.
@@ -120,19 +113,16 @@ pub fn down(home: &Path, out: &mut dyn Write) -> i32 {
 /// `golem up`: install the pinned build if it is missing, start the engine,
 /// and wait until it answers.
 ///
-/// `dry_run` is the shell launcher's `-DryRun`: resolve everything, install
-/// nothing, start nothing. It comes *before* the port check, which is the one
-/// place this deliberately differs from the launcher it was ported from -
-/// there the check was earlier, so a dry run failed while an engine was up.
-/// The dry run's whole job is to say what would be started, and refusing to
-/// answer while something is running is the opposite of useful.
-pub fn up(home: &Path, dry_run: bool, out: &mut dyn Write) -> Result<(), String> {
-    let mut plan = plan(home)?;
+/// `dry_run`: resolve everything, install nothing, start nothing. It comes
+/// *before* the port check, so a dry run answers while an engine is up: its
+/// whole job is to say what would be started, and refusing to answer while
+/// something is running is the opposite of useful.
+pub fn up(home: &Path, overrides: &Overrides, dry_run: bool, out: &mut dyn Write) -> Result<(), String> {
+    let mut plan = plan(home, overrides)?;
 
-    // The launcher's line before it starts a single model rather than a
-    // router. Printed in a dry run too, because `-DryRun` prints it: it comes
-    // before the dry run's own exit in the script. Only the shape with a
-    // preset gets it - with no preset there is no section to name.
+    // Said before a single model is started rather than a router, in a dry
+    // run too: it changes what the start means. Only the shape with a preset
+    // gets it - with no preset there is no section to name.
     if plan.preset.is_some() && !plan.router {
         let _ = writeln!(out, "[ .. ] {} has no router mode: serving only [{}]", plan.engine, plan.served);
     }
@@ -154,34 +144,19 @@ pub fn up(home: &Path, dry_run: bool, out: &mut dyn Write) -> Result<(), String>
         let _ = writeln!(out, "[ OK ] dry run: \"{}\" {}", plan.program.display(), plan.args.join(" "));
         let _ = writeln!(out, "       (working directory: {})", plan.workdir.display());
         let _ = writeln!(out, "       serving: {}  -> pid {}", plan.served, plan.pid_file.display());
-        // The launcher's `-DryRun` downloads what is missing before it prints
-        // this; a dry run that installed nothing must at least say what a real
-        // one would fetch, or the report is a lie by omission.
+        // A dry run installs and fetches nothing, so it must at least say what
+        // a real one would fetch, or the report is a lie by omission.
         if let Ok(jobs) = model_jobs(home, &plan, out) {
             if !jobs.is_empty() {
                 let _ = writeln!(out, "[ .. ] would fetch {} model file(s) the preset needs", jobs.len());
             }
         }
-        // An engine the binary cannot start is still worth resolving in a
-        // dry run: the report says which one it is and why it will not run,
-        // which is more use than refusing to answer.
-        if let Some(reason) = &plan.via_launcher {
-            let _ = writeln!(out, "[ .. ] {reason}");
-        }
         return Ok(());
     }
 
-    // Nothing to hand this engine back to any more: the shell launchers are
-    // gone, so an engine that installs itself is one this binary does not
-    // support, and saying that is the honest answer.
-    if let Some(reason) = &plan.via_launcher {
-        return Err(reason.clone());
-    }
-
     let endpoint = engine::Endpoint::from_home(home);
-    // A connect, not a request: the launcher asks the OS for a listener
-    // (`Get-NetTCPConnection -State Listen`), and a server that is up but
-    // still loading answers nothing while it holds the socket.
+    // A connect, not a request: a server that is up but still loading
+    // answers nothing while it holds the socket.
     if listening(endpoint.port) {
         // Two cases, and they are not the same answer. Something that is *our*
         // engine, already answering, makes `up` a no-op that succeeds - which
@@ -189,7 +164,7 @@ pub fn up(home: &Path, dry_run: bool, out: &mut dyn Write) -> Result<(), String>
         // already has the engine up needs. Something else holding the port is
         // a mistake worth refusing, because the alternative is a server that
         // starts, reports a healthy pid, and answers nothing.
-        if healthy(&endpoint) {
+        if engine::healthy(&endpoint) {
             let _ = writeln!(out, "[ OK ] Local AI server is already running");
             return Ok(());
         }
@@ -211,8 +186,7 @@ pub fn up(home: &Path, dry_run: bool, out: &mut dyn Write) -> Result<(), String>
         plan.bin = installed.dir;
     }
 
-    // After the engine is on disk and before anything is spawned, which is
-    // where `start-windows.ps1` does it.
+    // After the engine is on disk and before anything is spawned.
     ensure_models(home, &plan, out)?;
 
     start(home, &plan, &endpoint, out)
@@ -223,15 +197,15 @@ pub fn up(home: &Path, dry_run: bool, out: &mut dyn Write) -> Result<(), String>
 /// `cmd_restart`'s two lines, and its `|| true` is the point: a restart is
 /// asked for exactly when the engine may not be running, so a stop that
 /// found nothing is not a failure to stop.
-pub fn restart(home: &Path, out: &mut dyn Write) -> Result<(), String> {
+pub fn restart(home: &Path, overrides: &Overrides, out: &mut dyn Write) -> Result<(), String> {
     down(home, out);
-    up(home, false, out)
+    up(home, overrides, false, out)
 }
 
 /// `golem status`: up or down, on what port, with what the engine lists.
 ///
-/// Exit code follows the shell's health check: 0 when the engine answers,
-/// 1 when it does not, so a script can branch on it.
+/// Exit code: 0 when the engine answers, 1 when it does not, so a script can
+/// branch on it.
 pub fn status(home: &Path, out: &mut dyn Write) -> i32 {
     let endpoint = engine::Endpoint::from_home(home);
     let status = engine::status(home);
@@ -269,7 +243,7 @@ pub fn status(home: &Path, out: &mut dyn Write) -> i32 {
 }
 
 /// The model files the preset needs and `data/models` lacks, in the order the
-/// preset names them, with the launchers' warnings already said.
+/// preset names them, with the warnings already written to `out`.
 ///
 /// Pure: it reads the preset and decides, and fetches nothing. That is what
 /// lets a dry run say what a real one would download - and what lets the rules
@@ -277,9 +251,8 @@ pub fn status(home: &Path, out: &mut dyn Write) -> i32 {
 fn model_jobs(home: &Path, plan: &Startup, out: &mut dyn Write) -> Result<Vec<(String, String)>, String> {
     let models = home.join("data/models");
     let Some(preset_rel) = &plan.preset else {
-        // No preset: `.env` names the model, and `pull`'s no-argument list is
-        // the one the launcher fetches there too (`HF_REPO` + `MODEL_FILE`,
-        // plus the draft).
+        // No preset: golem.toml names the model, and `pull`'s no-argument
+        // list is what is fetched (`HF_REPO` + `MODEL_FILE`, plus the draft).
         return Ok(pull::default_jobs(home)
             .into_iter()
             .filter(|(_, file)| !models.join(file).is_file())
@@ -291,8 +264,8 @@ fn model_jobs(home: &Path, plan: &Startup, out: &mut dyn Write) -> Result<Vec<(S
     let preset = ini::parse(&text);
 
     // The alias names no section, so this preset is new to this machine and
-    // there is nothing to be conservative about: the launcher fetches
-    // everything it names.
+    // there is nothing to be conservative about: everything it names is
+    // fetched.
     let all = preset.get(&plan.alias).is_none();
 
     let mut jobs: Vec<(String, String)> = Vec::new();
@@ -355,12 +328,10 @@ fn model_jobs(home: &Path, plan: &Startup, out: &mut dyn Write) -> Result<Vec<(S
 /// Fetch whatever the preset needs and `data/models` lacks, before anything
 /// starts.
 ///
-/// Both launchers do this before they launch (`cmd_up`'s `ensure_models`, and
-/// the model section of `start-windows.ps1`), and the shape of the failure
-/// without it is the reason: a router whose default section's model is missing
-/// starts healthy and fails at the first request, which is the worst place to
-/// find out. A fresh machine's first `up` is therefore a download and then a
-/// working server, as the launchers promise.
+/// The failure without it is the reason: a router whose default section's
+/// model is missing starts healthy and fails at the first request, which is
+/// the worst place to find out. A fresh machine's first `up` is therefore a
+/// download and then a working server.
 fn ensure_models(home: &Path, plan: &Startup, out: &mut dyn Write) -> Result<(), String> {
     let jobs = model_jobs(home, plan, out)?;
     if jobs.is_empty() {
@@ -386,22 +357,18 @@ fn start(home: &Path, plan: &Startup, endpoint: &engine::Endpoint, out: &mut dyn
         // the moment one std handle is set, so the child inherits *every*
         // inheritable handle this process holds - the stdout pipe a caller
         // gave us included. Its own handles point at NUL, so nothing looks
-        // wrong from the inside; from the outside `./golem up | tail` waits
-        // for an EOF that never comes. A piped `up` that finished in twenty
-        // seconds held the pipe for the engine's whole lifetime. Setting no
-        // stdio at all is worse, not better (the child then gets our handles
-        // outright, banner and all), and `cmd /c start` does not help either -
-        // both were measured. Only a process created with a clean handle table
-        // escapes it, which is what PowerShell's `Start-Process` is doing when
-        // the launcher does not have the problem. `docs/plan-service.md` has
-        // the fix: an engine owned by a long-lived service rather than by the
-        // command that asked for it.
+        // wrong from the inside; from the outside `golem up | tail` waited
+        // for an EOF that never came. Setting no stdio at all is worse (the
+        // child then gets our handles outright, banner and all), and
+        // `cmd /c start` does not help either - both were measured. The fix
+        // is structural: the engine is spawned by the long-lived service, not
+        // by the command that asked for it (docs/architecture.md).
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // A server sharing our console would take a Ctrl+C aimed at us, and the
-    // launcher starts it hidden for the same reason (`-WindowStyle Hidden`,
-    // which is a new console for a console application).
+    // A server sharing our console would take a Ctrl+C aimed at us, so on
+    // Windows it runs without a console window, not attached to ours
+    // (`CREATE_NO_WINDOW`).
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -438,7 +405,7 @@ fn start(home: &Path, plan: &Startup, endpoint: &engine::Endpoint, out: &mut dyn
         let _ = child.wait();
     });
 
-    // The launcher's two closing lines, one per mode: a router loads its
+    // The closing line, one per mode: a router loads its
     // models on demand, so what is healthy is the router and not a model.
     match &plan.preset {
         Some(preset) => {
@@ -482,9 +449,9 @@ fn wait_healthy(
 ) -> Result<(), String> {
     let deadline = Instant::now() + LOAD_DEADLINE;
     loop {
-        // Checked before the request, as the launcher's `$Proc.HasExited`
-        // is: a server that died at once is already gone by the first poll,
-        // and its exit code and log say more than a timeout would.
+        // Checked before the request: a server that died at once is already
+        // gone by the first poll, and its exit code and log say more than a
+        // timeout would.
         if let Some(status) = child
             .try_wait()
             .map_err(|e| format!("cannot watch the server: {e}"))?
@@ -499,7 +466,7 @@ fn wait_healthy(
                 code_text(status)
             ));
         }
-        if healthy(endpoint) {
+        if engine::healthy(endpoint) {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -511,11 +478,6 @@ fn wait_healthy(
         }
         std::thread::sleep(HEALTH_INTERVAL);
     }
-}
-
-/// Whether the engine answers `/health` with a success.
-fn healthy(endpoint: &engine::Endpoint) -> bool {
-    engine::get(endpoint, "/health").is_some_and(|(status, _)| (200..300).contains(&status))
 }
 
 /// Whether anything at all is listening on `port`.
@@ -533,7 +495,7 @@ fn tail(path: &Path, lines: usize) -> String {
     all[all.len().saturating_sub(lines)..].join("\n")
 }
 
-/// An exit status as the launcher's message says it: a process killed by a
+/// An exit status in words: a process killed by a
 /// signal has no code, and `unwrap()` on `code()` would be the bug.
 fn code_text(status: std::process::ExitStatus) -> String {
     match status.code() {
@@ -583,22 +545,15 @@ fn kill_tree(pid: u32) {
             .output();
         return;
     }
-    // The shell's order: the children first, because the parent exiting does
-    // not take a loaded model with it, then the parent.
+    // The children first, because the parent exiting does not take a loaded
+    // model with it, then the parent.
     let _ = Command::new("pkill").args(["-TERM", "-P", &pid.to_string()]).output();
     let _ = Command::new("kill").arg(pid.to_string()).output();
 }
 
-/// Remove the home's pid file, whichever spelling the mode uses.
+/// Remove the home's pid file.
 fn remove_pid(home: &Path) {
-    let Ok(entries) = std::fs::read_dir(home.join(".local")) else { return };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("llama-server") && name.ends_with(".pid") {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
+    let _ = std::fs::remove_file(paths::pid_file(home));
 }
 
 /// Wait until the card is back to a desktop's worth of use. `false` when it
@@ -606,7 +561,7 @@ fn remove_pid(home: &Path) {
 fn wait_for_card() -> bool {
     let deadline = Instant::now() + CARD_SETTLE;
     loop {
-        match used_mib() {
+        match machine::vram_used_mib() {
             // No nvidia-smi (an AMD box, a container): nothing to wait for.
             None => return true,
             Some(used) if used < CARD_IDLE_MIB => return true,
@@ -617,18 +572,6 @@ fn wait_for_card() -> bool {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-}
-
-/// VRAM in use, or `None` when there is no NVIDIA card to ask.
-fn used_mib() -> Option<u64> {
-    let out = Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout).lines().next()?.trim().parse().ok()
 }
 
 /// Everything needed to start the engine, resolved from the home.
@@ -658,8 +601,8 @@ pub struct Startup {
     pub bin: PathBuf,
     pub server: String,
     /// The address the server is told to bind. The closing banner names it,
-    /// and the export block that follows is the shell's own syntax for the
-    /// platform this is running on.
+    /// and the export block that follows is in the syntax of the platform's
+    /// shell.
     pub host: String,
     /// The preset, in router mode: what the closing line names as the thing
     /// that was served. `None` means a single model, and `served` names it.
@@ -667,16 +610,12 @@ pub struct Startup {
     /// Whether `--models-preset` is on the command line. The three shapes are
     /// distinguishable only here and in `preset`: a router serves every
     /// section, a single-model engine serves one section of a preset, and
-    /// with no preset at all `.env` is the configuration.
+    /// with no preset at all golem.toml is the configuration.
     pub router: bool,
     /// The default section's name. In router mode it is the one whose model
     /// must be on disk before the server starts; `served` cannot say it there,
     /// because a router serves all of them.
     pub alias: String,
-    /// Set when this engine's adapter says something other than the binary
-    /// installs it (`launcher = strata`): the reason, for a caller that
-    /// hands the work back to the shell launcher.
-    pub via_launcher: Option<String>,
 }
 
 impl Startup {
@@ -706,21 +645,21 @@ impl Startup {
 
 /// Resolve the engine, its build, and the arguments it is started with.
 ///
-/// The launcher's order, and each step has a reason: `ENGINE` picks the
+/// The order matters, and each step has a reason: `ENGINE` picks the
 /// adapter, `GPU_BACKEND` picks the build flavour (auto-detected from the
 /// toolchain when unset), the build pin decides which directory under
 /// `.local/engines/` holds the server, and the preset decides between router
 /// mode (`--models-preset`, one model resident) and a single section's flags.
-pub fn plan(home: &Path) -> Result<Startup, String> {
-    // Three keys are read through `override_value`, not `env_value`, because
-    // the launcher reads them that way and something depends on it: the tuner
+pub fn plan(home: &Path, overrides: &Overrides) -> Result<Startup, String> {
+    // Three keys are read through the overrides, not `golem.toml` alone,
+    // because something depends on it: the tuner
     // points one run at one candidate by setting `GOLEM_ENGINE`,
     // `GOLEM_MODELS_PRESET` and `GOLEM_MODEL_ALIAS` in the environment of the
     // command that starts the engine. Dropping them is not a cosmetic
     // difference - a sweep would restart the same preset for every candidate
-    // and the gate would score whatever `.env` names, which is how a 0.5B
+    // and the gate would score whatever golem.toml names, which is how a 0.5B
     // candidate was once "gated" against the 35B coder's numbers.
-    let engine = state::override_value(home, "GOLEM_ENGINE", "ENGINE")
+    let engine = overrides.get(home, "ENGINE")
         .unwrap_or_else(|| "llama.cpp".to_string());
     let adapter_path = home.join("engines").join(&engine).join("engine.ini");
     let adapter_text = std::fs::read_to_string(&adapter_path)
@@ -732,23 +671,23 @@ pub fn plan(home: &Path) -> Result<Startup, String> {
     let bin = home.join(".local").join("engines").join(&engine).join(format!("{build}-{backend}"));
     let server = server_name(&adapter);
 
-    let port = state::env_value(home, "LOCAL_AI_PORT").unwrap_or_else(|| "8000".to_string());
-    let key = state::env_value(home, "LOCAL_AI_API_KEY").unwrap_or_else(|| "local-ai-key".to_string());
+    let port = config::get(home, "LOCAL_AI_PORT").unwrap_or_else(|| "8000".to_string());
+    let key = config::get(home, "LOCAL_AI_API_KEY").unwrap_or_else(|| "local-ai-key".to_string());
     // `LOCAL_AI_HOST` through the override, because a container is the one
     // caller that must *not* take it from the file: the file is a host-side
     // setting (127.0.0.1 keeps the LAN out), while a container's port is
     // published and its engine has to bind 0.0.0.0 whatever the mounted
-    // `.env` says. Same idiom as the three above, same reason: the
+    // golem.toml says. Same idiom as the three above, same reason: the
     // environment of the process that starts the engine is the per-run word.
-    let host = state::override_value(home, "GOLEM_LOCAL_AI_HOST", "LOCAL_AI_HOST")
+    let host = overrides.get(home, "LOCAL_AI_HOST")
         .unwrap_or_else(|| "127.0.0.1".to_string());
-    let alias = state::override_value(home, "GOLEM_MODEL_ALIAS", "MODEL_ALIAS")
+    let alias = overrides.get(home, "MODEL_ALIAS")
         .unwrap_or_else(|| "local-model".to_string());
-    let sleep_idle = state::env_value(home, "SLEEP_IDLE_SECONDS").unwrap_or_default();
+    let sleep_idle = config::get(home, "SLEEP_IDLE_SECONDS").unwrap_or_default();
 
     // The preset decides the mode, and the adapter says whether the engine can
     // read one at all: `router = true` means it understands `--models-preset`.
-    let preset_rel = state::override_value(home, "GOLEM_MODELS_PRESET", "MODELS_PRESET")
+    let preset_rel = overrides.get(home, "MODELS_PRESET")
         .unwrap_or_default();
     let preset_path = home.join(&preset_rel);
     // A preset that is named but not there is a failure, not a fallback.
@@ -771,11 +710,11 @@ pub fn plan(home: &Path) -> Result<Startup, String> {
         ("host".to_string(), host.clone()),
         ("port".to_string(), port.clone()),
     ];
-    // The launcher passes these two from `.env` on the command line, and both
+    // These two come from golem.toml onto the command line, and both
     // are tuned parameters: `threads` is what the tune sweep varies, and
     // `parallel 1` is what keeps one model resident.
     for (key, name) in [("CPU_THREADS", "threads"), ("PARALLEL", "parallel")] {
-        if let Some(value) = state::env_value(home, key).filter(|v| !v.is_empty()) {
+        if let Some(value) = config::get(home, key).filter(|v| !v.is_empty()) {
             flags.push((name.to_string(), value));
         }
     }
@@ -783,7 +722,7 @@ pub fn plan(home: &Path) -> Result<Startup, String> {
     flags.push(("api-key".to_string(), key.clone()));
     flags.push(("log-colors".to_string(), "off".to_string()));
     // The server writes its own log, and this is the file the console tails.
-    let log = home.join("logs").join(state::LOG_NAME);
+    let log = paths::engine_log(home);
     flags.push(("log-file".to_string(), log.to_string_lossy().into_owned()));
     if !sleep_idle.is_empty() {
         flags.push(("sleep-idle-seconds".to_string(), sleep_idle));
@@ -793,8 +732,8 @@ pub fn plan(home: &Path) -> Result<Startup, String> {
     let workdir;
     if router {
         // Router mode: one model resident at a time, and the preset carries
-        // everything else - including `jinja`, which is why the launcher does
-        // not pass it here. Command-line flags would override the preset, so
+        // everything else - including `jinja`, which is why it is not passed
+        // here. Command-line flags would override the preset, so
         // only the shared ones above go on the line.
         flags.push(("models-preset".to_string(), preset_path.to_string_lossy().into_owned()));
         flags.push(("models-max".to_string(), "1".to_string()));
@@ -802,9 +741,8 @@ pub fn plan(home: &Path) -> Result<Startup, String> {
         workdir = home.join("data/models");
     } else if preset_path.is_file() {
         let text = std::fs::read_to_string(&preset_path).unwrap_or_default();
-        // The launcher refuses to start a server with no model on it, and
-        // says which section it wanted: "Engine $EngineName has no router
-        // mode and preset section [$Alias] (MODEL_ALIAS) is not in $Preset".
+        // A server with no model on it is refused here, naming the section
+        // it wanted, rather than started and found empty at the first request.
         if ini::parse(&text).get(&alias).is_none() {
             return Err(format!(
                 "engine {engine} has no router mode and preset section [{alias}] \
@@ -815,9 +753,9 @@ pub fn plan(home: &Path) -> Result<Startup, String> {
         // A single-model engine has no preset reader, so what the preset says
         // has to be on the command line - `jinja` included.
         flags.push(("jinja".to_string(), "true".to_string()));
-        // The shell builds this as a *map* (`$Flags[$key] = $value`), so a key
-        // the preset shares with the launcher's own flags is overwritten, not
-        // doubled - `--jinja --jinja` is a duplicated flag on the command line.
+        // A merge, not an append: a key the preset shares with the
+        // shared flags above is overwritten, not doubled - `--jinja
+        // --jinja` is a duplicated flag on the command line.
         merge(&mut flags, record::preset_flags(&text, &alias));
         // `model` is deliberately not in that list: a recorded row's flags are
         // about the configuration, and the file is a separate column. A command
@@ -831,10 +769,10 @@ pub fn plan(home: &Path) -> Result<Startup, String> {
         served = alias.clone();
         workdir = home.join("data/models");
     } else {
-        // No preset at all: `.env` is the configuration, which is the shape a
-        // fresh clone has (`golem.toml.example` ships `MODELS_PRESET` commented
-        // out). This is the launcher's list in the launcher's order, because
-        // order is behaviour - the last flag wins in llama.cpp.
+        // No preset at all: golem.toml is the configuration, which is the
+        // shape a fresh clone has (`golem.toml.example` ships `MODELS_PRESET`
+        // commented out). The order below is behaviour - the last flag wins
+        // in llama.cpp.
         let model_dir = home.join("data/models");
         let model_file = setting(home, "MODEL_FILE", DEFAULT_MODEL_FILE);
         flags.push((
@@ -849,47 +787,30 @@ pub fn plan(home: &Path) -> Result<Startup, String> {
         flags.push(("cache-type-k".to_string(), setting(home, "CACHE_TYPE_K", "q8_0")));
         flags.push(("cache-type-v".to_string(), setting(home, "CACHE_TYPE_V", "q8_0")));
         flags.push(("load-mode".to_string(), setting(home, "LOAD_MODE", "mlock")));
-        // Speculative decoding: both keys are the launcher's, and an unset one
-        // contributes nothing at all rather than an empty flag.
-        if let Some(spec) = state::env_value(home, "SPEC_TYPE").filter(|v| !v.is_empty()) {
+        // Speculative decoding: an unset key contributes nothing at all
+        // rather than an empty flag.
+        if let Some(spec) = config::get(home, "SPEC_TYPE").filter(|v| !v.is_empty()) {
             flags.push(("spec-type".to_string(), spec));
         }
-        if let Some(draft) = state::env_value(home, "DRAFT_FILE").filter(|v| !v.is_empty()) {
+        if let Some(draft) = config::get(home, "DRAFT_FILE").filter(|v| !v.is_empty()) {
             flags.push((
                 "spec-draft-model".to_string(),
                 model_dir.join(&draft).to_string_lossy().into_owned(),
             ));
         }
-        // The launcher names the file here and the alias when a preset is
-        // what chose the model, so the closing banner says the same thing.
+        // `served` is the file here and the alias when a preset chose the
+        // model; the closing banner prints it.
         served = model_file;
         workdir = model_dir;
     }
 
-    // The engines the binary cannot install itself. Strata's adapter says
-    // `launcher = strata`, and that launcher is a git clone, a Python venv
-    // and its own `setup.py` - a port of its own, not a corner of this one.
-    // The adapter key stays because it is how an engine says so, but there is
-    // nothing behind it now: the shell launchers are gone, so `up` refuses
-    // this engine instead of handing it back.
-    let via_launcher = adapter
-        .global("launcher")
-        .filter(|launcher| !launcher.is_empty())
-        .map(|launcher| {
-            format!(
-                "engine {engine} installs itself with the {launcher} launcher, which the binary \
-                 does not speak - and the shell launchers it used to be handed back to are gone, \
-                 so this engine cannot be started by golem"
-            )
-        });
-
     // `EXTRA_ARGS` are passed verbatim - they are already in the engine's own
     // syntax, which is why the adapter never translates them - and only when
-    // there is no preset at all, as the launcher has it.
+    // there is no preset at all.
     let extra: Vec<String> = if preset_path.is_file() {
         Vec::new()
     } else {
-        state::env_value(home, "EXTRA_ARGS")
+        config::get(home, "EXTRA_ARGS")
             .filter(|value| !value.is_empty())
             .map(|value| value.split_whitespace().map(str::to_string).collect())
             .unwrap_or_default()
@@ -902,7 +823,7 @@ pub fn plan(home: &Path) -> Result<Startup, String> {
         args: line.args,
         workdir,
         log,
-        pid_file: home.join(".local").join(pid_name()),
+        pid_file: paths::pid_file(home),
         dropped: line.dropped,
         served,
         engine,
@@ -914,12 +835,11 @@ pub fn plan(home: &Path) -> Result<Startup, String> {
         preset: router.then(|| preset_rel.clone()),
         router,
         alias,
-        via_launcher,
     })
 }
 
-/// Merge `extra` into `into` the way the shell's `$Flags[$k] = $v` does: a key
-/// already present keeps its position and takes the new value.
+/// Merge `extra` into `into` like a map assignment: a key already present
+/// keeps its position and takes the new value.
 fn merge(into: &mut Vec<(String, String)>, extra: Vec<(String, String)>) {
     for (key, value) in extra {
         match into.iter_mut().find(|(existing, _)| *existing == key) {
@@ -929,11 +849,6 @@ fn merge(into: &mut Vec<(String, String)>, extra: Vec<(String, String)>) {
     }
 }
 
-/// The pid file's name, as the launchers write it.
-fn pid_name() -> &'static str {
-    if cfg!(windows) { "llama-server-windows.pid" } else { "llama-server.pid" }
-}
-
 /// `GPU_BACKEND`, with `auto` resolved from what this machine has.
 ///
 /// A backend is a fact about the card, so `auto` reads it: `nvidia-smi` for
@@ -941,7 +856,7 @@ fn pid_name() -> &'static str {
 /// installed. The adapter's `backend` key is the last fallback, for a machine
 /// where nothing answers and the adapter still knows what it wants.
 fn resolve_backend(home: &Path, fallback: &str) -> String {
-    let configured = state::env_value(home, "GPU_BACKEND").unwrap_or_else(|| "auto".to_string());
+    let configured = config::get(home, "GPU_BACKEND").unwrap_or_else(|| "auto".to_string());
     match configured.as_str() {
         "cuda" | "rocm" | "metal" => configured,
         _ if cfg!(target_os = "macos") => "metal".to_string(),
@@ -971,17 +886,11 @@ fn server_name(adapter: &ini::Document) -> String {
     }
 }
 
-/// The build pin: `ENGINE_BUILD`, then llama.cpp's older `LLAMA_WIN_BUILD`
-/// (which shadows the adapter's own `build` - one of the two goes when this is
-/// the only launcher left), then the adapter.
+/// The build pin: `ENGINE_BUILD` when the configuration sets one, else the
+/// adapter's own `build` - the one the 200K gate adopted.
 fn engine_build(home: &Path, engine: &str, adapter: &ini::Document) -> Result<String, String> {
-    if let Some(build) = state::env_value(home, "ENGINE_BUILD").filter(|b| !b.is_empty()) {
+    if let Some(build) = config::get(home, "ENGINE_BUILD").filter(|b| !b.is_empty()) {
         return Ok(build);
-    }
-    if engine == "llama.cpp" {
-        if let Some(build) = state::env_value(home, "LLAMA_WIN_BUILD").filter(|b| !b.is_empty()) {
-            return Ok(build);
-        }
     }
     adapter
         .global("build")
@@ -1003,7 +912,9 @@ mod tests {
     use super::*;
 
     fn home(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("golem-rs-launch-{tag}"));
+        // Per process: two test binaries compile these tests, and on Windows a
+        // directory a child just left can still be mid-delete for the next.
+        let dir = std::env::temp_dir().join(format!("golem-rs-launch-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".local")).expect("temp");
         dir
@@ -1020,30 +931,11 @@ mod tests {
     fn a_pid_file_that_outlived_its_process_is_cleared() {
         // A pid that cannot be running: 0 is not a process any OS hands out.
         let dir = home("stale");
-        std::fs::write(dir.join(".local/llama-server-windows.pid"), "0\n").expect("write");
+        std::fs::write(dir.join(".local/llama-server.pid"), "0\n").expect("write");
         assert_eq!(down(&dir, &mut std::io::sink()), 0);
         assert!(
-            !dir.join(".local/llama-server-windows.pid").exists(),
+            !dir.join(".local/llama-server.pid").exists(),
             "the stale pid file is gone"
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn every_spelling_of_the_pid_file_is_removed() {
-        // Windows mode writes llama-server-windows.pid, native writes
-        // llama-server.pid; a home can end up with either.
-        let dir = home("spellings");
-        for name in ["llama-server.pid", "llama-server-windows.pid"] {
-            std::fs::write(dir.join(".local").join(name), "0\n").expect("write");
-        }
-        std::fs::write(dir.join(".local/golem-web.pid"), "0\n").expect("write");
-        remove_pid(&dir);
-        assert!(!dir.join(".local/llama-server.pid").exists());
-        assert!(!dir.join(".local/llama-server-windows.pid").exists());
-        assert!(
-            dir.join(".local/golem-web.pid").exists(),
-            "the console's pid file is not ours to remove"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1082,7 +974,7 @@ mod tests {
             "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\n\
              MODELS_PRESET = \"data/tuned/not-mounted.ini\"\n",
         );
-        let err = plan(&dir).expect_err("a named preset has to be there");
+        let err = plan(&dir, &Overrides::default()).expect_err("a named preset has to be there");
         assert!(err.contains("not-mounted.ini"), "{err}");
         assert!(err.contains("MODELS_PRESET"), "the message names the key: {err}");
         std::fs::remove_dir_all(&dir).ok();
@@ -1097,7 +989,7 @@ mod tests {
              LOCAL_AI_API_KEY = \"k\"\nMODEL_ALIAS = \"model-a\"\n\
              MODELS_PRESET = \"config/models.ini\"\n",
         );
-        let plan = plan(&dir).expect("plan");
+        let plan = plan(&dir, &Overrides::default()).expect("plan");
         assert!(plan.program.ends_with("engines/llama.cpp/b11379-cuda/llama-server.exe"), "{:?}", plan.program);
         assert!(plan.args.iter().any(|a| a == "--models-preset"), "{:?}", plan.args);
         assert!(plan.args.iter().any(|a| a == "--models-max"), "one model resident at a time");
@@ -1125,7 +1017,7 @@ mod tests {
              map.load-mode.mlock = --mlock\n",
         )
         .expect("adapter");
-        let plan = plan(&dir).expect("plan");
+        let plan = plan(&dir, &Overrides::default()).expect("plan");
         assert!(!plan.args.iter().any(|a| a == "--models-preset"), "{:?}", plan.args);
         assert!(plan.args.contains(&"--ctx-size".to_string()));
         assert!(plan.args.contains(&"4096".to_string()));
@@ -1145,24 +1037,23 @@ mod tests {
     }
 
     #[test]
-    fn the_build_pin_falls_through_in_the_launchers_order() {
+    fn the_build_pin_is_engine_build_else_the_adapters() {
         let dir = engine_home("plan-build", "", "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\n");
-        // The adapter's build, then llama.cpp's older `.env` name overrides it.
-        assert!(plan(&dir).expect("plan").program.ends_with("b11379-cuda/llama-server.exe"));
+        // The adapter's build; a stray `LLAMA_WIN_BUILD` key is not read.
+        assert!(plan(&dir, &Overrides::default()).expect("plan").program.ends_with("b11379-cuda/llama-server.exe"));
         std::fs::write(
             dir.join("golem.toml"),
             "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\nLLAMA_WIN_BUILD = \"b11755\"\n",
         )
         .expect("config");
-        assert!(plan(&dir).expect("plan").program.ends_with("b11755-cuda/llama-server.exe"));
-        // And ENGINE_BUILD beats both.
+        assert!(plan(&dir, &Overrides::default()).expect("plan").program.ends_with("b11379-cuda/llama-server.exe"));
+        // ENGINE_BUILD is the configuration's word over the adapter's.
         std::fs::write(
             dir.join("golem.toml"),
-            "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\n\
-             LLAMA_WIN_BUILD = \"b11755\"\nENGINE_BUILD = \"b9\"\n",
+            "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\nENGINE_BUILD = \"b9\"\n",
         )
         .expect("config");
-        assert!(plan(&dir).expect("plan").program.ends_with("b9-cuda/llama-server.exe"));
+        assert!(plan(&dir, &Overrides::default()).expect("plan").program.ends_with("b9-cuda/llama-server.exe"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1170,7 +1061,7 @@ mod tests {
     fn an_unknown_engine_is_a_message_not_a_panic() {
         let dir = home("plan-unknown");
         std::fs::write(dir.join("golem.toml"), "ENGINE = \"nope\"\n").expect("config");
-        let err = plan(&dir).expect_err("an engine with no adapter");
+        let err = plan(&dir, &Overrides::default()).expect_err("an engine with no adapter");
         assert!(err.contains("nope"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1182,12 +1073,12 @@ mod tests {
     /// A home that resolves, on a port nothing holds: `LOCAL_AI_PORT = 1` is
     /// below the range anything binds, and a test that picked a plausible
     /// port would fail on a machine where the engine happens to be running.
-    fn up_home(tag: &str, mode: &str, port: &str) -> PathBuf {
+    fn up_home(tag: &str, port: &str) -> PathBuf {
         engine_home(
             tag,
             "[*]\njinja = true\n[model-a]\nmodel = a.gguf\n",
             &format!(
-                "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\nDEPLOY_MODE = \"{mode}\"\n\
+                "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\n\
                  LOCAL_AI_PORT = \"{port}\"\nLOCAL_AI_API_KEY = \"k\"\n\
                  MODEL_ALIAS = \"model-a\"\nMODELS_PRESET = \"config/models.ini\"\n"
             ),
@@ -1222,8 +1113,8 @@ mod tests {
         // Port 1: reserved, and nothing may bind it without privilege.
         assert!(!listening(1));
         let endpoint = engine::Endpoint { port, api_key: String::new() };
-        assert!(healthy(&endpoint));
-        assert!(!healthy(&engine::Endpoint { port: 1, api_key: String::new() }));
+        assert!(engine::healthy(&endpoint));
+        assert!(!engine::healthy(&engine::Endpoint { port: 1, api_key: String::new() }));
     }
 
     #[test]
@@ -1233,8 +1124,8 @@ mod tests {
         // is what `up && bench` needs from a script and what a service that
         // already has the engine up needs from a client.
         let port = health_server().to_string();
-        let dir = up_home("up-busy", "windows", &port);
-        assert_eq!(up(&dir, false, &mut std::io::sink()), Ok(()));
+        let dir = up_home("up-busy", &port);
+        assert_eq!(up(&dir, &Overrides::default(), false, &mut std::io::sink()), Ok(()));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1250,8 +1141,8 @@ mod tests {
                 drop(stream);
             }
         });
-        let dir = up_home("up-busy-other", "windows", &port);
-        let err = up(&dir, false, &mut std::io::sink()).expect_err("the port is held");
+        let dir = up_home("up-busy-other", &port);
+        let err = up(&dir, &Overrides::default(), false, &mut std::io::sink()).expect_err("the port is held");
         assert!(err.contains("already in use"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1260,45 +1151,39 @@ mod tests {
     fn a_dry_run_resolves_the_whole_line_and_starts_nothing() {
         // The command line is the thing worth reading, not the banner, and a
         // dry run is the only way to see it without starting anything.
-        let dir = up_home("up-dry", "windows", "1");
-        assert_eq!(up(&dir, true, &mut std::io::sink()), Ok(()));
+        let dir = up_home("up-dry", "1");
+        assert_eq!(up(&dir, &Overrides::default(), true, &mut std::io::sink()), Ok(()));
         // Nothing was installed, nothing was started, no pid was written.
-        assert!(!dir.join(".local/llama-server-windows.pid").exists());
+        assert!(!dir.join(".local/llama-server.pid").exists());
         assert!(!dir.join(".local/engines/llama.cpp/b11379-cuda").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn an_engine_that_installs_itself_is_refused_not_handed_back() {
-        // Strata's adapter says `launcher = strata`: a git clone and a Python
-        // setup, which the binary does not speak. It used to be handed back to
-        // the shell launcher; the launchers are gone, so this is a refusal
-        // that names the engine and the reason.
-        let dir = up_home("up-strata", "windows", "1");
-        std::fs::write(
-            dir.join("engines/llama.cpp/engine.ini"),
-            "name = llama.cpp\nbuild = b11379\nserver = llama-server.exe\nrouter = true\n\
-             launcher = strata\n",
-        )
-        .expect("adapter");
-        let err = up(&dir, false, &mut std::io::sink()).expect_err("the binary cannot start it");
-        assert!(err.contains("strata"), "{err}");
-        // A dry run still resolves it: it reports, it does not refuse to say.
-        assert_eq!(up(&dir, true, &mut std::io::sink()), Ok(()));
+    fn a_runs_overrides_point_the_plan_elsewhere_for_that_run_only() {
+        // How the tuner serves a candidate and a container binds every
+        // interface: the overrides are a value handed to the plan, not the
+        // process environment, so one test can hold two plans at once.
+        let dir = up_home("plan-overrides", "1");
+        std::fs::write(dir.join("config/other.ini"), "[model-b]\nmodel = b.gguf\n").expect("preset");
+        let overrides = Overrides::default()
+            .with("MODELS_PRESET", "config/other.ini")
+            .with("MODEL_ALIAS", "model-b")
+            .with("LOCAL_AI_HOST", "0.0.0.0");
+        let candidate = plan(&dir, &overrides).expect("plan");
+        assert_eq!(candidate.preset.as_deref(), Some("config/other.ini"));
+        assert_eq!(candidate.alias, "model-b");
+        assert_eq!(candidate.host, "0.0.0.0");
+        let configured = plan(&dir, &Overrides::default()).expect("plan");
+        assert_eq!(configured.preset.as_deref(), Some("config/models.ini"));
+        assert_eq!(configured.host, "127.0.0.1");
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // The per-run overrides (`GOLEM_ENGINE`, `GOLEM_MODELS_PRESET`,
-    // `GOLEM_MODEL_ALIAS`) live in the process environment, which every test
-    // in this binary shares: setting one here would change what the tests
-    // above see, and did. They are tested in `tests/launch_plan.rs`, which
-    // runs the real binary in its own process - which is also how the tuner
-    // uses them.
-
     #[test]
     fn the_plan_says_which_release_it_needs() {
-        let dir = up_home("plan-pinned", "windows", "1");
-        let pinned = plan(&dir).expect("plan").pinned();
+        let dir = up_home("plan-pinned", "1");
+        let pinned = plan(&dir, &Overrides::default()).expect("plan").pinned();
         assert_eq!(pinned.engine, "llama.cpp");
         assert_eq!(pinned.build, "b11379");
         assert_eq!(pinned.backend, "cuda");
@@ -1311,16 +1196,15 @@ mod tests {
 
     #[test]
     fn the_plan_carries_the_preset_and_the_host_the_banner_needs() {
-        let dir = up_home("plan-banner", "windows", "1");
-        let plan = plan(&dir).expect("plan");
+        let dir = up_home("plan-banner", "1");
+        let plan = plan(&dir, &Overrides::default()).expect("plan");
         assert_eq!(plan.host, "127.0.0.1");
         assert_eq!(plan.preset.as_deref(), Some("config/models.ini"));
-        assert_eq!(plan.via_launcher, None);
         std::fs::remove_dir_all(&dir).ok();
     }
 
     // ---------------------------------------------------------------
-    // The model fetch `up` owes the launchers
+    // The model fetch `up` does before it starts
     // ---------------------------------------------------------------
 
     /// A home with this preset, and these files already in `data/models`.
@@ -1329,7 +1213,7 @@ mod tests {
             tag,
             preset,
             &format!(
-                "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\nDEPLOY_MODE = \"windows\"\n\
+                "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\n\
                  LOCAL_AI_PORT = \"1\"\nMODEL_ALIAS = \"{alias}\"\n\
                  MODELS_PRESET = \"config/models.ini\"\n"
             ),
@@ -1349,7 +1233,7 @@ mod tests {
         // The rule that keeps a first start from pulling 20 GB nobody asked
         // for: the section being served is fetched, the others wait.
         let dir = preset_home("jobs-served", "model-a", TWO_SECTIONS, &[]);
-        let jobs = model_jobs(&dir, &plan(&dir).expect("plan"), &mut std::io::sink()).expect("jobs");
+        let jobs = model_jobs(&dir, &plan(&dir, &Overrides::default()).expect("plan"), &mut std::io::sink()).expect("jobs");
         assert_eq!(jobs, vec![("org/a".to_string(), "a.gguf".to_string())]);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1357,7 +1241,7 @@ mod tests {
     #[test]
     fn a_model_already_on_disk_is_not_a_job() {
         let dir = preset_home("jobs-present", "model-a", TWO_SECTIONS, &["a.gguf"]);
-        let jobs = model_jobs(&dir, &plan(&dir).expect("plan"), &mut std::io::sink()).expect("jobs");
+        let jobs = model_jobs(&dir, &plan(&dir, &Overrides::default()).expect("plan"), &mut std::io::sink()).expect("jobs");
         assert!(jobs.is_empty(), "{jobs:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1367,7 +1251,7 @@ mod tests {
         // A preset this machine has not seen: the alias names no section, so
         // there is no "the one being served" to be conservative about.
         let dir = preset_home("jobs-new", "not-a-section", TWO_SECTIONS, &[]);
-        let jobs = model_jobs(&dir, &plan(&dir).expect("plan"), &mut std::io::sink()).expect("jobs");
+        let jobs = model_jobs(&dir, &plan(&dir, &Overrides::default()).expect("plan"), &mut std::io::sink()).expect("jobs");
         assert_eq!(
             jobs,
             vec![
@@ -1383,7 +1267,7 @@ mod tests {
         // It can never appear on its own, and the failure without this check
         // is at the first request rather than at the start.
         let dir = preset_home("jobs-nosource", "model-a", "[model-a]\nmodel = a.gguf\n", &[]);
-        let err = model_jobs(&dir, &plan(&dir).expect("plan"), &mut std::io::sink()).expect_err("no source");
+        let err = model_jobs(&dir, &plan(&dir, &Overrides::default()).expect("plan"), &mut std::io::sink()).expect_err("no source");
         assert_eq!(
             err,
             "Preset models without a \"; Download:\" source (add one per file in \
@@ -1401,14 +1285,14 @@ mod tests {
             "; Download: org/a -> a.gguf\n[model-a]\nmodel = a.gguf\n\n[model-b]\nmodel = b.gguf\n",
             &[],
         );
-        let jobs = model_jobs(&dir, &plan(&dir).expect("plan"), &mut std::io::sink()).expect("jobs");
+        let jobs = model_jobs(&dir, &plan(&dir, &Overrides::default()).expect("plan"), &mut std::io::sink()).expect("jobs");
         assert_eq!(jobs, vec![("org/a".to_string(), "a.gguf".to_string())]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn a_draft_model_counts_as_a_model_the_section_needs() {
-        // The launcher scans `model` and `spec-draft-model` alike: a missing
+        // `model` and `spec-draft-model` are scanned alike: a missing
         // draft fails the load just as a missing model does.
         let dir = preset_home(
             "jobs-draft",
@@ -1416,16 +1300,15 @@ mod tests {
             "; Download: org/a -> a.gguf\n[model-a]\nmodel = a.gguf\nspec-draft-model = d.gguf\n",
             &[],
         );
-        let err = model_jobs(&dir, &plan(&dir).expect("plan"), &mut std::io::sink()).expect_err("no source");
+        let err = model_jobs(&dir, &plan(&dir, &Overrides::default()).expect("plan"), &mut std::io::sink()).expect_err("no source");
         assert!(err.ends_with("d.gguf"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn without_a_preset_the_command_line_is_the_env_flag_set() {
-        // The shape a fresh clone has. `.env` is the configuration here, and
-        // the list is the launcher's, in the launcher's order - order is
-        // behaviour, because the last flag wins.
+    fn without_a_preset_the_command_line_is_the_config_flag_set() {
+        // The shape a fresh clone has. golem.toml is the configuration here,
+        // and the order is behaviour, because the last flag wins.
         let dir = engine_home(
             "plan-env-flags",
             "[model-a]\nmodel = a.gguf\n",
@@ -1434,14 +1317,13 @@ mod tests {
              LOAD_MODE = \"mmap\"\nSPEC_TYPE = \"draft-mtp\"\nDRAFT_FILE = \"d.gguf\"\n\
              EXTRA_ARGS = \"--rope-freq-base 10000 --no-warmup\"\n",
         );
-        let plan = plan(&dir).expect("plan");
+        let plan = plan(&dir, &Overrides::default()).expect("plan");
         let models = dir.join("data/models");
         let model = models.join("m.gguf").to_string_lossy().into_owned();
         let draft = models.join("d.gguf").to_string_lossy().into_owned();
 
-        assert!(plan.via_launcher.is_none(), "no preset is the binary's shape now");
         assert!(!plan.router);
-        assert_eq!(plan.served, "m.gguf", "the launcher names the file, not the alias");
+        assert_eq!(plan.served, "m.gguf", "a no-preset start names the file, not the alias");
         // Everything from `--model` on: the shared flags come first and are
         // covered by the router tests.
         let at = plan.args.iter().position(|a| a == "--model").expect("--model");
@@ -1453,7 +1335,7 @@ mod tests {
                 "--cache-type-k", "q4_0", "--cache-type-v", "q8_0", "--load-mode", "mmap",
                 "--spec-type", "draft-mtp", "--spec-draft-model", &draft,
                 // EXTRA_ARGS are verbatim, and last: the adapter never
-                // translates them, and the launcher appends them as given.
+                // translates them, and they are appended as given.
                 "--rope-freq-base", "10000", "--no-warmup",
             ]
         );
@@ -1469,10 +1351,10 @@ mod tests {
             "",
             "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\nMODEL_FILE = \"m.gguf\"\n",
         );
-        let plan = plan(&dir).expect("plan");
+        let plan = plan(&dir, &Overrides::default()).expect("plan");
         assert!(!plan.args.iter().any(|a| a == "--spec-type"), "{:?}", plan.args);
         assert!(!plan.args.iter().any(|a| a == "--spec-draft-model"), "{:?}", plan.args);
-        // The launcher's defaults, which are not the code's own.
+        // The no-preset defaults: a 32K context and every layer on the GPU.
         for (key, value) in [("--ctx-size", "32768"), ("--n-gpu-layers", "99")] {
             let at = plan.args.iter().position(|a| a == key).unwrap_or_else(|| panic!("{key}"));
             assert_eq!(plan.args[at + 1], value, "{key}");
@@ -1486,15 +1368,15 @@ mod tests {
     }
 
     #[test]
-    fn with_no_preset_the_job_is_the_env_models_own() {
-        // `.env` names the model in this shape, so `pull`'s no-argument list
-        // is what the launcher fetches - not a preset section's.
+    fn with_no_preset_the_job_is_the_configured_models_own() {
+        // golem.toml names the model in this shape, so `pull`'s no-argument list
+        // is what is fetched - not a preset section's.
         let dir = engine_home(
             "jobs-none",
             "[model-a]\nmodel = a.gguf\n",
             "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\nMODEL_FILE = \"only.gguf\"\n",
         );
-        let resolved = plan(&dir).expect("plan");
+        let resolved = plan(&dir, &Overrides::default()).expect("plan");
         assert_eq!(
             model_jobs(&dir, &resolved, &mut std::io::sink()).expect("jobs"),
             vec![("unsloth/Qwen3.6-35B-A3B-GGUF".to_string(), "only.gguf".to_string())]
@@ -1527,7 +1409,6 @@ mod tests {
             preset: None,
             router: false,
             alias: "fake".to_string(),
-            via_launcher: None,
         }
     }
 
@@ -1544,7 +1425,7 @@ mod tests {
         let endpoint = engine::Endpoint { port: 1, api_key: String::new() };
         let err = start(&dir, &plan, &endpoint, &mut std::io::sink()).expect_err("the child exited at once");
         assert!(err.contains("exit code 3"), "{err}");
-        // The pid was written before the wait, as the launcher's is.
+        // The pid is written before the wait.
         let pid = std::fs::read_to_string(dir.join(".local/llama-server.pid")).expect("pid");
         assert!(pid.trim().parse::<u32>().is_ok(), "{pid:?}");
         std::fs::remove_dir_all(&dir).ok();

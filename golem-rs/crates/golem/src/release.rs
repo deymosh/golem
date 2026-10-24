@@ -1,19 +1,16 @@
-//! Getting the pinned engine build onto the machine: the install half of
-//! `scripts/start-windows.ps1`.
+//! Getting the pinned engine build onto the machine.
 //!
 //! `launch::up` calls [`ensure`] when the server executable is not on disk
 //! yet, and this is what puts it there - the pinned GitHub release, extracted
-//! into `.local/engines/<engine>/<build>-<backend>/`. It is the port of the
-//! script's `else` branch (lines 191-256), and its rules are the script's,
-//! each with the reason the shell's comment gives:
+//! into `.local/engines/<engine>/<build>-<backend>/`. Its rules:
 //!
-//! - the `BUILD` marker is written **last**, after every zip extracted: "a
+//! - the `BUILD` marker is written **last**, after every zip extracted: a
 //!   killed install leaves the exe without it, and that half-state must
-//!   reinstall, not run";
+//!   reinstall, not run;
 //! - the asset is picked by the adapter's `<platform>_asset_<backend>`
 //!   pattern, which is a regex the binary has no crate for -
-//!   `golem_core::pattern` is the subset those patterns use, and PowerShell's
-//!   `-match` semantics;
+//!   `golem_core::pattern` is the subset those patterns use (a search,
+//!   anchored only where the pattern writes `^` or `$`);
 //! - `curl` is the transport because the binary has no TLS (see
 //!   `engine::request`) and GitHub is HTTPS-only; `pull.rs` uses curl for
 //!   Hugging Face the same way.
@@ -57,8 +54,8 @@ pub struct Pinned {
     pub build: String,  // "b11379", or "latest" to follow upstream
     pub backend: String, // "cuda" | "rocm"
     /// `home/.local/engines/<engine>` - *not* the directory the build ends up
-    /// in. `latest` is only a tag once GitHub has been asked, and the script
-    /// computes `$BinDir` from the resolved `$WinBuild` for the same reason.
+    /// in. `latest` is only a tag once GitHub has been asked, so the build's
+    /// directory is named after the resolved tag (see [`install_dir`]).
     pub root: PathBuf,
     pub server: String, // "llama-server.exe"
 }
@@ -91,15 +88,13 @@ pub fn ensure(home: &Path, pinned: &Pinned, out: &mut dyn Write) -> Result<Insta
         .map_err(|e| format!("cannot read {}: {e}", ini_path.display()))?;
     let adapter = ini::parse(&text);
 
-    // 1. Strata installs itself (`launcher = strata` in engines/strata/engine.ini):
-    //    its own setup, a private .venv, a ready-made engine and model. There is
-    //    no zip asset to fetch, and no shell launcher to hand it to any more, so
-    //    this engine is one golem does not support.
+    // 1. An adapter with a `launcher` key names an engine that installs
+    //    itself with its own tooling (its own setup, environment and model).
+    //    There is no release asset to fetch, so golem cannot install it.
     if let Some(launcher) = adapter_key(&adapter, "launcher") {
         return Err(format!(
             "engine {} installs itself with its `{launcher}` launcher ({}), which golem does \
-             not speak - and the shell launchers it used to be handed back to are gone, so \
-             this engine cannot be installed or started by golem",
+             not speak, so this engine cannot be installed or started by golem",
             pinned.engine,
             ini_path.display()
         ));
@@ -145,7 +140,7 @@ pub fn ensure(home: &Path, pinned: &Pinned, out: &mut dyn Write) -> Result<Insta
             format!("the newest {} release of {} has no tag_name", pinned.backend, pinned.engine)
         })?;
         // Keep it: the install below reuses this release rather than asking
-        // GitHub for the same tag twice, as the script's `-not $Release` does.
+        // GitHub for the same tag twice.
         listed = Some(release);
     }
 
@@ -159,35 +154,14 @@ pub fn ensure(home: &Path, pinned: &Pinned, out: &mut dyn Write) -> Result<Insta
         return Ok(installed(tag, &dir));
     }
 
-    // 6. The one-time move of the pre-adapter install: when `.local/bin-windows`
-    //    is exactly this build it is renamed into place instead of re-downloaded.
-    //    Inert on Linux/macOS, where the directory does not exist.
-    let legacy = home.join(".local").join("bin-windows");
-    if pinned.engine == "llama.cpp"
-        && !dir.exists()
-        && marker_at(&legacy).as_deref() == Some(marker.as_str())
-    {
-        std::fs::create_dir_all(&pinned.root)
-            .map_err(|e| format!("cannot create {}: {e}", pinned.root.display()))?;
-        std::fs::rename(&legacy, &dir)
-            .map_err(|e| format!("cannot move {} to {}: {e}", legacy.display(), dir.display()))?;
-        let _ = writeln!(
-            out,
-            "[ OK ] moved {} {tag} from .local/bin-windows to {}",
-            pinned.engine,
-            dir.display()
-        );
-        return Ok(installed(tag, &dir));
-    }
-
-    // 7. Install.
+    // 6. Install.
     let _ = writeln!(
         out,
         "[ .. ] installing {} {tag} ({}) from github.com/{repo}...",
         pinned.engine, pinned.backend
     );
-    // The script's `Remove-Item -Recurse -Force`: a killed install leaves a
-    // half-extracted directory, and it must not be run.
+    // Start from an empty directory: a killed install leaves a
+    // half-extracted one, and it must not be run.
     if dir.exists() {
         std::fs::remove_dir_all(&dir)
             .map_err(|e| format!("cannot clear {}: {e}", dir.display()))?;
@@ -215,9 +189,8 @@ pub fn ensure(home: &Path, pinned: &Pinned, out: &mut dyn Write) -> Result<Insta
     let mut chosen = vec![server_zip];
 
     // e.g. llama.cpp's CUDA build ships its runtime DLLs as a separate zip. A
-    // key that is set but matches nothing is an error: the script would add an
-    // empty selection and skip the runtime silently, and a missing DLL is a
-    // worse failure than a loud one.
+    // key that is set but matches nothing is an error rather than a skipped
+    // runtime: a missing DLL is a worse failure than a loud one.
     let runtime_key = format!("{}_runtime_{}", platform(), pinned.backend);
     if let Some(runtime_pattern) = adapter_key(&adapter, &runtime_key) {
         let runtime = asset_for(&assets, &runtime_pattern)?.ok_or_else(|| {
@@ -229,7 +202,7 @@ pub fn ensure(home: &Path, pinned: &Pinned, out: &mut dyn Write) -> Result<Insta
         chosen.push(runtime);
     }
 
-    // The temp dir is left behind on success, as the script leaves `$env:TEMP`.
+    // The downloads stay in the temp dir after a success; the OS cleans it.
     let tmp = std::env::temp_dir().join(format!("golem-{}-{tag}", pinned.engine));
     std::fs::create_dir_all(&tmp).map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
 
@@ -260,16 +233,15 @@ pub fn ensure(home: &Path, pinned: &Pinned, out: &mut dyn Write) -> Result<Insta
 
 /// Where a release goes: `root/<tag>-<backend>`.
 ///
-/// The script's `$BinDir = Join-Path $EngineRoot "$WinBuild-$Backend"`, and
-/// the order matters: it is computed after `$WinBuild` was resolved, so
-/// `build = latest` installs into the directory of the tag it resolved to and
-/// not into one called `latest`.
+/// `tag` is the resolved tag, never the adapter's `latest`: a `build =
+/// latest` installs into the directory of the tag it resolved to and not
+/// into one called `latest`.
 fn install_dir(root: &Path, tag: &str, backend: &str) -> PathBuf {
     root.join(format!("{tag}-{backend}"))
 }
 
 /// A required global of the adapter, or `None` when absent or blank - an empty
-/// assignment is unset, as the shell's `-not $Eng[key]` reads it.
+/// assignment counts as unset.
 fn adapter_key(adapter: &ini::Document, key: &str) -> Option<String> {
     adapter.global(key).filter(|value| !value.is_empty()).map(str::to_string)
 }
@@ -308,9 +280,8 @@ fn asset_for(assets: &[Asset], pattern: &str) -> Result<Option<Asset>, String> {
     Ok(None)
 }
 
-/// The first release carrying at least one asset that matches `pattern` - the
-/// script skips stub releases (a nightly pointer with no assets) by asking
-/// each one the same question.
+/// The first release carrying at least one asset that matches `pattern`, so
+/// a stub release (a nightly pointer with no assets) is skipped.
 fn first_release_with_asset(releases: &Value, pattern: &str) -> Result<Option<Value>, String> {
     let Value::Array(items) = releases else {
         return Err("the GitHub releases response is not an array".to_string());
@@ -325,8 +296,8 @@ fn first_release_with_asset(releases: &Value, pattern: &str) -> Result<Option<Va
 
 /// The `BUILD` marker's trimmed content, or `None` when the file is absent.
 ///
-/// The script writes it with `Set-Content` and reads it back with `.Trim()`,
-/// so a trailing newline (and a CRLF checkout) must not change the answer.
+/// Trimmed, so a trailing newline (a marker written by another tool, a CRLF
+/// checkout) does not change the answer.
 fn marker_at(dir: &Path) -> Option<String> {
     let text = std::fs::read_to_string(dir.join("BUILD")).ok()?;
     Some(text.trim().to_string())
@@ -339,10 +310,9 @@ fn write_marker(dir: &Path, tag: &str, backend: &str) -> Result<(), String> {
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
-/// The script's wrapping-top-folder fixup: some zips put everything under one
-/// folder, so find the server wherever it landed and move its directory's
-/// entries up into `dir`. The emptied subdirectory is left behind, as
-/// `Move-Item` leaves it.
+/// The wrapping-top-folder fixup: some zips put everything under one folder,
+/// so find the server wherever it landed and move its directory's entries up
+/// into `dir`. The emptied subdirectory is left behind.
 fn lift(dir: &Path, server: &str, engine: &str, tag: &str) -> Result<(), String> {
     if dir.join(server).exists() {
         return Ok(());
@@ -353,9 +323,9 @@ fn lift(dir: &Path, server: &str, engine: &str, tag: &str) -> Result<(), String>
     if from == dir {
         return Ok(());
     }
-    // The whole listing is read before anything moves, which is what the
-    // script's `Get-ChildItem | Move-Item` does. Iterating the directory while
-    // renaming out of it is not the same thing on Windows, where the
+    // The whole listing is read before anything moves. Iterating the
+    // directory while renaming out of it is not the same thing on Windows,
+    // where the
     // enumeration is a live `FindNextFile` that a changed directory can skip
     // entries in - and a skipped entry is a missing DLL, not a visible error.
     let mut paths: Vec<PathBuf> = Vec::new();
@@ -592,12 +562,11 @@ mod tests {
     }
 
     #[test]
-    fn the_marker_round_trips_and_reads_a_script_written_one() {
+    fn the_marker_round_trips_and_ignores_a_trailing_newline() {
         let dir = home("marker");
         write_marker(&dir, "b11379", "cuda").expect("write");
         assert_eq!(marker_at(&dir).as_deref(), Some("b11379 cuda"));
-        // `Set-Content` leaves a trailing newline (CRLF on Windows) and the
-        // script reads it back with `.Trim()`; that is the same install.
+        // A trailing newline (CRLF on Windows) is the same install.
         std::fs::write(dir.join("BUILD"), "b11379 cuda\r\n").expect("write");
         assert_eq!(marker_at(&dir).as_deref(), Some("b11379 cuda"));
         // A different backend is a different install.
@@ -632,8 +601,7 @@ mod tests {
     fn the_install_directory_is_named_after_the_resolved_tag() {
         // Not after what the plan asked for: `latest` is only a tag once
         // GitHub has been asked, so a plan that says `latest` cannot name the
-        // directory. This is the script's `$BinDir`, computed from `$WinBuild`
-        // after the resolution - and why `ensure` returns where it put it.
+        // directory - which is why `ensure` returns where it put it.
         let root = Path::new("/home/.local/engines/llama.cpp");
         assert_eq!(install_dir(root, "b11399", "cuda"), root.join("b11399-cuda"));
         assert_ne!(
@@ -708,7 +676,7 @@ mod tests {
             adapter_key(&adapter, &format!("{}_repo", platform())).as_deref(),
             Some("ggml-org/llama.cpp")
         );
-        // An empty assignment is unset, as the shell's `-not $Eng[key]` reads it.
+        // An empty assignment counts as unset.
         assert_eq!(adapter_key(&adapter, &format!("{}_asset_cuda", platform())), None);
         assert_eq!(adapter_key(&adapter, &format!("{}_asset_rocm", platform())), None, "a missing key");
         assert_eq!(adapter_key(&adapter, "launcher").as_deref(), Some("strata"));

@@ -1,18 +1,17 @@
 //! `golem setup`: inspect the machine and get it ready to build and serve.
 //!
-//! The port of `scripts/setup-ai.sh`: the script's own section report, its
-//! two guards, the package install and the directory scaffolding, in the
-//! script's own words. It is Linux (native, WSL2, or a GPU-passthrough VM)
-//! only, and it says so by stopping where the script does - no
+//! A section report, two guards (not root, Linux only), the package install
+//! and the directory scaffolding. It is Linux (native, WSL2, or a
+//! GPU-passthrough VM) only, and it says so by stopping early - no
 //! `/etc/os-release` means no report.
 //!
-//! Everything that reads the machine is best effort, as the script is: a
-//! tool that is not installed produces the script's warning, never a panic
-//! and never a crash. The one long-running child - the package manager -
-//! inherits this terminal so the install is visible while it happens.
+//! Everything that reads the machine is best effort: a tool that is not
+//! installed produces a warning, never a panic and never a crash. The one
+//! long-running child - the package manager - inherits this terminal so the
+//! install is visible while it happens.
 //!
-//! The script tees its whole output to `logs/setup-<stamp>.log` as well as
-//! the terminal; [`Report`] does the same for every line it prints.
+//! Every line goes to `logs/setup-<stamp>.log` as well as the terminal
+//! ([`Report`]).
 
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
@@ -22,10 +21,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use golem_core::time;
 
-/// The banner rule, 60 `=`, as the script's `section` prints it.
+/// The banner rule, 60 `=`.
 const RULE: &str = "============================================================";
 
-// The script's colours, enabled only when stdout is a terminal.
+// The report's colours, enabled only when stdout is a terminal.
 const RESET: &str = "\x1b[0m";
 const RED: &str = "\x1b[0;31m";
 const GREEN: &str = "\x1b[0;32m";
@@ -33,7 +32,7 @@ const YELLOW: &str = "\x1b[1;33m";
 const BLUE: &str = "\x1b[0;34m";
 const CYAN: &str = "\x1b[0;36m";
 
-/// The Debian/Ubuntu build dependencies, the script's `apt-get` list.
+/// The Debian/Ubuntu build dependencies, for `apt-get`.
 const APT_PACKAGES: [&str; 9] = [
     "build-essential",
     "cmake",
@@ -46,7 +45,7 @@ const APT_PACKAGES: [&str; 9] = [
     "jq",
 ];
 
-/// The Fedora/RHEL build dependencies, the script's `dnf` list.
+/// The Fedora/RHEL build dependencies, for `dnf`.
 const DNF_PACKAGES: [&str; 11] = [
     "gcc",
     "gcc-c++",
@@ -61,7 +60,7 @@ const DNF_PACKAGES: [&str; 11] = [
     "jq",
 ];
 
-/// The Arch build dependencies, the script's `pacman` list.
+/// The Arch build dependencies, for `pacman`.
 const PACMAN_PACKAGES: [&str; 9] = [
     "base-devel",
     "cmake",
@@ -74,7 +73,7 @@ const PACMAN_PACKAGES: [&str; 9] = [
     "jq",
 ];
 
-/// Where the script looks for `libcuda.so`, in order.
+/// Where the report looks for `libcuda.so`, in order.
 const SEARCH_PATHS: [&str; 6] = [
     "/usr/lib",
     "/usr/lib64",
@@ -87,13 +86,13 @@ const SEARCH_PATHS: [&str; 6] = [
 /// The image the docker GPU test runs.
 const CUDA_IMAGE: &str = "nvidia/cuda:13.0.0-base-ubuntu24.04";
 
-/// The tools the toolchain section reports on, in the script's order.
+/// The tools the toolchain section reports on, in order.
 const TOOLCHAIN: [&str; 7] = ["gcc", "g++", "make", "cmake", "git", "curl", "wget"];
 
 /// `golem setup`.
 pub fn run(home: &Path, args: &[String]) -> i32 {
-    // The script takes no arguments; a stray one is a mistake worth saying
-    // out loud rather than ignoring, as the sibling `install` port does.
+    // `setup` takes no arguments; a stray one is a mistake worth saying out
+    // loud rather than ignoring, as `install` does too.
     if let Err(message) = parse_args(args) {
         eprintln!("[ERROR] {message}");
         return 1;
@@ -101,8 +100,8 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
 
     let logs_dir = home.join("logs");
     let log_path = logs_dir.join(format!("setup-{}.log", stamp()));
-    // The script's `mkdir -p "$LOG_ROOT"` before it opens the tee.
-    let _ = std::fs::create_dir_all(&logs_dir);
+    // The log's directory first, so the log can open.
+    let _ =std::fs::create_dir_all(&logs_dir);
     let report = Report::new(&log_path);
 
     // ---- header ----------------------------------------------------------
@@ -362,8 +361,8 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
     let root = home.display().to_string();
     show(&report, "df", &["-h", root.as_str()]);
     report.blank();
-    // The script prints this line only when `bc` is installed, because that
-    // is the tool it divides with; with no `bc` it stays silent.
+    // Printed only when `bc` is installed, although the division is done
+    // here and needs no `bc`; with no `bc` the line is left out.
     if which("bc") {
         let available = df_available_kb(home)
             .map(|kb| (kb / 1024 / 1024).to_string())
@@ -491,8 +490,7 @@ fn parse_args(args: &[String]) -> Result<(), String> {
 
 // ---- the report ----------------------------------------------------------
 
-/// A line sink that mirrors the script's `exec > >(tee -a "$LOG_FILE")`: every
-/// line goes to the terminal and is appended to the log.
+/// A line sink: every line goes to the terminal and is appended to the log.
 struct Report {
     log: Option<std::fs::File>,
     color: bool,
@@ -514,7 +512,7 @@ impl Report {
         }
     }
 
-    /// The script's bare `echo`.
+    /// An empty line.
     fn blank(&self) {
         self.line("");
     }
@@ -544,8 +542,8 @@ impl Report {
         self.line(&format!("{} {message}", self.painted(RED, "[ERROR]")));
     }
 
-    /// The script's `section`: a blank line, a rule, the title, another rule,
-    /// a blank line.
+    /// A section heading: a blank line, a rule, the title, another rule, a
+    /// blank line.
     fn section(&self, title: &str) {
         self.blank();
         self.line(&self.painted(CYAN, RULE));
@@ -554,7 +552,7 @@ impl Report {
         self.blank();
     }
 
-    /// The script's closing green banner.
+    /// The closing green banner.
     fn complete(&self) {
         self.blank();
         self.line(&self.painted(GREEN, RULE));
@@ -562,8 +560,8 @@ impl Report {
         self.line(&self.painted(GREEN, RULE));
     }
 
-    /// Run a prepared command with this terminal inherited, the way the
-    /// script lets a package manager write straight to the screen. A non-zero
+    /// Run a prepared command with this terminal inherited, so a package
+    /// manager writes straight to the screen. A non-zero
     /// exit is reported and the report carries on: the rest of it is still
     /// worth printing.
     fn run_visible(&self, command: &mut Command, what: &str) {
@@ -583,13 +581,13 @@ impl Report {
 // ---- running things ------------------------------------------------------
 
 /// Run `program` with `args`, capturing both streams. `None` when it cannot
-/// be started at all - the shell's `command not found`.
+/// be started at all (not installed).
 fn output_of(program: &str, args: &[&str]) -> Option<std::process::Output> {
     Command::new(program).args(args).output().ok()
 }
 
 /// stdout of a command that succeeded, as text. `None` on a spawn failure or
-/// a non-zero exit - the shell's `$(...) || true` shape.
+/// a non-zero exit.
 fn capture(program: &str, args: &[&str]) -> Option<String> {
     let out = output_of(program, args)?;
     if !out.status.success() {
@@ -598,14 +596,13 @@ fn capture(program: &str, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Whether a command succeeded, its output unwanted - the shell's
-/// `if cmd >/dev/null 2>&1`.
+/// Whether a command succeeded, its output unwanted.
 fn succeeds(program: &str, args: &[&str]) -> bool {
     output_of(program, args).map(|out| out.status.success()).unwrap_or(false)
 }
 
-/// Run a command and show both of its streams, the way a bare command in the
-/// script writes to the tee'd terminal. Returns whether it succeeded.
+/// Run a command and show both of its streams through the report, so they
+/// reach the log too. Returns whether it succeeded.
 fn show(report: &Report, program: &str, args: &[&str]) -> bool {
     match output_of(program, args) {
         Some(out) => {
@@ -647,7 +644,7 @@ fn code_text(status: std::process::ExitStatus) -> String {
     }
 }
 
-/// Whether `program` is on PATH - the shell's `command -v`.
+/// Where `program` is on PATH, if it is.
 ///
 /// The PATH walk itself rather than `which`/`where`, which are not the same
 /// tool on the two platforms; Windows resolves a bare name through PATHEXT,
@@ -698,7 +695,7 @@ fn nvidia_query(fields: &str) -> Option<String> {
     capture("nvidia-smi", &[query.as_str(), "--format=csv,noheader"])
 }
 
-/// Whether the docker daemon answers - the shell's `docker info >/dev/null`.
+/// Whether the docker daemon answers `docker info`.
 fn docker_daemon_ok() -> bool {
     succeeds("docker", &["info"])
 }
@@ -751,14 +748,14 @@ fn meminfo_kb(key: &str) -> Option<u64> {
     None
 }
 
-/// The free kilobytes on the filesystem holding `path`: the shell's
-/// `df -Pk <path> | awk 'NR==2 {print $4}'`.
+/// The free kilobytes on the filesystem holding `path`: the fourth field of
+/// the second line of `df -Pk <path>`.
 fn df_available_kb(path: &Path) -> Option<u64> {
     let out = capture("df", &["-Pk", path.to_str()?])?;
     out.lines().nth(1)?.split_whitespace().nth(3)?.parse().ok()
 }
 
-/// The `whoami` the script prints, with the environment as a fallback.
+/// `whoami`, with the environment as a fallback.
 fn user_name() -> String {
     if let Some(name) = capture("whoami", &[]).map(|out| out.trim().to_string()).filter(|s| !s.is_empty()) {
         return name;
@@ -768,7 +765,7 @@ fn user_name() -> String {
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
-/// `basename "$0"`: the program this report is running as.
+/// The file name of the program this report is running as.
 fn script_name() -> String {
     std::env::args()
         .next()
@@ -776,7 +773,7 @@ fn script_name() -> String {
         .unwrap_or_else(|| "golem".to_string())
 }
 
-/// The script's `$(date)`: the local clock, through `date` where that is
+/// The report's date line: the local clock, through `date` where that is
 /// safe. On Windows `date` is an interactive prompt, so the stamp is built
 /// here instead - the value is the same kind of fact either way.
 fn date_line() -> String {
@@ -794,9 +791,9 @@ fn date_line() -> String {
     format!("{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC", rem / 3600, (rem % 3600) / 60, rem % 60)
 }
 
-/// `YYYYmmdd-HHMMSS` in UTC, the stamp the log file's name carries. The
-/// script's `date +%Y%m%d-%H%M%S` is local; the core's calendar is UTC, and
-/// a log file's name is not worth a timezone database.
+/// `YYYYmmdd-HHMMSS` in UTC, the stamp the log file's name carries. UTC
+/// because the core's calendar is, and a log file's name is not worth a
+/// timezone database.
 fn stamp() -> String {
     let secs = secs_since_epoch();
     let (year, month, day) = time::civil_from_days((secs / 86_400) as i64);
@@ -808,10 +805,9 @@ fn secs_since_epoch() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// `bash`'s `OSTYPE`, which it sets itself and does not export. A native
-/// Linux build is the same `linux-gnu` the script would have had; anywhere
-/// else the environment is asked, and an absent one is the empty string the
-/// script's `${OSTYPE:-}` comparison turns into `unknown`.
+/// The OS type the report names: `OSTYPE` when the environment has it (bash
+/// sets it but does not export it), `linux-gnu` on a native Linux build,
+/// and otherwise the empty string, which the report prints as `unknown`.
 fn ostype() -> String {
     if let Ok(value) = std::env::var("OSTYPE") {
         if !value.is_empty() {
@@ -825,7 +821,7 @@ fn ostype() -> String {
     }
 }
 
-/// The CPU's `Model name`, the shell's `lscpu | awk -F: '/Model name/ ...'`.
+/// The CPU's `Model name` from `lscpu`: the text after the first `:`.
 fn lscpu_model(text: &str) -> Option<String> {
     for line in text.lines() {
         if line.contains("Model name") {
@@ -875,14 +871,14 @@ fn unquote(value: &str) -> String {
 
 // ---- the pure decisions --------------------------------------------------
 
-/// A report line's level: the script's `ok` or `warn`.
+/// A report line's level: `[ OK ]` or `[WARN]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verdict {
     Ok,
     Warn,
 }
 
-/// The script's RAM verdict.
+/// The RAM verdict.
 fn ram_verdict(gb: u64) -> (Verdict, &'static str) {
     if gb >= 32 {
         (Verdict::Ok, "32GB+ RAM detected.")
@@ -893,7 +889,7 @@ fn ram_verdict(gb: u64) -> (Verdict, &'static str) {
     }
 }
 
-/// The package manager the machine has, in the script's priority order.
+/// The package manager the machine has, in priority order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Manager {
     Apt,
@@ -901,7 +897,7 @@ enum Manager {
     Pacman,
 }
 
-/// Which manager the script would pick: `apt-get` wins, then `dnf`, then
+/// Which manager to use: `apt-get` wins, then `dnf`, then
 /// `pacman`, and none present is the warning branch.
 fn package_manager(apt: bool, dnf: bool, pacman: bool) -> Option<Manager> {
     if apt {
@@ -915,14 +911,13 @@ fn package_manager(apt: bool, dnf: bool, pacman: bool) -> Option<Manager> {
     }
 }
 
-/// The toolchain line: the shell's `printf "%-8s "` followed by the first
-/// line of the tool's `--version`.
+/// The toolchain line: the tool's name padded to 8, then the first line of
+/// its `--version`.
 fn toolchain_line(tool: &str, version_output: &str) -> String {
     format!("{tool:<8} {}", version_output.lines().next().unwrap_or(""))
 }
 
-/// The summary's three GPU lines, each falling back to `unknown` the way
-/// `${VAR:-unknown}` does.
+/// The summary's three GPU lines, each `unknown` when its value is empty.
 fn gpu_summary_lines(name: &str, vram: &str, driver: &str) -> [String; 3] {
     [
         format!("  Model        : {}", or_unknown(name)),
@@ -931,8 +926,7 @@ fn gpu_summary_lines(name: &str, vram: &str, driver: &str) -> [String; 3] {
     ]
 }
 
-/// The summary's CUDA line: the path `command -v nvcc` prints, or the
-/// script's own fallback.
+/// The summary's CUDA line: where `nvcc` is on PATH, or `not installed`.
 fn nvcc_summary_line() -> String {
     which_path("nvcc").map(|path| path.display().to_string()).unwrap_or_else(|| "not installed".to_string())
 }
@@ -994,7 +988,7 @@ EMPTY=
     }
 
     #[test]
-    fn each_manager_gets_the_scripts_package_list() {
+    fn each_manager_gets_its_package_list() {
         assert_eq!(APT_PACKAGES.len(), 9);
         assert_eq!(APT_PACKAGES[0], "build-essential");
         assert!(APT_PACKAGES.contains(&"pkg-config"));
@@ -1007,7 +1001,7 @@ EMPTY=
     }
 
     #[test]
-    fn the_toolchain_line_pads_the_name_like_printf() {
+    fn the_toolchain_line_pads_the_name_to_eight() {
         let gcc = toolchain_line(
             "gcc",
             "gcc (Ubuntu 13.2.0-23ubuntu4) 13.2.0\nCopyright (C) 2023 Free Software Foundation, Inc.\n",
@@ -1020,7 +1014,7 @@ EMPTY=
     }
 
     #[test]
-    fn the_memory_verdict_is_the_scripts_three_cases() {
+    fn the_memory_verdict_has_three_cases() {
         assert_eq!(ram_verdict(64), (Verdict::Ok, "32GB+ RAM detected."));
         assert_eq!(ram_verdict(32), (Verdict::Ok, "32GB+ RAM detected."));
         assert_eq!(ram_verdict(16), (Verdict::Ok, "16GB+ RAM detected."));
@@ -1028,7 +1022,7 @@ EMPTY=
     }
 
     #[test]
-    fn the_cpu_model_comes_from_the_awk_field() {
+    fn the_cpu_model_comes_from_lscpus_model_name() {
         let text = "\
 Architecture:                    x86_64
 CPU op-mode(s):                  32-bit, 64-bit
@@ -1044,7 +1038,7 @@ Model name:                     12th Gen Intel(R) Core(TM) i7-12700KF
             gpu_summary_lines("NVIDIA GeForce RTX 3060", "12288 MiB", "580.65.06").join("\n"),
             "  Model        : NVIDIA GeForce RTX 3060\n  VRAM         : 12288 MiB\n  Driver       : 580.65.06"
         );
-        // An empty answer is `unknown`, as `${VAR:-unknown}` is.
+        // An empty answer is `unknown`.
         assert_eq!(
             gpu_summary_lines("", "", "").join("\n"),
             "  Model        : unknown\n  VRAM         : unknown\n  Driver       : unknown"
@@ -1052,7 +1046,7 @@ Model name:                     12th Gen Intel(R) Core(TM) i7-12700KF
     }
 
     #[test]
-    fn the_log_stamp_is_the_scripts_shape() {
+    fn the_log_stamp_is_date_dash_time() {
         let stamp = stamp();
         assert_eq!(stamp.len(), 15, "{stamp}");
         assert_eq!(stamp.as_bytes()[8], b'-');

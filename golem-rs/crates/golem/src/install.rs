@@ -1,8 +1,7 @@
 //! `golem install`: put the pinned engine build on this machine.
 //!
-//! This is the *job* of `scripts/install-llama-cpp.sh`, done differently. The
-//! script builds llama.cpp from source; this fetches the pinned release. Two
-//! reasons, and the second is the one that decided it:
+//! It fetches the pinned release rather than building llama.cpp from source.
+//! Two reasons, and the second is the one that decides it:
 //!
 //! - **A build needs a toolchain.** git, cmake and a compiler, on a machine
 //!   whose owner wanted to run a model - and the failure when one is missing
@@ -28,7 +27,7 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
         eprintln!("[ERROR] {message}");
         return 1;
     }
-    let plan = match launch::plan(home) {
+    let plan = match launch::plan(home, &crate::config::Overrides::from_env()) {
         Ok(plan) => plan,
         Err(message) => {
             eprintln!("[ERROR] {message}");

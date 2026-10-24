@@ -2,14 +2,14 @@
 //!
 //! `status` has to answer that without a gateway, a proxy or an HTTP client
 //! crate, so it speaks HTTP/1.1 over a socket directly. That is not only
-//! fewer dependencies: it is the reason the `--noproxy '*'` that every curl
-//! call in the shell needs is not needed here at all. A raw connection has
-//! nowhere to pick up a system proxy from.
+//! fewer dependencies: a raw connection has nowhere to pick up a system
+//! proxy from, so a proxy configured for the desktop cannot intercept a
+//! loopback request.
 //!
 //! Everything is short-fused. A status check that hangs is worse than one
-//! that says nothing: the shell learned this the hard way (a proxy plus a
-//! default timeout made every check stall for half a minute), so every read
-//! and write here has a deadline of a second or two.
+//! that says nothing (a proxy plus a default timeout once made every check
+//! stall for half a minute), so every read and write here has a deadline of
+//! a second or two.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -31,12 +31,7 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 /// it; a slow *answer* is the read timeout's business.
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// The parts of the shell's `.env` that describe where the engine is.
-///
-/// During the migration `.env` is still the source of truth for the shell
-/// drivers, so the binary reads the same values from the same file rather
-/// than asking for a second copy. When the config file arrives (the plan's
-/// configuration section), this is the one place that changes.
+/// Where the local engine listens, and the key it wants.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Endpoint {
     pub port: u16,
@@ -50,15 +45,9 @@ impl Default for Endpoint {
 }
 
 impl Endpoint {
-    /// Read `LOCAL_AI_PORT` and `LOCAL_AI_API_KEY` from the home's
-    /// configuration. A missing file, a missing key or a malformed value falls
-    /// back to the default rather than failing: `status` should say "down",
-    /// not die.
-    ///
-    /// Through [`golem_core::config::value`] rather than a reader of its own:
-    /// this used to scan `.env` directly, which meant a key that moved to
-    /// `golem.toml` would have gone on answering from the shim - and the
-    /// shim's copy is the one that stops being updated.
+    /// `LOCAL_AI_PORT` and `LOCAL_AI_API_KEY` from `golem.toml`. A missing
+    /// key or a malformed value falls back to the default rather than
+    /// failing: `status` should say "down", not die.
     pub fn from_home(home: &Path) -> Endpoint {
         let mut endpoint = Endpoint::default();
         if let Some(port) = golem_core::config::value(home, "LOCAL_AI_PORT")
@@ -84,33 +73,21 @@ pub struct Status {
     pub port: u16,
 }
 
-/// The engine's pid, from the launcher's pid file (`llama-server-windows.pid`
-/// on Windows, `llama-server.pid` elsewhere).
+/// The engine's pid, from the pid file `up` writes.
 pub fn pid(home: &Path) -> Option<u32> {
-    let dir = home.join(".local");
-    let entries = std::fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("llama-server") && name.ends_with(".pid") {
-            if let Ok(text) = std::fs::read_to_string(entry.path()) {
-                if let Ok(pid) = text.trim().parse() {
-                    return Some(pid);
-                }
-            }
-        }
-    }
-    None
+    std::fs::read_to_string(crate::paths::pid_file(home)).ok()?.trim().parse().ok()
 }
 
 /// The engine as it is right now.
 pub fn status(home: &Path) -> Status {
     let endpoint = Endpoint::from_home(home);
-    Status {
-        up: get(&endpoint, "/health").is_some_and(|(status, _)| (200..300).contains(&status)),
-        pid: pid(home),
-        port: endpoint.port,
-    }
+    Status { up: healthy(&endpoint), pid: pid(home), port: endpoint.port }
+}
+
+/// Whether the engine answers `/health` with a success. A loading
+/// llama-server answers 503, which is not healthy: it is the reason to wait.
+pub fn healthy(endpoint: &Endpoint) -> bool {
+    get(endpoint, "/health").is_some_and(|(status, _)| (200..300).contains(&status))
 }
 
 /// `GET path` against the local engine: the status code and the body.
@@ -119,33 +96,13 @@ pub fn status(home: &Path) -> Status {
 /// down" answer; an HTTP error status is still `Some`, so the caller can tell
 /// "not listening" from "listening but unhappy".
 pub fn get(endpoint: &Endpoint, path: &str) -> Option<(u16, String)> {
-    let addr = format!("127.0.0.1:{}", endpoint.port);
-    let addr: SocketAddr = addr.to_socket_addrs().ok()?.next()?;
-    let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).ok()?;
-    stream.set_read_timeout(Some(TIMEOUT)).ok()?;
-    stream.set_write_timeout(Some(TIMEOUT)).ok()?;
-
-    let mut request = format!(
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n",
-        endpoint.port
-    );
-    if !endpoint.api_key.is_empty() {
-        request.push_str(&format!("Authorization: Bearer {}\r\n", endpoint.api_key));
-    }
-    request.push_str("\r\n");
-    stream.write_all(request.as_bytes()).ok()?;
-
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).ok()?;
-    let text = String::from_utf8_lossy(&raw).into_owned();
-
-    // "HTTP/1.1 200 OK" -> 200; then the body after the blank line.
-    let status = text
-        .split_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse().ok())?;
-    let body = text.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
-    Some((status, body))
+    let base = Base {
+        host: "127.0.0.1".to_string(),
+        port: endpoint.port,
+        prefix: String::new(),
+        api_key: endpoint.api_key.clone(),
+    };
+    request("GET", &base, path, None, TIMEOUT).map(|reply| (reply.status, reply.body))
 }
 
 /// The model ids the engine lists (`GET /v1/models`), for a status line that
@@ -175,11 +132,9 @@ pub fn models(endpoint: &Endpoint) -> Vec<String> {
 // `LOCAL_AI_BASE_URL` may name another host entirely - so the two things
 // that differ are parameters here rather than assumptions.
 //
-// It is still HTTP/1.1 over a socket, and still no client crate: the
-// `--noproxy '*'` that every curl call in the scripts needs exists because
-// curl reads the system proxy, and a raw connection has nowhere to pick one
-// up from. What is new is that the body can be a megabyte and the answer can
-// arrive in chunks, so both are handled explicitly.
+// It is still HTTP/1.1 over a socket, and still no client crate, so still
+// no system proxy. What differs is that the body can be a megabyte and the
+// answer can arrive in chunks, so both are handled explicitly.
 
 /// Where the API is: loopback, or whatever `LOCAL_AI_BASE_URL` names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,7 +149,7 @@ pub struct Base {
 impl Base {
     /// `LOCAL_AI_BASE_URL` when set, else `http://<LOCAL_AI_HOST>:<PORT>`.
     ///
-    /// The scripts' own rule, and each part of it matters: the base URL wins
+    /// Each part of the rule matters: the base URL wins
     /// over host and port; `0.0.0.0` is a bind address and not a destination,
     /// so it becomes the loopback; and a trailing `/v1` is stripped, because
     /// every path built from this adds its own.
@@ -269,8 +224,10 @@ fn request(
     let addr = format!("{}:{}", base.host, base.port);
     let addr: SocketAddr = addr.to_socket_addrs().ok()?.next()?;
     // Connecting is a different budget from answering: a host that is not
-    // there should say so in seconds, not in half an hour.
-    let connect = timeout.min(Duration::from_secs(10));
+    // there should say so in seconds, not in half an hour - and loopback
+    // either has a listener or has none, so it gets the short fuse.
+    let connect = if base.host == "127.0.0.1" { CONNECT_TIMEOUT } else { Duration::from_secs(10) };
+    let connect = timeout.min(connect);
     let mut stream = TcpStream::connect_timeout(&addr, connect).ok()?;
     // The read timeout is the whole budget on purpose. llama.cpp answers a
     // non-streaming request in one go at the end, so minutes of silence in
@@ -395,11 +352,12 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_endpoint_from_env() {        let dir = std::env::temp_dir().join("golem-rs-endpoint-test");
+    fn reads_the_endpoint_from_the_config() {
+        let dir = std::env::temp_dir().join("golem-rs-endpoint-test");
         std::fs::create_dir_all(&dir).expect("temp");
         std::fs::write(
-            dir.join(".env"),
-            "# a comment\nLOCAL_AI_PORT=\"8123\"\nLOCAL_AI_API_KEY=secret\n",
+            dir.join("golem.toml"),
+            "# a comment\nLOCAL_AI_PORT=\"8123\"\nLOCAL_AI_API_KEY=\"secret\"\n",
         )
         .expect("write");
         let endpoint = Endpoint::from_home(&dir);
@@ -459,7 +417,7 @@ mod tests {
     fn reads_the_pid_the_launcher_wrote() {
         let dir = std::env::temp_dir().join("golem-rs-pid-test");
         std::fs::create_dir_all(dir.join(".local")).expect("temp");
-        std::fs::write(dir.join(".local/llama-server-windows.pid"), "4242\r\n").expect("write");
+        std::fs::write(dir.join(".local/llama-server.pid"), "4242\r\n").expect("write");
         assert_eq!(pid(&dir), Some(4242));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -473,10 +431,9 @@ mod tests {
     #[test]
     fn the_endpoint_reads_the_toml_file_too() {
         // `status` must see the port and the key wherever the configuration
-        // puts them: a reader that only scanned `.env` would go on answering
-        // from the shim on the day one of them moved.
+        // puts them, through `config` like every other reader.
         let dir = base_home("endpoint-toml");
-        std::fs::write(dir.join(".env"), "LOCAL_AI_PORT=\"8000\"\nLOCAL_AI_API_KEY=\"from-env\"\n")
+        std::fs::write(dir.join("golem.toml"), "LOCAL_AI_PORT=\"8000\"\nLOCAL_AI_API_KEY=\"from-env\"\n")
             .expect("write");
         std::fs::write(dir.join("golem.toml"), "LOCAL_AI_PORT = 8123\nLOCAL_AI_API_KEY = \"k\"\n")
             .expect("write");
@@ -533,7 +490,7 @@ mod tests {
     fn the_base_url_wins_over_host_and_port() {
         let dir = base_home("base-url");
         std::fs::write(
-            dir.join(".env"),
+            dir.join("golem.toml"),
             "LOCAL_AI_PORT=\"8000\"\nLOCAL_AI_API_KEY=\"k\"\n\
              LOCAL_AI_BASE_URL=\"http://192.168.1.5:9000/v1\"\n",
         )
@@ -550,13 +507,13 @@ mod tests {
     #[test]
     fn without_a_base_url_the_endpoint_is_the_loopback() {
         let dir = base_home("base-default");
-        std::fs::write(dir.join(".env"), "LOCAL_AI_HOST=\"0.0.0.0\"\nLOCAL_AI_PORT=\"8123\"\n")
+        std::fs::write(dir.join("golem.toml"), "LOCAL_AI_HOST=\"0.0.0.0\"\nLOCAL_AI_PORT=\"8123\"\n")
             .expect("write");
         let base = Base::from_home(&dir).expect("base");
         assert_eq!(base.host, "127.0.0.1");
         assert_eq!(base.port, 8123);
         assert_eq!(base.path("/health"), "/health");
-        // No `.env` at all is the ordinary case on a fresh machine.
+        // No settings at all is the ordinary case on a fresh machine.
         let fresh = base_home("base-none");
         let base = Base::from_home(&fresh).expect("base");
         assert_eq!(base.host, "127.0.0.1");
@@ -570,7 +527,7 @@ mod tests {
         // This client speaks HTTP over a socket and has no TLS. Connecting and
         // then failing would read as a broken server.
         let dir = base_home("base-https");
-        std::fs::write(dir.join(".env"), "LOCAL_AI_BASE_URL=\"https://example.test/v1\"\n")
+        std::fs::write(dir.join("golem.toml"), "LOCAL_AI_BASE_URL=\"https://example.test/v1\"\n")
             .expect("write");
         assert_eq!(Base::from_home(&dir), None);
         std::fs::remove_dir_all(&dir).ok();

@@ -1,13 +1,12 @@
 //! INI engine: model presets, engine adapters, and the section-override
-//! merge behind `write_candidate` / `write_overlay` in scripts/tune.sh.
+//! merge behind the tuner's candidates and overlays.
 //!
-//! The rules that must survive the port, exactly as the scripts do them:
+//! The rules:
 //! - `[section]` names are matched literally, and a header only counts at
-//!   column 0 (`/^\[/` in awk, `'^\[([^\]]+)\]'` in PowerShell);
-//! - keys and values are trimmed; later duplicate keys win (the scripts take
-//!   the last with `tail -n1`);
-//! - `;` and `#` start comments; the `; Download:` lines are read by the
-//!   launchers and must round-trip untouched;
+//!   column 0;
+//! - keys and values are trimmed; later duplicate keys win;
+//! - `;` and `#` start comments; the `; Download:` lines are read by
+//!   `up`, `pull` and the console, and must round-trip untouched;
 //! - an override replaces the original line in place, or prints right
 //!   after the section header when the key was absent.
 //!
@@ -32,14 +31,14 @@ impl Entry {
     }
 
     /// The pair as a line of the file: one space either side of the `=`, the
-    /// way both the scripts' writers spell it.
+    /// way the shipped presets spell it.
     pub fn line(&self) -> String {
         format!("{} = {}", self.key, self.value)
     }
 }
 
 /// One `; Download: <repo> -> <file>` comment: where a preset's GGUF comes
-/// from. The launchers fetch anything `data/models` is missing from these.
+/// from. `up` and `pull` fetch anything `data/models` is missing from these.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Download {
     pub repo: String,
@@ -51,8 +50,8 @@ pub struct Download {
 pub struct Section {
     pub name: String,
     /// The `; Download:` lines above the header, in file order. A section can
-    /// need more than one file (a coder plus its MTP draft); the console and
-    /// the launchers use the first as *the* model, the rest are its extras.
+    /// need more than one file (a coder plus its MTP draft); the console
+    /// shows the first as *the* model, and `up` and `pull` fetch them all.
     pub downloads: Vec<Download>,
     pub entries: Vec<Entry>,
 }
@@ -96,8 +95,7 @@ impl Document {
     ///
     /// `engines/<name>/engine.ini` has no sections at all - it is a flat list
     /// of keys under its own comment block - so this is how an adapter's
-    /// `tune` flag is read. The first assignment wins, as the shell's awk
-    /// takes it (`print v; exit`).
+    /// `tune` flag is read. The first assignment wins.
     pub fn global(&self, key: &str) -> Option<&str> {
         self.preamble.iter().find_map(|line| match assignment(line) {
             Some((name, value)) if name == key => Some(value),
@@ -127,8 +125,7 @@ impl Document {
 
 /// The `[section]` name of a header line, when it is one.
 ///
-/// Column 0 only: both scripts anchor their header pattern at the start of
-/// the line, so an indented `[x]` is not a header anywhere in the stack.
+/// Column 0 only: an indented `[x]` is not a header.
 fn header_of(line: &str) -> Option<&str> {
     let rest = line.strip_prefix('[')?;
     let (name, _) = rest.split_once(']')?;
@@ -140,8 +137,8 @@ fn download_of(line: &str) -> Option<Download> {
     let rest = line.trim_start().strip_prefix(';')?;
     let rest = rest.trim_start().strip_prefix("Download:")?;
     let (repo, file) = rest.split_once("->")?;
-    // `(\S+)` either side: a path with a space in it is not a download line
-    // at all as far as the scripts are concerned.
+    // One word either side: a path with a space in it is not a download
+    // line at all.
     let repo = repo.split_whitespace().next()?;
     let file = file.split_whitespace().next()?;
     Some(Download { repo: repo.to_string(), file: file.to_string() })
@@ -167,7 +164,7 @@ fn entry_of(line: &str) -> Option<Entry> {
 ///
 /// A `; Download:` line belongs to the section *below* it - that is where
 /// `config/models.ini` puts them - so they are collected and handed to the
-/// next header, exactly as `Get-Models` in scripts/web.ps1 does it.
+/// next header.
 pub fn parse(text: &str) -> Document {
     let mut doc = Document { preamble: Vec::new(), sections: Vec::new(), text: text.to_string() };
     let mut downloads: Vec<Download> = Vec::new();
@@ -199,8 +196,8 @@ pub fn parse(text: &str) -> Document {
 /// The line ending the text uses: CRLF when it has any, LF otherwise.
 ///
 /// A Windows checkout has CRLF (`.gitattributes` normalizes the repository
-/// to LF, not the working tree) and PowerShell's `Set-Content` would keep it
-/// that way; imposing LF would turn a one-line edit into a whole-file diff.
+/// to LF, not the working tree); imposing LF would turn a one-line edit into
+/// a whole-file diff.
 fn ending(text: &str) -> &'static str {
     if text.contains("\r\n") {
         "\r\n"
@@ -225,8 +222,8 @@ fn join_lines(lines: &[&str], eol: &str) -> String {
 /// Those lines are the section's own documentation - `; Download:` and
 /// `; Quality:` live there - so they go with it. The buffering is what makes
 /// that work: a comment is held back until the next real line says whose it
-/// is, and it is kept when that line belongs to a section that stays.
-/// Mirrors the `/api/delpreset` handler in scripts/web.ps1.
+/// is, and it is kept when that line belongs to a section that stays. The
+/// console's `/api/delpreset` is the caller.
 pub fn remove_section(text: &str, name: &str) -> String {
     let eol = ending(text);
     let mut keep: Vec<&str> = Vec::new();
@@ -234,8 +231,8 @@ pub fn remove_section(text: &str, name: &str) -> String {
     let mut skip = false;
     for line in text.lines() {
         let trimmed = line.trim();
-        // Only `;` comments are held back, as in the script: a `#` comment is
-        // an ordinary line there, and it must stay one here.
+        // Only `;` comments are held back: a `#` comment is an ordinary line
+        // to the delete, and it stays where it is.
         if trimmed.starts_with(';') || trimmed.is_empty() {
             pending.push(line);
             continue;
@@ -282,8 +279,7 @@ pub fn append_section(text: &str, block: &str) -> String {
 /// The override lines are printed right after the section header and the
 /// original lines for those keys are dropped, so the section's own flags
 /// cannot fight the candidate's. Every other line - comments, blank lines,
-/// the other sections - passes through untouched. Mirrors `write_candidate`
-/// in scripts/tune.sh.
+/// the other sections - passes through untouched.
 pub fn write_candidate(text: &str, section: &str, overrides: &[Entry]) -> String {
     let eol = ending(text);
     // Last value per key wins, but the printed order is the order given.
@@ -331,10 +327,10 @@ pub fn write_candidate(text: &str, section: &str, overrides: &[Entry]) -> String
 /// The preset with `overlay`'s entries merged into it.
 ///
 /// An existing key is replaced where it stands, a key the section does not
-/// have is appended to it, and a section the preset does not have at all is
-/// appended whole - which is how `data/tuned/models.effective.ini` is built.
-/// Comments and blank lines of the preset survive; the overlay's do not.
-/// Mirrors `write_overlay` in scripts/tune.sh.
+/// have is appended after its last entry, and a section the preset does not
+/// have at all is appended whole - which is how
+/// `data/tuned/models.effective.ini` is built. Comments and blank lines of
+/// the preset survive; the overlay's do not.
 pub fn write_overlay(preset: &str, overlay: &str) -> String {
     let eol = ending(preset);
     // What the overlay says, per section, in the order it says it.
@@ -364,36 +360,54 @@ pub fn write_overlay(preset: &str, overlay: &str) -> String {
         }
     }
 
-    let mut out = String::new();
+    // Lines rather than one string, so a section's missing keys can go in
+    // right after its last entry - before the comments that introduce the
+    // next section, which belong to that one.
+    let mut out: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut seen: Vec<String> = Vec::new();
+    // Where the current section's missing keys go, and the keys it has.
+    let mut anchor = 0;
+    let mut present: Vec<String> = Vec::new();
+    let append_missing = |out: &mut Vec<String>, section: &str, anchor: usize, present: &[String]| {
+        let missing: Vec<String> = entries
+            .iter()
+            .filter(|(s, k, _)| s == section && !present.iter().any(|p| p == k))
+            .map(|(_, key, value)| format!("{key} = {value}"))
+            .collect();
+        for (offset, line) in missing.into_iter().enumerate() {
+            out.insert(anchor + offset, line);
+        }
+    };
     for line in preset.lines() {
         if let Some(name) = header_of(line) {
+            append_missing(&mut out, &current, anchor, &present);
             current = name.to_string();
             if !seen.iter().any(|s| s == &current) {
                 seen.push(current.clone());
             }
-            out.push_str(line);
-            out.push_str(eol);
+            out.push(line.to_string());
+            anchor = out.len();
+            present.clear();
             continue;
         }
         if let Some(entry) = entry_of(line) {
-            if let Some((_, _, value)) =
-                entries.iter().find(|(s, k, _)| s == &current && k == &entry.key)
-            {
-                // Written with the file's own ending, not `writeln!`: on a
-                // CRLF checkout a merged line that ends in LF leaves the
-                // effective preset mixed, which every later diff has to
-                // step around.
-                let _ = write!(out, "{} = {}{eol}", entry.key, value);
-                continue;
+            present.push(entry.key.clone());
+            match entries.iter().find(|(s, k, _)| s == &current && k == &entry.key) {
+                Some((_, _, value)) => out.push(format!("{} = {}", entry.key, value)),
+                None => out.push(line.to_string()),
             }
+            anchor = out.len();
+            continue;
         }
-        out.push_str(line);
-        out.push_str(eol);
+        out.push(line.to_string());
     }
-    // A section the preset does not have is appended whole, the same way the
-    // script's END block does it.
+    append_missing(&mut out, &current, anchor, &present);
+    // Written with the file's own ending: on a CRLF checkout a merged line
+    // that ends in LF leaves the effective preset mixed, which every later
+    // diff has to step around.
+    let mut out: String = out.into_iter().map(|line| format!("{line}{eol}")).collect();
+    // A section the preset does not have is appended whole, at the end.
     for section in &overlay_sections {
         if seen.iter().any(|s| s == section) {
             continue;
@@ -569,16 +583,16 @@ n-cpu-moe = 0
 
     #[test]
     fn an_overlay_replaces_in_place_and_keeps_the_comments() {
-        let overlay = "; Auto-tuned by scripts/tune.sh\n[model-a]\nctx-size = 65536\nfit = off\n";
+        let overlay = "; Auto-tuned by golem tune\n[model-a]\nctx-size = 65536\nfit = off\n";
         let out = write_overlay(PRESET, overlay);
         let doc = parse(&out);
         assert_eq!(doc.value("model-a", "ctx-size"), Some("65536"));
-        // A key the section does not already have is *dropped*: the script
-        // only appends whole sections the preset lacks, never single keys to
-        // one it has. Verified against the real awk on config/models.ini -
-        // so `fit = off` (a key no preset carries) never reaches the
-        // effective file, and this port reproduces that rather than fixing it.
-        assert_eq!(doc.value("model-a", "fit"), None);
+        // A key the section does not have is appended to it - after its last
+        // entry, not after the next section's comments. Dropping it serves
+        // a setup other than the one measured:
+        // the sweep ran with `fit = off`, the effective preset without it.
+        assert_eq!(doc.value("model-a", "fit"), Some("off"));
+        assert!(out.contains("n-cpu-moe = 36\nfit = off\n\n; A tiny one"), "{out}");
         // The untouched keys of the section stay where they were.
         assert_eq!(doc.value("model-a", "model"), Some("model-Q4_K_M.gguf"));
         assert_eq!(doc.value("model-a", "n-cpu-moe"), Some("36"));

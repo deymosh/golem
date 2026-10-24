@@ -22,9 +22,9 @@ plugs straight in.
   └───────────────────┘
 ```
 
-Default configuration: a **MoE model (35B total / 3B active)** served at **231K context** with
+Default configuration: a **MoE model (35B total / 3B active)** served at **244K context** with
 most expert weights offloaded to system RAM and MTP speculative decoding — quality of a
-30B-class model on a 12 GB GPU at ~63 tok/s, with headroom for Claude Code's 200K window.
+30B-class model on a 12 GB GPU at ~62 tok/s, with headroom for Claude Code's 200K window.
 Dense models that fit entirely in VRAM are a one-line swap. See
 [docs/models.md](docs/models.md) for measured numbers per setup.
 
@@ -62,24 +62,14 @@ change anything — the model, the port, the key, the context; the defaults work
 `golem pull` fetches the model explicitly; `up` does it automatically when a file is missing.
 
 **Auto-tune** (`golem tune [preset]`) answers "what is the best way to run this model on
-this machine?" with no AI and no hand-editing. It tries every installed engine that can serve
-the preset — sweeping the expert offload for each, seeding from llama.cpp's own placement tool
-— keeps the fastest engine + split that is not spilling VRAM into system memory, **grows the
-context** to the biggest the card can truly serve (up to the model's trained context; `--ctx N`
-pins it), holds every candidate to a **speed floor** (decode 25 / prefill 350 / at-depth 15 t/s
-by default; `TUNE_MIN_*` in `golem.toml` or `--min-*` per run move it, and under-floor candidates are
-named in the output), gates the winner with the 200K eval, and writes the verdict (engine,
-flags, context, every measured point) to `data/tuned/`. The thread sweep probes the counts the
-CPU topology makes promising — on a hybrid P/E chip, P-cores, P-cores with hyperthreads, and
-all — rather than guessing one. Re-run with `--adopt` to put the winner into `golem.toml`;
-`--engine NAME` tunes one engine only, `--dry-run` prints the plan.
-
-`golem tune --auto` skips the "which model?" question: every preset whose GGUF is already
-downloaded gets a cheap sweep, the presets are ranked by their `; Quality: N` comment (a vendor
-score — a ranking input only, the gate still decides) or by size when they have none, and the
-best one is tuned fully and gated, falling back down the ranking if it fails. A model that is
-not downloaded is skipped, never fetched mid-measurement. It refuses to measure while a
-download, build or game is loading the machine, because the numbers would be meaningless.
+this machine?" with no AI and no hand-editing, in as few model loads as it can: it bisects
+the expert offload split from llama.cpp's own placement tool, spends one probe on each knob
+that can still matter, predicts the largest context the card holds from two measured
+points and confirms it, holds every candidate to a **speed floor** (decode 25 / prefill
+350 / at-depth 15 t/s by default), and gates the winner with the 200K eval. Nothing that
+serves changes until the gate passes; `--adopt` then points `golem.toml` at the result.
+`golem tune --auto` picks the best installed model first. How it decides:
+[docs/tuning.md](docs/tuning.md).
 
 **Console** (`golem web`) serves a local page on `127.0.0.1:8787` that stays up whether or
 not an engine is running: live results from `bench/results.jsonl`, every preset with its
@@ -117,7 +107,7 @@ commands.
 | `report [--no-open] [--md]` | build `bench/report.html` (self-contained) from the recorded runs; `--md` writes `bench/RESULTS.md` for GitHub instead |
 | `web [--port N]` | console on `127.0.0.1:8787`: live results, models, controls, engine log |
 | `tui` | the same console in the terminal |
-| `tune [preset] [--adopt] [--engine NAME] [--dry-run]` | best engine + flags for this model on this machine |
+| `tune [preset] [--adopt] [--dry-run]` / `tune --auto` | the fastest gated setup for this model (or the best installed model) on this machine |
 | `claude [args…]` | `exec claude` with `ANTHROPIC_*` already set |
 | `env` | print those exports |
 
@@ -165,14 +155,14 @@ benchmarks per setup: [docs/models.md](docs/models.md).
 
 ### Several models, loaded on demand
 
-Set `MODELS_PRESET = "config/models.ini"` in `golem.toml` and llama-server runs as a **router**: one endpoint,
+Set `MODELS_PRESET = "config/models.ini"` (or the tuned `data/tuned/models.effective.ini`) in `golem.toml` and llama-server runs as a **router**: one endpoint,
 several models, each loaded on its first request and swapped out when a client asks for another
 (one resident at a time). The request's `model` field picks the
 [config/models.ini](config/models.ini) section, which carries that model's own flags:
 
 | `model` | Use | Footprint (RTX 3060 12 GB) |
 |---|---|---|
-| `ornith-1.5-35b` | Coding (Claude Code, OpenCode) — router default | 11.0 GB VRAM + ~20 GB RAM, 231K ctx, ~60 tok/s |
+| `ornith-1.5-35b` | Coding (Claude Code, OpenCode) — router default | ~11.3 GB VRAM + ~20 GB RAM, 244K ctx (tuned), ~62 tok/s |
 | `qwen3.6-35b-a3b` | Coding — previous default, fallback | 11.8 GB VRAM + ~20 GB RAM, 231K ctx, ~60 tok/s |
 | `qwen3.5-9b` | Everyday: summaries, curl/shell one-liners, quick questions, tool calls | ~6.6 GB VRAM, 64K ctx, ~49 tok/s, thinking off |
 
@@ -194,13 +184,14 @@ from single-model serving (measured: 62.6 tok/s decode, 840 tok/s prefill on the
 ├── golem.toml.example        Configuration template; `golem.toml` is written from it
 ├── config/models.ini         Model presets for router mode (MODELS_PRESET)
 ├── docs/
-│   ├── architecture.md       Request flow, ports, auth
+│   ├── architecture.md       The binary, the service, the engine, the config, the container
+│   ├── tuning.md             How `golem tune` searches, decides and gates
+│   ├── roadmap.md            What is left, in order
 │   ├── claude-code.md        Claude Code → Golem, in detail
-│   ├── backends.md           Swapping llama.cpp for Ollama/vLLM/…
 │   ├── models.md             Model choice, memory regimes, benchmarks per setup
-│   ├── amd-rocm.md           AMD GPUs under ROCm
-│   ├── windows-native.md     Windows: llama-server.exe with no Docker and no WSL
-│   └── plan-portable-binary.md  The port, phase by phase, and its status block
+│   ├── engines-and-models.md What was measured, what was only found, other servers
+│   ├── windows-native.md     Windows: the native engine, the VRAM cliff, LAN, auto-start
+│   └── amd-rocm.md           AMD GPUs under ROCm
 ├── scripts/                  Building this binary: cargo.sh and the toolchain setup
 ├── data/models/              GGUF files (git-ignored)
 ├── data/cache/               Download / HF cache (git-ignored)

@@ -1,22 +1,19 @@
-//! `golem tune <preset>`: the phase-4 tuner.
+//! `golem tune <preset>`: the fastest setup this machine can serve, gated.
 //!
-//! A port of `scripts/tune.sh`, and the same division of labour as the rest
-//! of the binary: **this file measures and reports, `golem_core::tune`
-//! decides**. Which candidate wins, what the floors exclude, and how far the
-//! context ladder climbs are all pure functions there; what is here is the
+//! **This file measures and reports; `golem_core::tune` decides.** Which
+//! candidate wins, what the floors exclude, where the split frontier is and
+//! how far the context grows are pure functions there; what is here is the
 //! probing, the restarts, the benchmarks, the gate and the verdict - the
 //! parts that touch a GPU and a process.
 //!
-//! The question it answers is the one a new machine asks: *what is the best
-//! way to run this model here?* For every engine that can serve the preset,
-//! sweep the offload split with real requests, keep the fastest setup that
-//! is not spilling VRAM and clears the speed floors, then gate it with the
-//! long-context eval.
-//!
-//! Two things are deliberately *not* here yet, and both say so out loud
-//! rather than quietly doing something else: `--auto` (that is
-//! `scripts/tune-auto.sh`, a driver with this script as its worker) and the
-//! migration to `golem.toml` (`.env` is still every shell driver's config).
+//! The shape of a run, and what each step costs in model loads (each one a
+//! full read of the model and a restart): the split frontier is bisected from
+//! `llama-fit-params`' seed (three to five loads), the knobs that can still
+//! matter get one probe each (`ub`, threads only near the floor, spec only
+//! with an MTP head), the context ceiling is predicted from two measured
+//! points and confirmed (two or three loads), and the winner is gated once
+//! in its serving mode. Nothing that serves is touched until the gate
+//! passes; the engine is put back the way the run found it.
 //!
 //! ## Why the split matters
 //!
@@ -40,17 +37,20 @@ use std::time::{Duration, Instant};
 use golem_core::evalparse::{self, Verdict as Gate};
 use golem_core::gguf;
 use golem_core::ini::{self, Entry};
-use golem_core::results::Kind;
 use golem_core::time;
-use golem_core::tune::{self, Floor, Point, Probe, Rung, RungOutcome};
+use golem_core::tune::{self, ContextSearch, Floor, Point, Probe, Rung, RungOutcome};
 
-use crate::runner;
+use crate::config::{self, Overrides};
 use crate::engine;
+use crate::machine;
+use crate::paths;
+use crate::proc;
+use crate::service;
 use crate::state;
 
 /// How long a restart may take before the candidate is written off.
 ///
-/// The shell waits 120 × 5 s. A 21 GB model read from disk is the slow part
+/// 120 × 5 s. A 21 GB model read from disk is the slow part
 /// and it is worth the patience; a setup that never answers is not.
 const HEALTH_TRIES: u32 = 120;
 const HEALTH_SLEEP: Duration = Duration::from_secs(5);
@@ -61,8 +61,8 @@ const HEALTH_SLEEP: Duration = Duration::from_secs(5);
 /// so the sweep shows them rather than a message of its own invention.
 const RESTART_LOG: &str = "logs/tune-restart.log";
 
-/// Where the gate's restart goes. Its own file, for the reason the shell had
-/// two: a gate that fails should not overwrite the sweep's last restart.
+/// Where the gate's restart goes. Its own file, so a gate that fails does
+/// not overwrite the sweep's last restart.
 const GATE_LOG: &str = "logs/tune-gate.log";
 
 /// How much RAM beyond the model itself a *locked* load needs.
@@ -118,7 +118,16 @@ pub struct Options {
     pub floor: Floor,
     pub ctx: CtxPolicy,
     pub gate_tokens_max: u64,
+    /// MiB of the card left for the desktop to grow into (see
+    /// [`Machine::wall_mib`]).
+    pub headroom_mib: u64,
 }
+
+/// The default [`Options::headroom_mib`]. The desktop's own use drifts
+/// between half a gigabyte and one and a half over a day (browsers, video),
+/// and the driver spills silently once the card is full, so a setup tuned to
+/// the last megabyte is one a browser tab can push over.
+const VRAM_HEADROOM_MIB: u64 = 1024;
 
 /// How far the context may grow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,30 +158,28 @@ impl Default for Options {
             floor: Floor::default(),
             ctx: CtxPolicy::Max,
             gate_tokens_max: 200_000,
+            headroom_mib: VRAM_HEADROOM_MIB,
         }
     }
 }
 
 impl Options {
-    /// Read the flags, then let `.env` fill in what they did not say.
-    ///
-    /// `.env` first for the floors and the context policy, because a flag
-    /// must beat it; `TUNE_MIN_*` and `TUNE_CTX_POLICY` are the knobs
-    /// docs/plan-tune-model-context.md promises the user.
+    /// `golem.toml` first, for the floors, the context policy and the
+    /// headroom; then the flags, which beat it (docs/tuning.md).
     pub fn parse(home: &Path, args: &[String]) -> Result<Options, String> {
         let mut opts = Options::default();
-        if let Some(v) = state::env_value(home, "TUNE_MIN_DECODE").and_then(|v| v.parse().ok()) {
+        if let Some(v) = config::get(home, "TUNE_MIN_DECODE").and_then(|v| v.parse().ok()) {
             opts.floor.decode = v;
         }
-        if let Some(v) = state::env_value(home, "TUNE_MIN_PREFILL").and_then(|v| v.parse().ok()) {
+        if let Some(v) = config::get(home, "TUNE_MIN_PREFILL").and_then(|v| v.parse().ok()) {
             opts.floor.prefill = v;
         }
-        if let Some(v) = state::env_value(home, "TUNE_MIN_DEPTH_DECODE")
+        if let Some(v) = config::get(home, "TUNE_MIN_DEPTH_DECODE")
             .and_then(|v| v.parse().ok())
         {
             opts.floor.depth_decode = v;
         }
-        if let Some(v) = state::env_value(home, "TUNE_CTX_POLICY") {
+        if let Some(v) = config::get(home, "TUNE_CTX_POLICY") {
             if v == "ladder" {
                 opts.ctx = CtxPolicy::Ladder;
             } else if v != "max" {
@@ -181,8 +188,11 @@ impl Options {
                 }
             }
         }
-        if let Some(v) = state::env_value(home, "GATE_TOKENS").and_then(|v| v.parse().ok()) {
+        if let Some(v) = config::get(home, "GATE_TOKENS").and_then(|v| v.parse().ok()) {
             opts.gate_tokens_max = v;
+        }
+        if let Some(v) = config::get(home, "TUNE_VRAM_HEADROOM_MIB").and_then(|v| v.parse().ok()) {
+            opts.headroom_mib = v;
         }
 
         let mut i = 0;
@@ -236,9 +246,9 @@ impl Options {
                     };
                 }
                 // The ladder the prediction replaced, kept reachable until a
-                // real sweep has been compared against it
-                // (docs/plan-smart-tune.md, step 4).
+                // measured run has compared the two (docs/roadmap.md).
                 "--ctx-ladder" => opts.ctx = CtxPolicy::Ladder,
+                "--vram-headroom" => opts.headroom_mib = number(&value("--vram-headroom")?)? as u64,
                 "--auto" => {
                     return Err("--auto is the driver in crate::auto_tune, not this \
                                 sweep: it ranks the installed presets and calls this \
@@ -258,7 +268,7 @@ impl Options {
             i += 1;
         }
         if opts.target.is_empty() {
-            opts.target = state::env_value(home, "MODEL_ALIAS").unwrap_or_else(|| "local-model".into());
+            opts.target = config::get(home, "MODEL_ALIAS").unwrap_or_else(|| "local-model".into());
         }
         Ok(opts)
     }
@@ -284,140 +294,44 @@ pub struct Machine {
 impl Machine {
     /// What nvidia-smi, the OS and the CPU say.
     pub fn probe() -> Result<Machine, String> {
-        let query = |fields: &str| -> Option<String> {
-            let out = Command::new("nvidia-smi")
-                .args([&format!("--query-gpu={fields}"), "--format=csv,noheader,nounits"])
-                .output()
-                .ok()?;
-            out.status
-                .success()
-                .then(|| String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("").trim().to_string())
-        };
-        let Some(total) = query("name,memory.total,memory.used") else {
+        let Some(gpu) = machine::gpu() else {
             return Err("auto-tune needs nvidia-smi (an NVIDIA card); for AMD set the split by hand".into());
         };
-        let parts: Vec<&str> = total.split(',').map(str::trim).collect();
-        if parts.len() < 3 {
-            return Err(format!("nvidia-smi answered {total:?}, which is not a GPU"));
-        }
-        let cores = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(8);
-        let cpu = cpu_name().unwrap_or_default();
         Ok(Machine {
-            gpu: parts[0].to_string(),
-            vram_total_mib: parts[1].parse().unwrap_or(0),
-            vram_used_mib: parts[2].parse().unwrap_or(0),
-            ram_total_gb: ram_total_gb(),
-            ram_free_gb: state::ram_free_gb().unwrap_or(0.0),
-            cores,
-            physical_cores: physical_cores().unwrap_or(0),
-            cpu,
+            gpu: gpu.name,
+            vram_total_mib: gpu.total_mib,
+            vram_used_mib: gpu.used_mib,
+            ram_total_gb: machine::ram_total_gb(),
+            ram_free_gb: machine::ram_free_gb().unwrap_or(0.0),
+            cores: machine::logical_cores(),
+            physical_cores: machine::physical_cores().unwrap_or(0),
+            cpu: machine::cpu_name().unwrap_or_default(),
         })
     }
 
-    /// The anonymous hardware slug `record-result.sh` writes into every row.
-    ///
-    /// The same one `scripts/tune.sh` names its output directory after, and
-    /// deliberately not a hostname: a row and a tuned setup travel with a
-    /// shared report, and neither should carry the machine's name.
+    /// The anonymous hardware slug the tuned setup is filed under - the same
+    /// one every recorded row carries.
     pub fn host_slug(&self) -> String {
-        format!(
-            "{}_{}g_{}g_{}",
-            slug(&self.gpu),
-            self.vram_total_mib / 1024,
-            self.ram_total_gb,
-            slug(&self.cpu)
-        )
+        machine::host_slug(&self.gpu, self.vram_total_mib, self.ram_total_gb, &self.cpu)
     }
 
-    /// VRAM the sweep may use: everything the desktop is not already using,
-    /// less a margin. Only a seed for the sweep - the real cliff is the
-    /// measured prefill collapse.
-    pub fn wall_mib(&self) -> u64 {
-        self.vram_total_mib.saturating_sub(self.vram_used_mib).saturating_sub(500)
+    /// The highest whole-card VRAM reading a setup may have: the card, less
+    /// the headroom the desktop is left to grow into.
+    ///
+    /// In the bench's own units. The bench reads `memory.used` for the whole
+    /// card, so the desktop is already *in* every point's reading; a wall that
+    /// subtracted the desktop again counted it twice, and on a box whose
+    /// desktop holds 700 MiB it refused setups with a gigabyte still free.
+    pub fn wall_mib(&self, headroom_mib: u64) -> u64 {
+        self.vram_total_mib.saturating_sub(headroom_mib)
     }
-}
 
-fn cpu_name() -> Option<String> {
-    if let Ok(text) = std::fs::read_to_string("/proc/cpuinfo") {
-        for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("model name") {
-                let name = rest.trim_start_matches(':').trim();
-                if !name.is_empty() {
-                    return Some(name.to_string());
-                }
-            }
-        }
+    /// What the model itself may take: the card, less the desktop as it is
+    /// now, less the headroom. Only the seed heuristic wants this - every
+    /// measured point is judged against [`Machine::wall_mib`].
+    fn model_budget_mib(&self, headroom_mib: u64) -> u64 {
+        self.vram_total_mib.saturating_sub(self.vram_used_mib).saturating_sub(headroom_mib)
     }
-    powershell("(Get-CimInstance Win32_Processor).Name")
-}
-
-fn physical_cores() -> Option<u32> {
-    // MSYS's /proc/cpuinfo reports the logical count in `cpu cores`, so it is
-    // only trusted where it is a real Linux file.
-    if !cfg!(windows) {
-        if let Ok(text) = std::fs::read_to_string("/proc/cpuinfo") {
-            for line in text.lines() {
-                if let Some(rest) = line.strip_prefix("cpu cores") {
-                    if let Some(n) = rest.split(':').nth(1).and_then(|v| v.trim().parse().ok()) {
-                        return Some(n);
-                    }
-                }
-            }
-        }
-    }
-    powershell("(Get-CimInstance Win32_Processor).NumberOfCores")?.parse().ok()
-}
-
-fn ram_total_gb() -> u64 {
-    if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
-        for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("MemTotal:") {
-                if let Some(kb) = rest.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()) {
-                    return (kb / 1_048_576.0).round() as u64;
-                }
-            }
-        }
-    }
-    powershell("[math]::Round((Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize/1MB,0)")
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(0)
-}
-
-fn powershell(script: &str) -> Option<String> {
-    let out = Command::new("powershell.exe")
-        .args(["-NoProfile", "-Command", script])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    // PowerShell prints in the machine's locale: a comma decimal separator
-    // would turn every number this reads into nonsense.
-    let text = String::from_utf8_lossy(&out.stdout).trim().replace(',', ".").replace('\r', "");
-    let first = text.lines().next().unwrap_or("").trim().to_string();
-    (!first.is_empty()).then_some(first)
-}
-
-/// `scripts/tune.sh`'s `slug()`: lower case, the marketing words dropped,
-/// everything else runs of one dash.
-fn slug(text: &str) -> String {
-    let mut stripped = text.to_lowercase().replace("(r)", "").replace("(tm)", "");
-    for word in ["nvidia", "geforce", "intel", "core", "amd", "radeon", "processor"] {
-        stripped = stripped.replace(word, "");
-    }
-    stripped = strip_generation(&stripped);
-    let mut out = String::new();
-    let mut in_run = false;
-    for c in stripped.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c);
-            in_run = false;
-        } else if !in_run {
-            out.push('-');
-            in_run = true;
-        }
-    }
-    out.trim_matches('-').to_string()
 }
 
 /// Whether the thread probe is worth a load at this decode.
@@ -426,20 +340,6 @@ fn slug(text: &str) -> String {
 /// reason the knob is not swept: see [`THREAD_PROBE_MARGIN`].
 fn thread_probe_worth_it(decode: f64, floor: f64) -> bool {
     decode <= floor * THREAD_PROBE_MARGIN
-}
-
-/// The `[0-9]*th gen` in a CPU's marketing name ("12th Gen Intel...").
-fn strip_generation(text: &str) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    while let Some(at) = rest.find("th gen") {
-        let before = &rest[..at];
-        let digits = before.chars().rev().take_while(char::is_ascii_digit).count();
-        out.push_str(&before[..before.len() - digits]);
-        rest = &rest[at + "th gen".len()..];
-    }
-    out.push_str(rest);
-    out
 }
 
 /// One measured sweep point, and what it takes to run it again.
@@ -488,10 +388,10 @@ struct Tuner<'a> {
     home: &'a Path,
     opts: Options,
     machine: Machine,
-    /// The preset file, as `.env` names it (relative to the home), and its
-    /// text - every candidate and the overlay are written from this one
-    /// reading, so a sweep cannot be tuned against a file that changed
-    /// half-way through it.
+    /// The preset file tuned from (relative to the home) and its text -
+    /// every candidate and the overlay are written from this one reading, so
+    /// a sweep cannot be tuned against a file that changed half-way through.
+    /// Never the effective preset: see [`base_preset`].
     preset_rel: String,
     preset_text: String,
     /// `data/tuned/candidates/<preset>-<label>.ini`
@@ -513,9 +413,9 @@ struct Tuner<'a> {
 
 /// Run `golem tune`. Returns the process exit code.
 ///
-/// The work itself is [`sweep`]'s; what is here is only the exit code the
-/// shell speaks in: 2 for flags it could not read, 1 for a run that found
-/// nothing, 0 for a verdict.
+/// The work itself is [`sweep`]'s; what is here is only the exit code: 2
+/// for flags it could not read, 1 for a run that found nothing, 0 for a
+/// verdict.
 pub fn run(home: &Path, args: &[String]) -> i32 {
     let opts = match Options::parse(home, args) {
         Ok(opts) => opts,
@@ -536,16 +436,49 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
 /// The sweep as a function, so its caller can hold the verdict instead of
 /// reading the `RESULT` line back out of a log.
 ///
-/// `golem tune` prints through `out` exactly what it printed to stdout
-/// before; the `--auto` driver passes a file and gets the same bytes in
-/// `data/tuned/auto-<preset>.log`, which is where the shell put them too.
+/// `golem tune` passes stdout as `out`; the `--auto` driver passes a file
+/// and gets the same bytes in `data/tuned/auto-<preset>.log`.
 pub fn sweep(home: &Path, args: &[String], out: Box<dyn Write>) -> Result<Verdict, String> {
     let opts = Options::parse(home, args)?;
     sweep_with(home, opts, out)
 }
 
-fn sweep_with(home: &Path, opts: Options, out: Box<dyn Write>) -> Result<Verdict, String> {
-    Tuner::new(home, opts, out)?.sweep()
+fn sweep_with(home: &Path, opts: Options, mut out: Box<dyn Write>) -> Result<Verdict, String> {
+    if opts.dry_run {
+        return Tuner::new(home, opts, out)?.sweep();
+    }
+    // The machine is probed with the engine stopped: an engine holding a
+    // model would read as "the desktop" and shrink every wall by its size.
+    // Whatever was serving is put back afterwards, on the configuration as it
+    // then stands - the adopted winner after `--adopt`, the old setup
+    // otherwise - so a tune never leaves a candidate serving.
+    let was_up = engine::status(home).up;
+    if was_up {
+        let _ = writeln!(out, "[ .. ] stopping the engine so the card can be measured empty");
+        service::request(home, "down", &Overrides::default(), &mut out)?;
+    }
+    let verdict = Tuner::new(home, opts, out)?.sweep();
+    let mut log = std::fs::File::options()
+        .create(true)
+        .append(true)
+        .open(home.join(RESTART_LOG))
+        .map_err(|e| format!("cannot open {RESTART_LOG}: {e}"))?;
+    let verb = if was_up { "restart" } else { "down" };
+    if let Err(e) = service::request(home, verb, &Overrides::default(), &mut log) {
+        eprintln!("[WARN] the engine was not put back ({verb}): {e}");
+    }
+    verdict
+}
+
+/// The preset a tune starts from: `MODELS_PRESET`, unless that is the
+/// effective preset a previous tune wrote - then the repository's own. A tune
+/// from the effective file would merge an overlay over an overlay, and the
+/// candidates would inherit the last tune's answers as their starting point.
+fn base_preset(home: &Path) -> String {
+    match config::get(home, "MODELS_PRESET") {
+        Some(preset) if !preset.is_empty() && preset != paths::EFFECTIVE_PRESET => preset,
+        _ => paths::BASE_PRESET.to_string(),
+    }
 }
 
 impl<'a> Tuner<'a> {
@@ -555,8 +488,7 @@ impl<'a> Tuner<'a> {
         out: Box<dyn Write>,
     ) -> Result<Tuner<'a>, String> {
         let machine = Machine::probe()?;
-        let preset_rel = state::env_value(home, "MODELS_PRESET")
-            .unwrap_or_else(|| "config/models.ini".to_string());
+        let preset_rel = base_preset(home);
         let preset = home.join(&preset_rel);
         let preset_text = std::fs::read_to_string(&preset)
             .map_err(|e| format!("cannot read {}: {e}", preset.display()))?;
@@ -568,7 +500,7 @@ impl<'a> Tuner<'a> {
         let model_path = home.join("data/models").join(&model_file);
         if !model_path.is_file() {
             return Err(format!(
-                "model file not found: {} (run ./golem pull {})",
+                "model file not found: {} (run golem pull {})",
                 model_path.display(),
                 opts.target
             ));
@@ -576,9 +508,7 @@ impl<'a> Tuner<'a> {
         let facts = gguf::read(&model_path)
             .map_err(|e| format!("cannot read {}: {e}", model_path.display()))?;
         let out_dir = home.join("data/tuned").join(machine.host_slug());
-        let port = state::env_value(home, "LOCAL_AI_PORT")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8000);
+        let port = engine::Endpoint::from_home(home).port;
         let ctx_seed =
             doc.value(&opts.target, "ctx-size").and_then(|v| v.parse().ok()).unwrap_or(4096);
         let ubatch = doc.value(&opts.target, "ubatch-size").unwrap_or_default().to_string();
@@ -616,10 +546,9 @@ impl<'a> Tuner<'a> {
         let engines = self.sweepable_engines()?;
         self.print_plan(&engines);
         if self.opts.dry_run {
-            // The shell echoed each engine's seed and candidate list even in a
-            // dry run, and only then skipped the measuring. A plan that omits
-            // what it would spend is not the plan - and what it spends now is
-            // a search, so the plan says that instead of a list.
+            // A dry run still prints each engine's plan before it skips the
+            // measuring: a plan that omits what it would spend is not the
+            // plan, and what it spends is a search, so the plan says that.
             for engine in &engines {
                 let seed = self.seed_for(engine);
                 self.emit(format_args!(""));
@@ -654,7 +583,7 @@ impl<'a> Tuner<'a> {
         // hold. Say the arithmetic up front rather than discovering it at the
         // end of a long sweep.
         let model_gb = self.model_gb();
-        let free_gb = state::ram_free_gb().unwrap_or(0.0);
+        let free_gb = machine::ram_free_gb().unwrap_or(0.0);
         if self.locks_ram() && free_gb > 0.0 && free_gb < model_gb + SWEEP_RAM_MARGIN_GB {
             self.emit(format_args!(
                 "  [WARN] {free_gb:.1} GB of RAM free and the gate locks {model_gb:.1} GB - \
@@ -764,10 +693,11 @@ impl<'a> Tuner<'a> {
             m.vram_total_mib, m.vram_used_mib
         ));
         self.emit(format_args!(
-            "             wall {} MiB (seed heuristic; the real cliff shows up as a",
-            m.wall_mib()
+            "             wall {} MiB whole-card ({} MiB left for the desktop to grow into);",
+            m.wall_mib(self.opts.headroom_mib),
+            self.opts.headroom_mib
         ));
-        self.emit(format_args!("             prefill collapse during the sweep)"));
+        self.emit(format_args!("             a spill also shows up as a prefill collapse"));
         self.emit(format_args!(
             "  ram free   {:.1} GB   cpu {} threads   ctx {}   ubatch {}",
             m.ram_free_gb, m.cores, self.ctx_seed, self.ubatch
@@ -895,18 +825,14 @@ impl<'a> Tuner<'a> {
 
     /// Measure one split, and say whether it fit.
     ///
-    /// "Fit" is two things, and neither is `wall_mib()`: that number is the
-    /// *seed heuristic* - deliberately conservative, because the placement
-    /// tool should leave room - so a split 60 MiB "over" it still serves at
-    /// full prefill. Rejecting those would walk the search off the good end
-    /// and find nothing.
-    ///
-    /// What is real is the card: a point above `vram_total - the desktop` has
-    /// the driver spilling into system memory, whatever its prefill says. And
-    /// the prefill floor is the project's own rule for "usable at all". A
-    /// milder spill - prefill collapsed but still over the floor - is the
-    /// ranking's business (`tune::exclusion` compares against the engine's
-    /// best), not the search's.
+    /// "Fit" is two things. The whole-card reading stays under the wall - the
+    /// same wall the context search grows against, so a split chosen here is
+    /// one the context can still be judged from. And prefill clears the
+    /// floor, which is the project's rule for "usable at all" and the tell of
+    /// a spill the reading alone can miss. A milder spill - prefill collapsed
+    /// but still over the floor - is the ranking's business
+    /// (`tune::exclusion` compares against the engine's best), not the
+    /// search's.
     ///
     /// `None` is "no measurement at all" - the candidate would not start or
     /// the bench returned nothing - which for the search is the same answer as
@@ -915,8 +841,8 @@ impl<'a> Tuner<'a> {
         let overrides = vec![Entry::new("n-cpu-moe", n.to_string()), Entry::new("fit", "off")];
         self.measure(engine, &format!("{engine}-n{n}"), &overrides)?;
         let point = self.points.last()?;
-        let card = self.machine.vram_total_mib as f64 - self.machine.vram_used_mib as f64;
-        Some(point.prefill >= self.opts.floor.prefill && point.vram_mib <= card)
+        let wall = self.machine.wall_mib(self.opts.headroom_mib) as f64;
+        Some(point.prefill >= self.opts.floor.prefill && point.vram_mib <= wall)
     }
 
     /// The measured split with the best decode on `engine`, if any.
@@ -955,7 +881,7 @@ impl<'a> Tuner<'a> {
         // count rescues, and the probe is a whole model load.
         if self.machine.cores > 4 && self.decode_at(engine, best).is_some_and(|d| thread_probe_worth_it(d, self.opts.floor.decode)) {
             let default =
-                state::env_value(self.home, "CPU_THREADS").and_then(|v| v.parse().ok()).unwrap_or(0);
+                config::get(self.home, "CPU_THREADS").and_then(|v| v.parse().ok()).unwrap_or(0);
             if let Some(t) = self.thread_candidates().first().copied().filter(|t| *t > 0) {
                 if t != default {
                     let mut overrides = base();
@@ -1030,8 +956,8 @@ impl<'a> Tuner<'a> {
             return n;
         }
         let model_gb = self.model_gb().max(1.0);
-        let wall = self.machine.wall_mib() as f64;
-        (40.0 - 40.0 * wall / (model_gb * 1024.0)).max(0.0) as u32
+        let budget = self.machine.model_budget_mib(self.opts.headroom_mib) as f64;
+        (40.0 - 40.0 * budget / (model_gb * 1024.0)).max(0.0) as u32
     }
 
     /// How many layers `llama-fit-params` leaves on the CPU.
@@ -1144,32 +1070,29 @@ impl<'a> Tuner<'a> {
             return None;
         }
 
-        let note = format!("tune {} on {engine}: {label}", self.opts.target);
+        // The bench is this binary's own `bench`, run as a child with the
+        // candidate named in its environment - the same road the gate takes -
+        // so it records its own row, labelled with the candidate preset and
+        // the note. The transcript stays beside the candidate as evidence.
         let out_file = self.cand_dir.join(format!("out-{}-{label}.txt", self.opts.target));
         let args = vec![
+            "bench".to_string(),
             "--runs".to_string(),
             self.opts.runs.to_string(),
             "--prefill".to_string(),
             self.opts.prefill.to_string(),
         ];
-        // The bench is in process now (`crate::bench`), not
-        // `scripts/benchmark-ai.sh` through Git Bash - which is what took a
-        // shell off this path. It reads the model alias through the same
-        // `GOLEM_MODEL_ALIAS` override every other reader uses, because the
-        // tuner measures a candidate the environment does not name; the shell
-        // exported it to the child, and this sets it for the call.
-        let previous = std::env::var_os("GOLEM_MODEL_ALIAS");
-        std::env::set_var("GOLEM_MODEL_ALIAS", &self.opts.target);
-        let mut captured: Vec<u8> = Vec::new();
-        let status = crate::bench::run(self.home, &args, &mut captured);
-        match previous {
-            Some(previous) => std::env::set_var("GOLEM_MODEL_ALIAS", previous),
-            None => std::env::remove_var("GOLEM_MODEL_ALIAS"),
-        }
-        let text = String::from_utf8_lossy(&captured).into_owned();
-        // The transcript stays on disk as the shell's redirect left it: it is
-        // the evidence next to the row this point records.
-        let _ = std::fs::write(&out_file, &text);
+        let status = proc::golem(self.home, &args)
+            .and_then(|mut command| {
+                command
+                    .env("GOLEM_ENGINE", engine)
+                    .env("GOLEM_MODEL_ALIAS", &self.opts.target)
+                    .env("GOLEM_MODELS_PRESET", &candidate_rel)
+                    .env("RECORD_NOTE", format!("tune {} on {engine}: {label}", self.opts.target));
+                proc::run_to_file(command, &out_file)
+            })
+            .unwrap_or(-1);
+        let text = std::fs::read_to_string(&out_file).unwrap_or_default();
         if status != 0 {
             self.emit(format_args!("  the bench exited {status}, skipping"));
             self.say_tail(&text, 6);
@@ -1178,7 +1101,7 @@ impl<'a> Tuner<'a> {
         let Some(bench) = bench_result(&text) else {
             // Say what the bench said. "no usable result" on its own is the
             // kind of message that costs an afternoon: the bench's own last
-            // lines distinguish a server that is down from a script that
+            // lines distinguish a server that is down from a bench that
             // never got as far as measuring anything.
             self.emit(format_args!("  no usable result, skipping - the bench said:"));
             self.say_tail(&text, 6);
@@ -1217,69 +1140,28 @@ impl<'a> Tuner<'a> {
             passed_gate: None,
             depth_decode: None,
         });
-        // Every point is a measurement like any other, and the bench script
-        // does not record on its own - recording lives in the ./golem
-        // wrapper. Without this the database would hold the winner and none
-        // of the evidence.
-        //
-        // `preset_rel` is the candidate, not the preset: the row's `flags`,
-        // `ctx` and `threads` come from the file the recorder reads, so
-        // pointing it at `.env`'s preset would label every sweep point with
-        // the preset's own n-cpu-moe - a configuration that was never
-        // measured. The shell tuner did exactly that, which is how a sweep of
-        // nine splits ended up as nine identical rows.
-        //
-        // The recorder is `golem_core::record` now, not
-        // `scripts/record-result.sh`: this was the last caller of that
-        // script, and the row it built is verified byte-identical to the
-        // shell's on real captures. A failure to record does not lose the
-        // measurement - the sweep carries on, and the reason lands where the
-        // shell put it, in the candidate directory's log.
-        if let Err(e) = crate::measure::record_with(
-            self.home,
-            Kind::Bench,
-            engine,
-            &self.opts.target,
-            &candidate_rel,
-            &note,
-            &text,
-        ) {
-            let _ = std::fs::write(self.cand_dir.join("record.log"), format!("{e}\n"));
-        }
         Some(())
     }
 
-    /// Restart the engine on `preset`, pointed there by the request's
-    /// `GOLEM_*` overrides.
-    ///
-    /// The service is the only process that starts engines now, so the
-    /// candidate's environment travels inside the request rather than in a
-    /// child process's - which is also the one road it cannot be lost on. The
-    /// old indirection existed because `./golem` re-sourced `.env`, and a plain
-    /// `MODELS_PRESET` set here would have been overwritten; `GOLEM_*` names
-    /// survive that, and now they ride the protocol. `lock` says whether this
-    /// restart will pin the weights into RAM - the gate does, a sweep point
-    /// does not - and only a locked load waits for the previous one's memory
-    /// to come back.
+    /// Restart the engine on `preset`, asked of the service with the
+    /// candidate as the request's overrides. `lock` says whether this restart
+    /// will pin the weights into RAM - the gate does, a sweep point does not -
+    /// and only a locked load waits for the previous one's memory to come
+    /// back.
     fn restart(&self, engine: &str, preset: &str, log: &str, lock: bool) -> std::io::Result<i32> {
         if lock {
             self.wait_for_ram();
         }
-        let overrides = vec![
-            ("GOLEM_ENGINE".to_string(), engine.to_string()),
-            ("GOLEM_MODEL_ALIAS".to_string(), self.opts.target.clone()),
-            ("GOLEM_MODELS_PRESET".to_string(), preset.to_string()),
-        ];
+        let overrides = Overrides::default()
+            .with("ENGINE", engine)
+            .with("MODEL_ALIAS", &self.opts.target)
+            .with("MODELS_PRESET", preset);
         let log_path = self.home.join(log);
         if let Some(dir) = log_path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let mut out = std::fs::File::options().create(true).append(true).open(&log_path)?;
-        if !crate::service::running(self.home) {
-            crate::service::ensure_running(self.home, &mut out)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        }
-        Ok(crate::service::send_env(self.home, "restart", &overrides, &mut out).unwrap_or(1))
+        Ok(service::request(self.home, "restart", &overrides, &mut out).unwrap_or(1))
     }
 
     /// Wait until the machine can hold another copy of the model, bounded.
@@ -1295,7 +1177,7 @@ impl<'a> Tuner<'a> {
         let deadline = Instant::now() + RAM_SETTLE;
         let mut said = false;
         loop {
-            let free = state::ram_free_gb().unwrap_or(f64::INFINITY);
+            let free = machine::ram_free_gb().unwrap_or(f64::INFINITY);
             if free >= needed || Instant::now() >= deadline {
                 return;
             }
@@ -1309,12 +1191,13 @@ impl<'a> Tuner<'a> {
         }
     }
 
-    /// Wait for the engine to answer, up to the shell's own patience.
+    /// Wait for the engine to answer `/health` with a success - a loading
+    /// engine answers 503, and benching it then measures the load.
     fn wait_healthy(&self) -> bool {
         let endpoint = engine::Endpoint { port: self.port, api_key: String::new() };
         let deadline = Instant::now() + HEALTH_SLEEP * HEALTH_TRIES;
         while Instant::now() < deadline {
-            if engine::get(&endpoint, "/health").is_some() {
+            if engine::healthy(&endpoint) {
                 return true;
             }
             std::thread::sleep(HEALTH_SLEEP);
@@ -1329,7 +1212,7 @@ impl<'a> Tuner<'a> {
     ///
     /// The gate is why this is a loop and not one call to
     /// `golem_core::tune::winner`: gating costs a restart and a 200K needle,
-    /// so the shell only ever gates candidates in rank order until one
+    /// so candidates are gated one at a time in rank order until one
     /// passes. This is that loop; `winner` is the same rule stated as a
     /// function, for callers that already know every verdict.
     fn pick_winner(&mut self) -> Result<Verdict, String> {
@@ -1384,19 +1267,21 @@ impl<'a> Tuner<'a> {
             let n_cpu_moe = self.points[key].n_cpu_moe.clone();
 
             let gate_tokens = (ctx * 9 / 10).min(self.opts.gate_tokens_max);
-            let overlay = self.write_overlay(&engine, key)?;
+            let overlay = self.overlay_text(&engine, key);
             if !self.opts.gate {
+                self.promote(&engine, &overlay)?;
                 return Ok(self.verdict(key, &engine, n_cpu_moe, None));
             }
+            let staged = self.stage(&engine, &overlay)?;
 
             self.emit(format_args!("[ .. ] gating {engine} {}: restarting and running the {gate_tokens}-token needle (this takes a while)...", self.points[key].label));
-            let restarted = matches!(self.restart(&engine, &overlay, GATE_LOG, true), Ok(0));
+            let restarted = matches!(self.restart(&engine, &staged, GATE_LOG, true), Ok(0));
             if !restarted || !self.wait_healthy() {
                 self.emit(format_args!("  [WARN] the engine did not come back on the effective preset - trying the next candidate"));
                 self.say_launcher_tail(GATE_LOG, 6);
                 continue;
             }
-            let Some(eval) = self.gate(gate_tokens) else {
+            let Some(eval) = self.gate(&engine, &staged, gate_tokens) else {
                 self.emit(format_args!("  [WARN] the eval produced no result - trying the next candidate"));
                 continue;
             };
@@ -1411,6 +1296,7 @@ impl<'a> Tuner<'a> {
                         }
                     }
                     self.emit(format_args!("[ OK ] eval gate PASSED"));
+                    self.promote(&engine, &overlay)?;
                     self.points[key].passed_gate = Some(true);
                     self.points[key].depth_decode = depth;
                     return Ok(self.verdict(key, &engine, n_cpu_moe, Some(gate_tokens)));
@@ -1447,7 +1333,7 @@ impl<'a> Tuner<'a> {
     ///
     /// `--ctx-ladder` runs the doubling ladder instead, until a measured
     /// sweep says the prediction is at least as good
-    /// (docs/plan-smart-tune.md, step 4).
+    /// (docs/roadmap.md).
     fn maximize_ctx(&mut self, candidate: usize) -> usize {
         let engine = self.points[candidate].engine.clone();
         let overrides = self.points[candidate].overrides.clone();
@@ -1466,20 +1352,17 @@ impl<'a> Tuner<'a> {
             return self.maximize_ctx_ladder(candidate, &engine, &overrides);
         }
 
-        let mut current = self.ctx_seed;
-        let ceiling = self.ctx_ceiling.max(current);
-        let wall = self.machine.wall_mib();
+        // The winner's own measurement is the line's first point: the search
+        // holds it from the start (see `ContextSearch`).
+        let seed = &self.points[candidate];
+        let mut search = ContextSearch::new(
+            seed.ctx,
+            seed.vram_mib as u64,
+            self.machine.wall_mib(self.opts.headroom_mib),
+            self.ctx_ceiling,
+        );
         let mut best = candidate;
-        // The points that fit, as (context, VRAM MiB) - the slope comes from
-        // the two highest of them, and a failed probe is not one of them
-        // unless it went over the wall, where it is a real measurement.
-        let mut fits: Vec<(u64, u64)> = Vec::new();
-        let mut probe = Probe::None;
-        loop {
-            let next = match tune::next_predicted(&fits, wall, ceiling, &probe) {
-                Rung::Stop => break,
-                Rung::Grow(next) => next,
-            };
+        while let Rung::Grow(next) = search.next() {
             let mut with_ctx = overrides.clone();
             with_ctx.push(Entry::new("ctx-size", next.to_string()));
             let label = format!("{engine}-ctx{next}");
@@ -1487,36 +1370,19 @@ impl<'a> Tuner<'a> {
                 break;
             }
             let measured = self.points.len() - 1;
-            let vram = self.points[measured].vram_mib;
-            let decode = self.points[measured].decode;
-            let over_wall = vram > wall as f64;
-            let under_floor = decode < self.opts.floor.decode;
-            if over_wall || under_floor {
-                // Under the floor wins when both are true: the spill is what
-                // made the decode slow, and the VRAM reading is where the
-                // spill ended up rather than what the context costs - which
-                // is the case the prediction must not treat as a point.
-                probe = if under_floor {
-                    Probe::UnderFloor { attempt: next }
-                } else {
-                    Probe::OverWall { attempt: next, vram_mib: vram as u64 }
-                };
-                self.emit(format_args!(
-                    "  context {next} does not fit ({:.1} t/s decode, {:.0} MiB VRAM{})",
-                    decode,
-                    vram,
-                    if under_floor { ", spilled" } else { "" }
-                ));
-                continue;
+            let (vram, decode) = (self.points[measured].vram_mib, self.points[measured].decode);
+            match search.record(next, vram as u64, decode < self.opts.floor.decode) {
+                Probe::Fits => {
+                    best = measured;
+                    self.emit(format_args!(
+                        "  context grows to {next} ({decode:.1} t/s decode, {vram:.0} MiB VRAM)"
+                    ));
+                }
+                probe => self.emit(format_args!(
+                    "  context {next} does not fit ({decode:.1} t/s decode, {vram:.0} MiB VRAM{})",
+                    if matches!(probe, Probe::UnderFloor { .. }) { ", spilled" } else { ", over the wall" }
+                )),
             }
-            current = next;
-            best = measured;
-            fits.push((next, vram as u64));
-            probe = Probe::Fits;
-            self.emit(format_args!(
-                "  context grows to {current} ({:.1} t/s decode, {:.0} MiB VRAM)",
-                self.points[best].decode, self.points[best].vram_mib
-            ));
         }
         if best != candidate {
             self.emit(format_args!("[ .. ] context maximized: {engine} now serves {} tokens", self.points[best].ctx));
@@ -1529,7 +1395,7 @@ impl<'a> Tuner<'a> {
     /// `golem_core::tune::next_context`: double toward the ceiling, and after
     /// a failed rung try one midpoint. It is what the prediction replaced,
     /// and it stays reachable until a measured sweep compares the two
-    /// (docs/plan-smart-tune.md, step 4) - a tuner that finds a different
+    /// (docs/roadmap.md) - a tuner that finds a different
     /// answer in fewer loads is only a win if the answer is at least as good.
     fn maximize_ctx_ladder(
         &mut self,
@@ -1553,7 +1419,7 @@ impl<'a> Tuner<'a> {
                 break;
             }
             let measured = self.points.len() - 1;
-            let over_wall = self.points[measured].vram_mib > self.machine.wall_mib() as f64;
+            let over_wall = self.points[measured].vram_mib > self.machine.wall_mib(self.opts.headroom_mib) as f64;
             let under_floor = self.points[measured].decode < self.opts.floor.decode;
             if over_wall || under_floor {
                 // One midpoint between the last good context and this one,
@@ -1565,7 +1431,7 @@ impl<'a> Tuner<'a> {
                     let mid_label = format!("{engine}-ctx{mid}");
                     if self.measure(engine, &mid_label, &with_mid).is_some() {
                         let at = self.points.len() - 1;
-                        if self.points[at].vram_mib <= self.machine.wall_mib() as f64
+                        if self.points[at].vram_mib <= self.machine.wall_mib(self.opts.headroom_mib) as f64
                             && self.points[at].decode >= self.opts.floor.decode
                         {
                             best = at;
@@ -1591,16 +1457,10 @@ impl<'a> Tuner<'a> {
         best
     }
 
-    /// Write the winner's overlay, and the effective preset it feeds.
-    ///
-    /// Two files, as the shell writes them: the per-engine overlay records
-    /// what won on this engine, and `models.effective.ini` is the preset
-    /// file with that overlay merged in - the file a launcher actually
-    /// serves after `--adopt`.
-    fn write_overlay(&self, engine: &str, key: usize) -> Result<String, String> {
+    /// The winner's overlay: what it changes over the base preset, with the
+    /// sweep that chose it as comments.
+    fn overlay_text(&self, engine: &str, key: usize) -> String {
         let measured = &self.points[key];
-        let dir = self.out_dir.join(engine);
-        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         let sweep: String = self
             .points
             .iter()
@@ -1610,46 +1470,89 @@ impl<'a> Tuner<'a> {
         let mut overlay = String::new();
         overlay.push_str(&format!("; Auto-tuned by golem tune on {} for this machine.\n", time::now_iso()));
         overlay.push_str(&format!(
-            "; Winner for engine {engine} ({}); the launchers merge it over {}.\n",
+            "; Winner for engine {engine} ({}), merged over {}.\n",
             measured.label, self.preset_rel
         ));
         overlay.push_str(&format!("; Sweep (label=decode t/s): {sweep}\n"));
         overlay.push_str(&format!("[{}]\n", self.opts.target));
-        // The bookkeeping key comes last and only once, as the shell writes
-        // it: it is in every candidate's overrides, and a duplicate would be
-        // a line the engine reads twice.
+        // `fit = off` is in every candidate's overrides; it is written last
+        // and once, because a duplicate is a line the engine reads twice.
         for entry in measured.overrides.iter().filter(|e| e.key != "fit") {
             overlay.push_str(&entry.line());
             overlay.push('\n');
         }
         overlay.push_str("fit = off\n");
-
-        let overlay_path = dir.join(format!("{}.ini", self.opts.target));
-        std::fs::write(&overlay_path, &overlay)
-            .map_err(|e| format!("cannot write {}: {e}", overlay_path.display()))?;
-        let effective = ini::write_overlay(&self.preset_text, &overlay);
-        let effective_rel = "data/tuned/models.effective.ini".to_string();
-        std::fs::write(self.home.join(&effective_rel), effective)
-            .map_err(|e| format!("cannot write {effective_rel}: {e}"))?;
-        self.emit(format_args!("[ OK ] overlay: {}", overlay_path.strip_prefix(self.home).unwrap_or(&overlay_path).display()));
-        Ok(effective_rel)
+        overlay
     }
 
-    /// `eval --long N`, read through the RESULT-line contract.
-    fn gate(&self, tokens: u64) -> Option<evalparse::Eval> {
+    /// The effective preset with `overlay` standing in for this preset's:
+    /// the base, with every gated overlay this machine has for `engine`
+    /// merged in. An overlay for a section the base does not have is skipped
+    /// - merged, it would be a section with no model to serve.
+    fn effective_text(&self, engine: &str, overlay: &str) -> String {
+        let base = ini::parse(&self.preset_text);
+        let mut text = self.preset_text.clone();
+        let own = format!("{}.ini", self.opts.target);
+        let mut others: Vec<PathBuf> = std::fs::read_dir(self.out_dir.join(engine))
+            .map(|entries| entries.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        others.sort();
+        for path in others {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let section = name.trim_end_matches(".ini");
+            if !name.ends_with(".ini") || name == own || base.get(section).is_none() {
+                continue;
+            }
+            if let Ok(other) = std::fs::read_to_string(&path) {
+                text = ini::write_overlay(&text, &other);
+            }
+        }
+        ini::write_overlay(&text, overlay)
+    }
+
+    /// The preset file the gate serves the winner from: a candidate, so
+    /// nothing that serves is touched until the gate passes. Writing the
+    /// effective preset first is what left a failed or interrupted tune's
+    /// ungated winner as the machine's configuration.
+    fn stage(&self, engine: &str, overlay: &str) -> Result<String, String> {
+        let rel = format!("data/tuned/candidates/{}-gate.ini", self.opts.target);
+        std::fs::create_dir_all(&self.cand_dir).map_err(|e| format!("cannot create {}: {e}", self.cand_dir.display()))?;
+        std::fs::write(self.home.join(&rel), self.effective_text(engine, overlay))
+            .map_err(|e| format!("cannot write {rel}: {e}"))?;
+        Ok(rel)
+    }
+
+    /// Make the winner this machine's: its overlay under `data/tuned/<host>/`
+    /// and the effective preset rebuilt from every overlay there.
+    fn promote(&self, engine: &str, overlay: &str) -> Result<(), String> {
+        let dir = self.out_dir.join(engine);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        let overlay_path = dir.join(format!("{}.ini", self.opts.target));
+        let effective = self.effective_text(engine, overlay);
+        std::fs::write(&overlay_path, overlay)
+            .map_err(|e| format!("cannot write {}: {e}", overlay_path.display()))?;
+        std::fs::write(self.home.join(paths::EFFECTIVE_PRESET), effective)
+            .map_err(|e| format!("cannot write {}: {e}", paths::EFFECTIVE_PRESET))?;
+        self.emit(format_args!(
+            "[ OK ] overlay: {}",
+            overlay_path.strip_prefix(self.home).unwrap_or(&overlay_path).display()
+        ));
+        Ok(())
+    }
+
+    /// `eval --long N` against the staged preset, read through the
+    /// RESULT-line contract. A child, like the bench, so it records its own
+    /// row under the preset it actually measured.
+    fn gate(&self, engine: &str, preset: &str, tokens: u64) -> Option<evalparse::Eval> {
         let out_file = self.out_dir.join(format!("eval-{}.txt", self.opts.target));
-        // This binary's own verb, a child of the tuner - the measurement and the
-        // thing it measures stay in one process tree, and the alias rides the
-        // child's environment the way it always has.
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("cannot find this binary to run the gate: {e}"))
-            .ok()?;
-        let mut command = std::process::Command::new(exe);
+        let args = vec!["eval".to_string(), "--long".to_string(), tokens.to_string()];
+        let mut command = proc::golem(self.home, &args).ok()?;
         command
-            .args(["eval".to_string(), "--long".to_string(), tokens.to_string()])
+            .env("GOLEM_ENGINE", engine)
             .env("GOLEM_MODEL_ALIAS", &self.opts.target)
-            .env("GOLEM_HOME", self.home);
-        runner::run_command(command, &out_file).ok()?;
+            .env("GOLEM_MODELS_PRESET", preset)
+            .env("RECORD_NOTE", format!("tune {}: {tokens}-token needle gate", self.opts.target));
+        proc::run_to_file(command, &out_file).ok()?;
         let text = std::fs::read_to_string(&out_file).unwrap_or_default();
         for line in text.lines().rev().filter(|l| l.trim_start().starts_with("RESULT")) {
             self.emit(format_args!("    {line}"));
@@ -1713,22 +1616,24 @@ impl<'a> Tuner<'a> {
         ));
 
         if self.opts.adopt {
-            let env = self.home.join(".env");
-            std::fs::copy(&env, self.home.join(".env.bak"))
-                .map_err(|e| format!("cannot back up .env: {e}"))?;
-            state::env_adopt(self.home, "ENGINE", &verdict.engine)
-                .map_err(|e| format!("cannot write .env: {e}"))?;
-            state::env_adopt(self.home, "MODELS_PRESET", "data/tuned/models.effective.ini")
-                .map_err(|e| format!("cannot write .env: {e}"))?;
+            let config = self.home.join("golem.toml");
+            if config.is_file() {
+                std::fs::copy(&config, self.home.join("golem.toml.bak"))
+                    .map_err(|e| format!("cannot back up golem.toml: {e}"))?;
+            }
+            for (key, value) in [("ENGINE", verdict.engine.as_str()), ("MODELS_PRESET", paths::EFFECTIVE_PRESET)] {
+                config::set(self.home, key, value).map_err(|e| format!("cannot write golem.toml: {e}"))?;
+            }
             self.emit(format_args!(
-                "[ OK ] adopted in .env (backup: .env.bak): ENGINE={}, MODELS_PRESET=data/tuned/models.effective.ini",
-                verdict.engine
+                "[ OK ] adopted in golem.toml (backup: golem.toml.bak): ENGINE = {}, MODELS_PRESET = {}",
+                verdict.engine,
+                paths::EFFECTIVE_PRESET
             ));
         } else {
             self.emit(format_args!(""));
-            self.emit(format_args!("  to adopt, either re-run with --adopt or set in .env:"));
-            self.emit(format_args!("    ENGINE=\"{}\"", verdict.engine));
-            self.emit(format_args!("    MODELS_PRESET=\"data/tuned/models.effective.ini\""));
+            self.emit(format_args!("  to adopt, re-run with --adopt or set in golem.toml:"));
+            self.emit(format_args!("    ENGINE = \"{}\"", verdict.engine));
+            self.emit(format_args!("    MODELS_PRESET = \"{}\"", paths::EFFECTIVE_PRESET));
         }
         Ok(())
     }
@@ -1767,9 +1672,8 @@ fn candidate_overrides(locks: bool, overrides: &[Entry]) -> Vec<Entry> {
 /// The distinct layer names in a `-ot` placement pattern.
 ///
 /// The tool prints its pattern with the dots escaped for its own regex -
-/// `blk\.3\.ffn_.*_exps.=CPU` - and the shell greps `blk\\\.[0-9]*` (a
-/// literal backslash, a literal dot, digits) and counts the unique hits.
-/// Splitting the pattern on non-alphanumeric characters instead finds no
+/// `blk\.3\.ffn_.*_exps.=CPU` - so a layer is `blk`, a backslash, a dot and
+/// digits, and the answer is the count of unique ones. Splitting the pattern on non-alphanumeric characters instead finds no
 /// `blk.` token at all, because the backslash is one of them; the seed then
 /// silently falls back to the preset's own split, and the sweep starts from
 /// the wrong place. That is the bug this function exists to not have.
@@ -1823,7 +1727,7 @@ mod tests {
     #[test]
     fn layer_names_reads_the_escaped_placement_pattern() {
         // What llama-fit-params actually prints, escaping the dots for its own
-        // regex: the shell counts the unique `blk\.N` and so must this.
+        // regex: the unique `blk\.N` are the layers.
         let pattern = "blk\\.3\\.ffn_.*_exps.=CPU";
         assert_eq!(layer_names(pattern).len(), 1, "{:?}", layer_names(pattern));
         assert!(layer_names(pattern).contains("blk.3"));
@@ -1840,8 +1744,7 @@ mod tests {
     }
 
     #[test]
-    fn the_slug_is_the_one_the_recorder_writes() {
-        // The reference box, exactly as scripts/tune.sh computes it.
+    fn the_slug_and_the_wall_are_the_reference_boxs() {
         let machine = Machine {
             gpu: "NVIDIA GeForce RTX 3060".into(),
             vram_total_mib: 12288,
@@ -1853,26 +1756,47 @@ mod tests {
             cpu: "12th Gen Intel(R) Core(TM) i7-12700KF".into(),
         };
         assert_eq!(machine.host_slug(), "rtx-3060_12g_32g_i7-12700kf");
-        assert_eq!(machine.wall_mib(), 12288 - 632 - 500);
+        // The wall is in the bench's own units - whole-card use, desktop
+        // included - so the desktop is not subtracted a second time.
+        assert_eq!(machine.wall_mib(1024), 12288 - 1024);
+        assert_eq!(machine.model_budget_mib(1024), 12288 - 632 - 1024);
     }
 
     #[test]
-    fn the_slug_drops_the_marketing_words() {
-        assert_eq!(slug("NVIDIA GeForce RTX 4090"), "rtx-4090");
-        assert_eq!(slug("AMD Radeon RX 7900 XTX"), "rx-7900-xtx");
-        assert_eq!(slug("13th Gen Intel(R) Core(TM) i9-13900K"), "i9-13900k");
-        assert_eq!(slug("Apple M3 Max"), "apple-m3-max");
-        assert_eq!(slug(""), "");
+    fn a_tune_starts_from_the_base_preset_never_from_its_own_output() {
+        let dir = std::env::temp_dir().join(format!("golem-tune-base-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        assert_eq!(base_preset(&dir), "config/models.ini");
+        std::fs::write(dir.join("golem.toml"), "MODELS_PRESET = \"data/tuned/models.effective.ini\"\n").expect("write");
+        assert_eq!(base_preset(&dir), "config/models.ini");
+        std::fs::write(dir.join("golem.toml"), "MODELS_PRESET = \"config/mine.ini\"\n").expect("write");
+        assert_eq!(base_preset(&dir), "config/mine.ini");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn the_generation_number_goes_with_the_generation() {
-        assert_eq!(strip_generation("12th gen intel"), " intel");
-        assert_eq!(strip_generation("no generation here"), "no generation here");
-        // Every one of them goes, as sed's /g does.
-        assert_eq!(strip_generation("1th gen2th gen"), "");
-        // The digits belong to the generation, not to whatever precedes it.
-        assert_eq!(strip_generation("ryzen 9 12th gen"), "ryzen 9 ");
+    fn the_effective_preset_merges_every_gated_overlay_the_base_can_serve() {
+        let dir = std::env::temp_dir().join(format!("golem-tune-effective-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let host = dir.join("data/tuned/host/llama.cpp");
+        std::fs::create_dir_all(&host).expect("dir");
+        // Another preset's earlier tune, and a stale overlay for a section
+        // the base no longer has.
+        std::fs::write(host.join("b.ini"), "[b]\nn-cpu-moe = 7\n").expect("write");
+        std::fs::write(host.join("gone.ini"), "[gone]\nctx-size = 9\n").expect("write");
+        std::fs::write(host.join("a.ini"), "[a]\nn-cpu-moe = 1\n").expect("write");
+        let home: &'static Path = Box::leak(dir.clone().into_boxed_path());
+        let mut tuner = tuner_at(home, 20, 12);
+        tuner.opts.target = "a".into();
+        tuner.out_dir = dir.join("data/tuned/host");
+        tuner.preset_text = "[a]\nmodel = a.gguf\nn-cpu-moe = 30\n[b]\nmodel = b.gguf\n".into();
+        let text = tuner.effective_text("llama.cpp", "[a]\nn-cpu-moe = 35\n");
+        let doc = ini::parse(&text);
+        assert_eq!(doc.value("a", "n-cpu-moe"), Some("35"), "this run's overlay, not the old one: {text}");
+        assert_eq!(doc.value("b", "n-cpu-moe"), Some("7"), "the other preset keeps its tune: {text}");
+        assert!(doc.get("gone").is_none(), "no section without a model: {text}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1972,13 +1896,13 @@ mod tests {
     }
 
     #[test]
-    fn flags_are_read_and_env_supplies_the_defaults() {
+    fn flags_are_read_and_the_file_supplies_the_defaults() {
         let dir = std::env::temp_dir().join(format!("golem-tune-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("dir");
         std::fs::write(
-            dir.join(".env"),
-            "MODEL_ALIAS=\"the-default\"\nTUNE_MIN_DECODE=30\nTUNE_MIN_PREFILL=400\nTUNE_CTX_POLICY=65536\n",
+            dir.join("golem.toml"),
+            "MODEL_ALIAS=\"the-default\"\nTUNE_MIN_DECODE=30\nTUNE_MIN_PREFILL=400\nTUNE_CTX_POLICY=65536\nTUNE_VRAM_HEADROOM_MIB=800\n",
         )
         .expect("write");
 
@@ -1986,17 +1910,18 @@ mod tests {
         assert_eq!(opts.target, "the-default");
         assert_eq!(opts.floor.decode, 30.0);
         assert_eq!(opts.floor.prefill, 400.0);
-        assert_eq!(opts.floor.depth_decode, 15.0, "the one .env did not move");
+        assert_eq!(opts.floor.depth_decode, 15.0, "the one the file did not set");
         assert_eq!(opts.ctx, CtxPolicy::Pinned(65536));
+        assert_eq!(opts.headroom_mib, 800);
         assert!(opts.gate && opts.refine && !opts.dry_run);
 
         // The ladder is what `max` was before the prediction: still reachable,
         // from the file or from the flag, until a sweep compares the two.
-        std::fs::write(dir.join(".env"), "TUNE_CTX_POLICY=ladder\n").expect("write");
+        std::fs::write(dir.join("golem.toml"), "TUNE_CTX_POLICY = \"ladder\"\n").expect("write");
         assert_eq!(Options::parse(&dir, &[]).expect("ladder").ctx, CtxPolicy::Ladder);
         let ladder: Vec<String> =
             ["smoke", "--ctx-ladder"].iter().map(|s| s.to_string()).collect();
-        std::fs::write(dir.join(".env"), "TUNE_CTX_POLICY=max\n").expect("write");
+        std::fs::write(dir.join("golem.toml"), "TUNE_CTX_POLICY = \"max\"\n").expect("write");
         assert_eq!(Options::parse(&dir, &ladder).expect("flag").ctx, CtxPolicy::Ladder);
         // And the default is the prediction.
         assert_eq!(Options::parse(&dir, &[]).expect("max").ctx, CtxPolicy::Max);
@@ -2012,7 +1937,7 @@ mod tests {
         assert!(!opts.gate && !opts.refine && opts.dry_run && opts.adopt);
         assert_eq!(opts.candidates, vec![2, 4, 6]);
         assert_eq!(opts.engines, vec!["llama.cpp".to_string()]);
-        assert_eq!(opts.floor.decode, 5.0, "a flag beats .env");
+        assert_eq!(opts.floor.decode, 5.0, "a flag beats the file");
         assert_eq!(opts.ctx, CtxPolicy::Max);
         std::fs::remove_dir_all(&dir).ok();
     }

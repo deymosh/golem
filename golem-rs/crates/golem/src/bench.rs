@@ -1,22 +1,17 @@
 //! `golem bench`: decode and prefill throughput, measured against the engine.
 //!
-//! The port of `scripts/benchmark-ai.sh`, and the reason it is a port rather
-//! than a wrapper: `bench` is on the critical path of "clone, one command, a
-//! tuned running model", and a bash script puts a shell back on that path.
-//!
 //! Numbers come from the server's own per-request `timings`, so HTTP and
 //! queueing are excluded; prompt caching is off per request, so the prefill
 //! number is a real prefill. Quality - tool calls, the long-context needle -
 //! is [`crate::eval`]'s.
 //!
-//! The script is the contract, not a sketch: a human reads this output, and
-//! `golem_core::record` parses its `RESULT` line. Every line printed here,
-//! the arithmetic behind it, and the two request bodies are the script's -
-//! including the prefill prompt's generator, so the same token counts come
-//! out. What is deliberately *not* the script's is the transport: the shell
-//! needed `curl --noproxy '*'` on every call, and this speaks HTTP to the
-//! socket itself (see [`crate::engine`]), so a system proxy cannot be picked
-//! up by accident.
+//! The output is a contract: a human reads it, and `golem_core::record`
+//! parses its `RESULT` line. The two prompts are fixed - the decode prompt
+//! verbatim, the prefill prompt from a deterministic generator - because
+//! every row in `bench/results.jsonl` was measured with them, and a new row
+//! is only comparable with the old ones while they stay the same. The
+//! transport is this binary's own HTTP over the socket (see
+//! [`crate::engine`]), so a system proxy cannot be picked up by accident.
 
 use std::io::Write;
 use std::path::Path;
@@ -25,15 +20,14 @@ use std::time::Duration;
 
 use golem_core::json::{self, Value};
 
+use crate::config;
 use crate::engine;
-use crate::state;
 
-/// The whole budget for one measured request, as `curl --max-time 1800` had
-/// it: a 30K-token prefill takes minutes, and silence in the middle is not a
-/// dead server.
+/// The whole budget for one measured request: a 30K-token prefill takes
+/// minutes, and silence in the middle is not a dead server.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(1800);
 
-/// The health check's, as `curl --max-time 5` had it.
+/// The health check's budget: a live engine answers at once.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How many decode runs when the line names none.
@@ -42,12 +36,12 @@ const DEFAULT_RUNS: u32 = 3;
 /// How long a prefill prompt when the line names none. `0` skips the test.
 const DEFAULT_PREFILL: u32 = 30000;
 
-/// The decode prompt, verbatim from the script: 600 tokens of code
-/// generation is the shape an agentic coding client asks for.
+/// The decode prompt: 600 tokens of code generation is the shape an agentic
+/// coding client asks for. Fixed, so rows stay comparable.
 const DECODE_PROMPT: &str = "Write a complete Python module implementing an LRU cache with TTL expiry, thread safety, a decorator interface, type hints and docstrings, followed by pytest unit tests covering eviction, expiry and concurrency. Output only code.";
 
-/// `golem bench [--runs N] [--prefill TOKENS]`, printing what the script
-/// prints and returning the script's exit code.
+/// `golem bench [--runs N] [--prefill TOKENS]`: 0 when every request was
+/// answered, 1 otherwise.
 pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
     run_with(home, args, out, &vram_used)
 }
@@ -65,8 +59,8 @@ fn run_with(
     out: &mut dyn Write,
     vram: &dyn Fn() -> Option<String>,
 ) -> i32 {
-    // The arguments come first, as the script's do: a bad command line is
-    // refused before anything is printed or any request is made.
+    // The arguments come first: a bad command line is refused before
+    // anything is printed or any request is made.
     let options = match parse_args(args) {
         Ok(options) => options,
         Err(message) => {
@@ -76,7 +70,7 @@ fn run_with(
     };
 
     let Some(base) = engine::Base::from_home(home) else {
-        let configured = state::env_value(home, "LOCAL_AI_BASE_URL").unwrap_or_default();
+        let configured = config::get(home, "LOCAL_AI_BASE_URL").unwrap_or_default();
         let _ = writeln!(
             out,
             "[FAIL] cannot reach the engine: LOCAL_AI_BASE_URL={configured:?} is not http:// \
@@ -85,15 +79,15 @@ fn run_with(
         return 1;
     };
 
-    // The shell's `${GOLEM_MODEL_ALIAS:-${MODEL_ALIAS:-local-model}}`. The
-    // `GOLEM_` name is the per-run override the auto-tuner sweeps presets
-    // with, and it is never a key in `.env`.
-    let model = state::override_value(home, "GOLEM_MODEL_ALIAS", "MODEL_ALIAS")
+    // The per-run override first (`GOLEM_MODEL_ALIAS`, how the auto-tuner
+    // points a bench at each preset), then golem.toml, then the engine's
+    // default name.
+    let model = config::resolved(home, "MODEL_ALIAS")
         .unwrap_or_else(|| "local-model".to_string());
 
     let url = format!("http://{}:{}{}", base.host, base.port, base.path("/v1/chat/completions"));
 
-    // The banner, before the health check - the script's order.
+    // The banner first, so a failed health check still says what it tried.
     let _ = writeln!(out);
     let _ = writeln!(out, "============================================================");
     let _ = writeln!(out, " SPEED BENCHMARK  ({url})");
@@ -107,7 +101,7 @@ fn run_with(
     }
 
     // Warmup: it proves the API key before the runs are spent on 401s, and
-    // it warms the model. `curl --fail`, so a rejected key lands here.
+    // it warms the model. Any non-2xx answer - a rejected key - stops here.
     let warmup = warmup_body(&model);
     match engine::post_json(&base, "/v1/chat/completions", &warmup, REQUEST_TIMEOUT) {
         Some(reply) if reply.ok() => {}
@@ -132,15 +126,15 @@ fn run_with(
         let Some(reply) = engine::post_json(&base, "/v1/chat/completions", &body, REQUEST_TIMEOUT)
             .filter(|r| r.ok())
         else {
-            // The shell's `set -e` aborted here; so does this, minus curl's
-            // own error text, which it has no way to reproduce.
+            // One failed run fails the bench: a best-of-two is not the
+            // number the row claims.
             let _ = writeln!(out, "[FAIL] decode request failed");
             return 1;
         };
         let value = parse_body(&reply.body);
         let tps = timing(&value, "predicted_per_second").unwrap_or(0.0);
-        // A model without speculative decoding has no `draft_n` at all, and
-        // the script's `DN="${DN:-0}"` is what keeps that from being an error.
+        // A model without speculative decoding has no `draft_n` at all,
+        // which counts as no drafts rather than an error.
         draft_n += timing(&value, "draft_n").unwrap_or(0.0) as u64;
         draft_ok += timing(&value, "draft_n_accepted").unwrap_or(0.0) as u64;
         let _ = writeln!(
@@ -151,13 +145,13 @@ fn run_with(
         speeds.push(tps);
     }
 
-    // `sort -g`, then the last is the best and the middle is the median. An
-    // empty list (--runs 0) reads as 0.0 on both, as the awk's `v[NR]` did.
+    // Sorted, the last is the best and the middle is the median. An empty
+    // list (--runs 0) reads as 0.0 on both.
     speeds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let best = speeds.last().copied().unwrap_or(0.0);
     let median = median(&speeds);
-    // The script's `[[ "${DRAFT_N}" -gt 0 ]]`: no drafts measured means the
-    // acceptance is the literal `-`, not `0%`.
+    // No drafts measured means the acceptance is the literal `-`, not `0%`:
+    // a model with no head did not accept nothing, it drafted nothing.
     let accept = if draft_n > 0 {
         format!("{:.0}%", 100.0 * draft_ok as f64 / draft_n as f64)
     } else {
@@ -211,7 +205,7 @@ fn run_with(
 // The command line
 // ---------------------------------------------------------------
 
-/// The parsed command line: the script's two options and their defaults.
+/// The parsed command line: two options and their defaults.
 #[derive(Debug, PartialEq, Eq)]
 struct Options {
     runs: u32,
@@ -220,9 +214,8 @@ struct Options {
 
 /// `--runs N` and `--prefill TOKENS`, in either order.
 ///
-/// Anything else is the script's own `unknown arg: <arg>` and exit 1. A flag
-/// with a missing or non-numeric value is where the script would have died
-/// inside `seq` or under `set -u`, so the message is this port's own.
+/// Anything else is `unknown arg: <arg>` and exit 1, as is a flag with a
+/// missing or non-numeric value.
 fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut options = Options { runs: DEFAULT_RUNS, prefill: DEFAULT_PREFILL };
     let mut i = 0;
@@ -253,23 +246,20 @@ fn number(args: &[String], at: usize, flag: &str) -> Result<u32, String> {
 // ---------------------------------------------------------------
 
 /// The parsed body, or `null` for an answer that is not JSON at all - the
-/// timings are then simply missing, which is the script's empty string.
+/// timings are then simply missing.
 fn parse_body(text: &str) -> Value {
     json::parse(text).unwrap_or(Value::Null)
 }
 
-/// One number from the server's per-request `timings`.
-///
-/// The script greps the raw text for `"key": <number>`; reading the parsed
-/// object is the same thing done properly. A missing key is `None`, exactly
-/// as the grep finds nothing - and pretty-printed JSON, which the script's
-/// `" *` also tolerated, needs no special case here.
+/// One number from the server's per-request `timings`, or `None` when the
+/// key is missing. Read from the parsed object, so compact and
+/// pretty-printed answers read the same.
 fn timing(value: &Value, key: &str) -> Option<f64> {
     value.get("timings")?.get(key)?.as_f64()
 }
 
-/// A token count as the script printed it: the number, or nothing at all
-/// when the key is missing (the `%s` of an empty grep).
+/// A token count as printed: the number, or nothing at all when the key is
+/// missing.
 fn token_count(value: &Value, key: &str) -> String {
     match timing(value, key) {
         Some(n) => format!("{n:.0}"),
@@ -277,8 +267,8 @@ fn token_count(value: &Value, key: &str) -> String {
     }
 }
 
-/// The middle value, or the mean of the two middles when the count is even -
-/// the awk's `(NR%2) ? v[(NR+1)/2] : (v[NR/2]+v[NR/2+1])/2`, on a sorted list.
+/// The middle value of a sorted list, or the mean of the two middles when
+/// the count is even.
 fn median(sorted: &[f64]) -> f64 {
     match sorted.len() {
         0 => 0.0,
@@ -290,8 +280,8 @@ fn median(sorted: &[f64]) -> f64 {
 /// `nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits`, first
 /// line trimmed.
 ///
-/// `None` when nvidia-smi is not there, which is the script's `command -v`
-/// test; the caller turns `None` into the literal `-`.
+/// `None` when nvidia-smi is not there; the caller turns that into the
+/// literal `-`.
 fn vram_used() -> Option<String> {
     let out = Command::new("nvidia-smi")
         .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
@@ -333,10 +323,10 @@ fn decode_body(model: &str, seed: u32) -> String {
 /// `PREFILL_TOKENS * 11 / 4` characters (~2.75 chars/token), one token of
 /// output, caching off.
 ///
-/// The generator is the script's awk, arithmetic and all: the target is an
-/// integer division, and the loop appends whole handlers until the running
-/// length reaches it - so the body overshoots by at most one handler, which
-/// is why the token count is "about" what was asked for.
+/// The target is an integer division, and the loop appends whole handlers
+/// until the running length reaches it - so the body overshoots by at most
+/// one handler, which is why the token count is "about" what was asked for.
+/// Deterministic, so every row's prompt is the same text.
 fn prefill_body(model: &str, tokens: u32) -> String {
     let chars = tokens as u64 * 11 / 4;
     let mut body = format!(
@@ -356,7 +346,7 @@ fn prefill_body(model: &str, tokens: u32) -> String {
     body
 }
 
-/// One synthetic handler, exactly the awk's `sprintf`.
+/// One synthetic handler.
 ///
 /// `\\n` here is the two characters backslash and `n`: the body is JSON,
 /// where that is an escaped newline, and it is why the prompt has no raw
@@ -379,13 +369,13 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
 
-    /// A home with a `.env` naming `port`, so `Base::from_home` points the
+    /// A home whose golem.toml names `port`, so `Base::from_home` points the
     /// run at a fake engine rather than the real one.
     fn home(tag: &str, port: u16) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("golem-rs-bench-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp");
-        std::fs::write(dir.join(".env"), format!("LOCAL_AI_PORT=\"{port}\"\n")).expect("write");
+        std::fs::write(dir.join("golem.toml"), format!("LOCAL_AI_PORT=\"{port}\"\n")).expect("write");
         dir
     }
 
@@ -568,7 +558,7 @@ mod tests {
         assert_eq!(status, 1);
         assert!(
             text.contains(" SPEED BENCHMARK  (http://127.0.0.1:1/v1/chat/completions)\n"),
-            "the banner comes first, as the script's does:\n{text}"
+            "the banner comes first:\n{text}"
         );
         assert!(text.ends_with("[FAIL] server not responding on :1\n"), "{text}");
         std::fs::remove_dir_all(&dir).ok();
@@ -579,7 +569,7 @@ mod tests {
         // The client has no TLS, so an https base is refused out loud rather
         // than connected to and left to fail like a broken server.
         let dir = home("https", 8000);
-        std::fs::write(dir.join(".env"), "LOCAL_AI_BASE_URL=\"https://example.test/v1\"\n")
+        std::fs::write(dir.join("golem.toml"), "LOCAL_AI_BASE_URL=\"https://example.test/v1\"\n")
             .expect("write");
         let (status, text) = run_out(&dir, &[], &no_vram);
         assert_eq!(status, 1);
@@ -594,7 +584,7 @@ mod tests {
         assert_eq!(median(&[60.0, 62.5, 65.0]), 62.5);
         assert_eq!(median(&[60.0, 62.0, 64.0, 66.0]), 63.0);
         assert_eq!(median(&[7.0]), 7.0);
-        assert_eq!(median(&[]), 0.0, "an empty run list reads as 0.0, as the awk's did");
+        assert_eq!(median(&[]), 0.0, "an empty run list reads as 0.0");
     }
 
     #[test]
@@ -616,7 +606,6 @@ mod tests {
 
     #[test]
     fn pretty_printed_timings_read_the_same_as_compact_ones() {
-        // The script's `" *` in its grep existed for exactly this.
         let pretty = json::parse(
             "{\n  \"timings\": {\n    \"predicted_per_second\": 12.3,\n    \
              \"predicted_n\": 600\n  }\n}",
@@ -630,12 +619,12 @@ mod tests {
     }
 
     #[test]
-    fn the_command_line_takes_the_scripts_two_flags() {
+    fn the_command_line_takes_two_flags_in_either_order() {
         let empty: [String; 0] = [];
         assert_eq!(parse_args(&empty), Ok(Options { runs: 3, prefill: 30000 }));
         let both: Vec<String> = ["--runs", "5", "--prefill", "0"].iter().map(|s| s.to_string()).collect();
         assert_eq!(parse_args(&both), Ok(Options { runs: 5, prefill: 0 }));
-        // Reversed, and a flag the script would refuse.
+        // Reversed, and a flag it refuses.
         let reversed: Vec<String> = ["--prefill", "100", "--runs", "2"].iter().map(|s| s.to_string()).collect();
         assert_eq!(parse_args(&reversed), Ok(Options { runs: 2, prefill: 100 }));
         let bad = vec!["--nope".to_string()];
@@ -643,9 +632,10 @@ mod tests {
     }
 
     #[test]
-    fn the_prefill_generator_matches_the_scripts_awk() {
-        // The `sprintf`, character for character: `\n` is the two characters
-        // the JSON needs, and the three numbers are the awk's arithmetic.
+    fn the_prefill_generator_is_fixed_to_the_character() {
+        // Character for character, so every row's prompt is the same: `\n`
+        // is the two characters the JSON needs, and the three numbers are
+        // the handler's own arithmetic.
         assert_eq!(
             handler(0),
             "def handler_0(request, ctx):\\n    value = ctx.get(key_0, 0) * 0\\n    \

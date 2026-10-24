@@ -46,8 +46,8 @@ what reaches the model. See AMD's ROCm docs.
 ## Status and the eval gate
 
 **This path is not exercised by the reference machine** (NVIDIA RTX 3060 12 GB): the
-`server-rocm` image and the rocm release assets are pinned from upstream but have never been
-through this repo's eval gate here. On AMD hardware, right after the first `golem up`, run:
+rocm release assets and the `golem:rocm` image are pinned from upstream but have never been
+through this repo's eval gate. On AMD hardware, right after the first `golem up`, run:
 
 ```bash
 golem eval --long 200000   # adopt only on PASS — same rule as a CUDA upgrade

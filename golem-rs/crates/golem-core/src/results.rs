@@ -215,8 +215,8 @@ impl Row {
             draft_accept: num_of(value.get("draft_accept")),
             vram_mib: num_of(value.get("vram_mib")),
             ram_used_gib: num_of(value.get("ram_used_gib")),
-            // Anything but an explicit false counts as quiet, the same
-            // default the scripts use.
+            // Anything but an explicit false counts as quiet, so a row
+            // without the field reads as a quiet run.
             quiet: value.get("quiet").and_then(Value::as_bool).unwrap_or(true),
             note: str_of(value.get("note")).unwrap_or_default(),
             flags,
@@ -288,7 +288,7 @@ impl SizeClass {
         }
     }
 
-    /// The heading the report prints, the shell report's own word.
+    /// The heading the report prints.
     pub fn label(&self) -> &'static str {
         match self {
             SizeClass::Unknown => "unknown",
@@ -300,7 +300,7 @@ impl SizeClass {
     }
 
     /// The report's ordering: smallest class first, and a row whose size is
-    /// unknown last (the shell sorts on a "9 unknown" string key).
+    /// unknown last.
     pub fn sort_key(&self) -> u8 {
         match self {
             SizeClass::UpTo2B => 1,
@@ -367,8 +367,8 @@ pub struct Best {
 /// build. A caller can therefore walk it and start a new section whenever
 /// the host changes, a new block whenever the model does.
 pub fn best_per_configuration(rows: &[Row]) -> Vec<Best> {
-    // The shell takes the last verdict a model has (later rows overwrite
-    // earlier ones), so a re-run corrects the report without an edit.
+    // The last verdict a model has wins (later rows overwrite earlier
+    // ones), so a re-run corrects the report without an edit.
     //
     // Keyed by model *and engine*, not by model alone: the needle is the
     // model's quality gate, but it is measured on one engine, and an engine
@@ -616,8 +616,8 @@ mod tests {
 
     #[test]
     fn the_last_needle_verdict_wins() {
-        // The shell lets a later eval row overwrite an earlier verdict, so a
-        // re-run corrects the report without editing the file.
+        // A later eval row overwrites an earlier verdict, so a re-run
+        // corrects the report without editing the file.
         let failed = EVAL.replace(r#""needle": "PASS""#, r#""needle": "FAIL""#);
         let rows: Vec<Row> = [BENCH, &failed, EVAL]
             .iter()

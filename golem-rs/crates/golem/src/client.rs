@@ -2,24 +2,22 @@
 //!
 //! llama-server speaks the Anthropic Messages API natively, so Claude Code
 //! connects straight to it; `env` prints the exports for a shell, `claude`
-//! runs the client with them already set. The port of `cmd_env` and
-//! `cmd_claude` in the `golem` script.
+//! runs the client with them already set.
 //!
-//! The values come from the home's `.env`, read the one way the rest of the
-//! binary reads it ([`env_value`]) rather than from the process environment:
-//! the shell `source`s `.env` before it prints, and a binary started without
-//! that source must answer the same thing.
+//! The values come from the home's golem.toml, read through `config` like
+//! every other setting, rather than from the process environment - so the
+//! answer does not depend on what the calling shell happens to have set.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::state::{env_value, override_value};
+use crate::config;
 
 /// The loopback host the exports name: `LOCAL_AI_HOST` (default
 /// `127.0.0.1`), with the bind-only `0.0.0.0` rewritten - a wildcard is
 /// where a server listens, not where a client dials.
 fn host(home: &Path) -> String {
-    let host = env_value(home, "LOCAL_AI_HOST").unwrap_or_else(|| "127.0.0.1".to_string());
+    let host = config::get(home, "LOCAL_AI_HOST").unwrap_or_else(|| "127.0.0.1".to_string());
     if host == "0.0.0.0" {
         "127.0.0.1".to_string()
     } else {
@@ -29,20 +27,19 @@ fn host(home: &Path) -> String {
 
 /// `LOCAL_AI_PORT`, default `8000`.
 fn port(home: &Path) -> String {
-    env_value(home, "LOCAL_AI_PORT").unwrap_or_else(|| "8000".to_string())
+    config::get(home, "LOCAL_AI_PORT").unwrap_or_else(|| "8000".to_string())
 }
 
 /// `LOCAL_AI_API_KEY`, default `local-ai-key`.
 fn api_key(home: &Path) -> String {
-    env_value(home, "LOCAL_AI_API_KEY").unwrap_or_else(|| "local-ai-key".to_string())
+    config::get(home, "LOCAL_AI_API_KEY").unwrap_or_else(|| "local-ai-key".to_string())
 }
 
 /// `MODEL_ALIAS`, default `local-model`, with the process-environment
-/// `GOLEM_MODEL_ALIAS` winning when it is set - the shell's
-/// `${GOLEM_MODEL_ALIAS:-${MODEL_ALIAS:-local-model}}`, which the tuner and
-/// the console's job runner both rely on to redirect one invocation.
+/// `GOLEM_MODEL_ALIAS` winning when it is set - which the tuner and the
+/// console's job runner both rely on to redirect one invocation.
 fn alias(home: &Path) -> String {
-    override_value(home, "GOLEM_MODEL_ALIAS", "MODEL_ALIAS")
+    config::resolved(home, "MODEL_ALIAS")
         .unwrap_or_else(|| "local-model".to_string())
 }
 
@@ -58,8 +55,8 @@ fn values(home: &Path) -> (String, String, String, String) {
 
 /// `golem env`: the exports, as a shell would source them.
 ///
-/// Byte for byte what `cmd_env`'s heredoc prints, including the comment line
-/// above the four exports and the trailing newline.
+/// The comment line, the four exports and a trailing newline, so the output
+/// can be `eval`'d or appended to a profile as it is.
 pub fn exports(home: &Path) -> String {
     let (host, port, key, alias) = values(home);
     format!(
@@ -71,13 +68,11 @@ pub fn exports(home: &Path) -> String {
     )
 }
 
-/// The same four exports, in the syntax the shell that ran the launcher
-/// reads.
+/// The same four exports, in PowerShell's syntax.
 ///
-/// `golem up` prints this in Windows mode because the launcher it replaces
-/// prints it: `start-windows.ps1` ends on a `$env:` block, and `up` is
-/// typed in PowerShell or `cmd`, where `export` is not a command. Native
-/// mode keeps [`exports`], which is what `cmd_up` ends on there.
+/// `golem up` ends on this block on Windows, where it is typed in
+/// PowerShell or `cmd` and `export` is not a command; everywhere else it
+/// ends on [`exports`].
 pub fn powershell_exports(home: &Path) -> String {
     let (host, port, key, alias) = values(home);
     format!(
@@ -93,7 +88,7 @@ pub fn powershell_exports(home: &Path) -> String {
 ///
 /// Runs `claude` with the four variables already set and the arguments passed
 /// through, the child's stdio inherited so it owns the terminal, and returns
-/// its exit code. The base URL is always loopback here, as in the shell: the
+/// its exit code. The base URL is always loopback here: the
 /// client runs on the same machine as the server.
 pub fn claude(home: &Path, args: &[String]) -> i32 {
     let mut command = Command::new("claude");
@@ -108,8 +103,8 @@ pub fn claude(home: &Path, args: &[String]) -> i32 {
         .stderr(Stdio::inherit());
     match command.status() {
         Ok(status) => status.code().unwrap_or(-1),
-        // The shell's `command -v claude` guard, at the point where the
-        // missing program actually shows: nothing on PATH to run.
+        // The missing program shows here, at the spawn: nothing on PATH to
+        // run.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             eprintln!("[ERROR] claude (Claude Code) is not installed");
             1
@@ -140,9 +135,9 @@ mod tests {
                             export ANTHROPIC_SMALL_FAST_MODEL=\"local-model\"\n";
 
     #[test]
-    fn the_defaults_are_the_shells_text() {
+    fn an_empty_config_exports_the_defaults() {
         let dir = home("defaults");
-        std::fs::write(dir.join(".env"), "").expect("write");
+        std::fs::write(dir.join("golem.toml"), "").expect("write");
         assert_eq!(exports(&dir), DEFAULTS);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -158,7 +153,7 @@ mod tests {
     fn the_exports_read_env_and_rewrite_the_wildcard_bind() {
         let dir = home("values");
         std::fs::write(
-            dir.join(".env"),
+            dir.join("golem.toml"),
             "LOCAL_AI_HOST=\"0.0.0.0\"\n\
              LOCAL_AI_PORT=\"8080\"\n\
              LOCAL_AI_API_KEY=\"secret\"\n\
@@ -179,19 +174,18 @@ mod tests {
     #[test]
     fn a_real_host_is_kept_as_it_is() {
         let dir = home("real-host");
-        std::fs::write(dir.join(".env"), "LOCAL_AI_HOST=\"192.168.1.5\"\n").expect("write");
+        std::fs::write(dir.join("golem.toml"), "LOCAL_AI_HOST=\"192.168.1.5\"\n").expect("write");
         assert!(exports(&dir).contains("http://192.168.1.5:8000"), "{}", exports(&dir));
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn the_powershell_block_is_the_same_four_values() {
-        // `up` in Windows mode ends on the block `start-windows.ps1` prints,
-        // which is the same four facts in the syntax the shell it was typed
-        // in actually reads.
+        // `up` on Windows ends on this block: the same four facts in the
+        // syntax the shell it was typed in actually reads.
         let dir = home("powershell");
         std::fs::write(
-            dir.join(".env"),
+            dir.join("golem.toml"),
             "LOCAL_AI_HOST=\"0.0.0.0\"\nLOCAL_AI_PORT=\"8080\"\n\
              LOCAL_AI_API_KEY=\"secret\"\nMODEL_ALIAS=\"ornith-1.5-35b\"\n",
         )
@@ -210,10 +204,10 @@ mod tests {
     #[test]
     fn the_alias_is_model_alias_from_the_file() {
         // `GOLEM_MODEL_ALIAS` is a *process-environment* override (see
-        // `state::override_value`), not a `.env` key: a `GOLEM_MODEL_ALIAS`
+        // `config::resolved`), not a golem.toml key: a `GOLEM_MODEL_ALIAS`
         // line in the file is ignored, and `MODEL_ALIAS` is what is read.
         let dir = home("alias");
-        std::fs::write(dir.join(".env"), "MODEL_ALIAS=\"old\"\nGOLEM_MODEL_ALIAS=\"ignored\"\n")
+        std::fs::write(dir.join("golem.toml"), "MODEL_ALIAS=\"old\"\nGOLEM_MODEL_ALIAS=\"ignored\"\n")
             .expect("write");
         let text = exports(&dir);
         assert!(text.contains("export ANTHROPIC_MODEL=\"old\""), "{text}");

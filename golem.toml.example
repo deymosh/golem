@@ -6,16 +6,14 @@
 # this file the first time it runs without one, and reads that; an existing
 # `golem.toml` is never overwritten, so an edit always wins.
 #
-# Every setting lives here now. `.env` was the shell's file - the launchers
-# sourced it, so a key had to stay there while a driver read it - and with the
-# launchers gone the binary is every key's only reader, which is what moved
-# them here.
+# Every setting lives here, and this file is the only one golem reads. The
+# comments are the documentation, which is why this is TOML and not JSON.
+# Flat `KEY = value` lines only; every value is read as text the reader
+# parses, so `TUNE_RUNS = 3` and `TUNE_RUNS = "3"` mean the same thing.
 #
-# The comments are the documentation, which is why this is TOML and not JSON.
-# The keys keep the names they had in `.env`, so a move is a move and not a
-# rename: a setting someone already knows is still spelled the same way. They
-# are read with `.env`'s own semantics - every value is a string the reader
-# parses - so `TUNE_RUNS = 3` and `TUNE_RUNS = "3"` mean the same thing.
+# Four keys can be pointed elsewhere for one run without editing this file,
+# by setting `GOLEM_<KEY>` in the environment of the command: ENGINE,
+# MODELS_PRESET, MODEL_ALIAS and LOCAL_AI_HOST (a container uses the last).
 # ============================================================
 
 # ------------------------------------------------------------
@@ -31,14 +29,14 @@ TOP_P = 0.95
 # Tuning floors (`golem tune`)
 # ------------------------------------------------------------
 
-# `./golem tune` sweeps a model's offload split and keeps the fastest setup
+# `golem tune` searches a model's offload split and keeps the fastest setup
 # that is not spilling VRAM, but "fastest here" is not the same as "usable":
 # a candidate under one of these floors is dropped from the ranking however
 # good it looks next to a worse one. The defaults are what real sessions
 # settled on - 30 t/s at full depth felt fine, 23 was sluggish, 16.7 was
 # rejected - and every one has a per-run flag (`--min-decode`, `--min-prefill`,
 # `--min-depth-decode`) so a single run can move it without editing this file.
-# See docs/plan-tune-model-context.md for where the numbers come from.
+# docs/tuning.md has where the numbers come from.
 TUNE_MIN_DECODE = 25          # median decode, tokens/s
 TUNE_MIN_PREFILL = 350        # prompt processing, tokens/s
 TUNE_MIN_DEPTH_DECODE = 15    # decode at full context, tokens/s
@@ -52,6 +50,15 @@ TUNE_MIN_DEPTH_DECODE = 15    # decode at full context, tokens/s
 # more loads and is kept for comparison (`--ctx-ladder` does the same for one
 # run).
 TUNE_CTX_POLICY = "max"
+
+# The card's VRAM the tuner leaves for the desktop to grow into, in MiB. A
+# setup is judged by its whole-card reading (desktop included) against the
+# card's size less this. The desktop's own use drifts between half a gigabyte
+# and one and a half over a day, and past the card's size the Windows driver
+# spills into system RAM silently - prefill falls by ~40% - so a setup tuned to
+# the last megabyte is one a browser tab can push over. `--vram-headroom N`
+# moves it for one run.
+TUNE_VRAM_HEADROOM_MIB = 1024
 
 # How much a sweep spends per point. `TUNE_RUNS` is the bench's best-of-N and
 # `TUNE_PREFILL` the prompt size it measures; both are `golem bench`'s own
@@ -70,8 +77,8 @@ GATE_TOKENS = 200000
 
 # Which adapter under `engines/<name>/` starts the model. Only llama.cpp is
 # eval-gated and serves `/v1/messages` (which `golem claude` needs) plus
-# router mode. Strata is not supported: its adapter says it installs itself
-# with its own shell launcher, and the shell is gone.
+# router mode; ik_llama.cpp is kept for paired measurements only (no
+# `/v1/messages`, so the tuner never adopts it).
 ENGINE = "llama.cpp"
 
 # GPU vendor. `auto` (the default) detects it - NVIDIA to cuda, AMD to rocm,

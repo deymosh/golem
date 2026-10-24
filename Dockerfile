@@ -4,13 +4,12 @@
 #   docker build --build-arg GPU_BACKEND=cuda -t golem:cuda .
 #   docker build --build-arg GPU_BACKEND=rocm -t golem:rocm .
 #
-# Docker is packaging, not a deploy mode (docs/plan-deploy-modes.md): one
-# image per GPU vendor from this one file, with the adapter's `build` pin
-# deciding which engine release `golem install` bakes in. The image digest
-# compose.yml used to carry is gone with its ~70-line entrypoint, because
-# the adapter and the release it names are the same pin, governed by the
-# same eval gate. The GPU wiring stays the runtime's business (compose.yml):
-# `gpus: all` for CUDA, /dev/kfd + /dev/dri for ROCm.
+# Docker is packaging, not a mode (docs/architecture.md): one image per GPU
+# vendor from this one file, with the adapter's `build` pin deciding which
+# engine release `golem install` bakes in - the same pin the eval gate
+# adopted, so there is no second one to keep in step. The GPU wiring stays
+# the runtime's business (compose.yml): `gpus: all` for CUDA, /dev/kfd +
+# /dev/dri for ROCm.
 
 # Both args are global on purpose: an ARG is only usable in FROM lines when
 # it is declared before the first one, and GPU_BACKEND picks the runtime

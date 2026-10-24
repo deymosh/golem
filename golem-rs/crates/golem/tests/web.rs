@@ -1,47 +1,17 @@
 //! Tests for the console (`src/web.rs`).
 //!
-//! `golem` is a binary crate with no library target, so the module is pulled
-//! in by path rather than imported; that keeps `Cargo.toml` and `main.rs`
-//! untouched while still exercising the real source.
-//!
 //! The pure helpers are checked directly. The routes are checked end to end
 //! over a real socket: the router is bound to port 0 (the OS picks the port),
 //! the address is read back, and a hand-written HTTP/1.1 request is sent over
 //! `TcpStream`. No HTTP client crate, and every read has a timeout so a
 //! broken server fails the test instead of hanging it.
 
-// The console's module and the ones it uses. `golem` is a bin-only crate, so
-// the sources are pulled in by path rather than imported; that keeps
-// `main.rs` and `Cargo.toml` out of the test's way while still exercising the
-// real code. (Moving the crate to bin+lib would make this unnecessary; until
-// then every module the console touches has to be named here.)
-#[path = "../src/client.rs"]
-mod client;
-#[path = "../src/engine.rs"]
-mod engine;
-#[path = "../src/launch.rs"]
-mod launch;
-#[path = "../src/models.rs"]
-mod models;
-#[path = "../src/pull.rs"]
-mod pull;
-#[path = "../src/release.rs"]
-mod release;
-#[path = "../src/runner.rs"]
-mod runner;
-#[path = "../src/service.rs"]
-mod service;
-#[path = "../src/state.rs"]
-mod state;
-#[path = "../src/web.rs"]
-mod web;
-
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use web::{inline_records, render_page, router, Config};
+use golem::web::{inline_records, render_page, router, Config};
 
 // ---- pure helpers ------------------------------------------------------
 
@@ -276,7 +246,7 @@ fn state_reports_what_the_page_shows() {
     let (dir, cfg) = fixture("state");
     // Point the fixture at a port nothing can be listening on, so the test
     // says the same thing whether or not this machine is running an engine.
-    std::fs::write(dir.join(".env"), "LOCAL_AI_PORT=1\n").expect("write env");
+    std::fs::write(dir.join("golem.toml"), "LOCAL_AI_PORT=1\n").expect("write golem.toml");
     let addr = spawn(router(cfg));
 
     let response = request(addr, "/api/state");
@@ -299,7 +269,7 @@ fn state_reports_what_the_page_shows() {
 #[test]
 fn state_lists_the_installed_engines_and_the_last_job_log() {
     let (dir, cfg) = fixture("state-engines");
-    std::fs::write(dir.join(".env"), "LOCAL_AI_PORT=1\n").expect("write env");
+    std::fs::write(dir.join("golem.toml"), "LOCAL_AI_PORT=1\n").expect("write golem.toml");
     // Two adapters and a stray file: only the directories are engines.
     std::fs::create_dir_all(dir.join("engines/llama.cpp")).expect("mkdir");
     std::fs::create_dir_all(dir.join("engines/ik_llama.cpp")).expect("mkdir");
@@ -355,14 +325,14 @@ n-cpu-moe = 36
 ctx-size = 8192
 ";
 
-/// A home with the preset file and an `.env`, and no launcher: the Models
-/// tab has to work in a folder the console can serve but not drive.
+/// A home with the preset file and a `golem.toml`, and no engine installed:
+/// the Models tab reads and edits files, so it has to work without one.
 fn models_fixture(tag: &str) -> (PathBuf, Config) {
     let (dir, cfg) = fixture(tag);
     std::fs::create_dir_all(dir.join("config")).expect("config");
     std::fs::create_dir_all(dir.join("data/models")).expect("models");
     std::fs::write(dir.join("config/models.ini"), PRESET).expect("preset");
-    std::fs::write(dir.join(".env"), "LOCAL_AI_PORT=1\nMODEL_ALIAS=\"model-a\"\n").expect("env");
+    std::fs::write(dir.join("golem.toml"), "LOCAL_AI_PORT=1\nMODEL_ALIAS=\"model-a\"\n").expect("write golem.toml");
     (dir, cfg)
 }
 
@@ -474,42 +444,42 @@ fn removing_a_preset_and_deleting_its_file_are_two_separate_clicks() {
 }
 
 #[test]
-fn the_alias_and_engine_settings_rewrite_the_env_without_a_launcher() {
+fn the_alias_and_engine_settings_rewrite_golem_toml() {
     let (dir, cfg) = models_fixture("settings");
     std::fs::create_dir_all(dir.join("engines/llama.cpp")).expect("mkdir");
     std::fs::create_dir_all(dir.join("engines/ik_llama.cpp")).expect("mkdir");
     let addr = spawn(router(cfg));
 
     // The dropdown's Set button: the value is one of the presets the page
-    // was offered, and it lands in .env.
+    // was offered, and it lands in golem.toml.
     let response = post(addr, "/api/run", "action=alias&arg=tiny");
     assert!(response.contains("\"result\": \"applied\""), "{response}");
-    let env = std::fs::read_to_string(dir.join(".env")).expect("read");
-    assert!(env.contains("MODEL_ALIAS=\"tiny\""), "{env}");
+    let env = std::fs::read_to_string(dir.join("golem.toml")).expect("read");
+    assert!(env.contains("MODEL_ALIAS = \"tiny\""), "{env}");
     assert!(env.contains("LOCAL_AI_PORT=1"), "the rest of the file is untouched:\n{env}");
     // The status strip reads the new default back.
     assert!(request(addr, "/api/state").contains("\"alias\": \"tiny\""));
 
     let response = post(addr, "/api/run", "action=engine&arg=ik_llama.cpp");
     assert!(response.contains("\"result\": \"applied\""), "{response}");
-    assert!(std::fs::read_to_string(dir.join(".env")).expect("read")
-        .contains("ENGINE=\"ik_llama.cpp\""));
+    assert!(std::fs::read_to_string(dir.join("golem.toml")).expect("read")
+        .contains("ENGINE = \"ik_llama.cpp\""));
 
     // Something that is not installed is refused rather than written.
     assert!(post(addr, "/api/run", "action=engine&arg=nope").contains("\"result\": \"bad-input\""));
     assert!(post(addr, "/api/run", "action=alias&arg=nope").contains("\"result\": \"bad-input\""));
-    assert!(!std::fs::read_to_string(dir.join(".env")).expect("read").contains("ENGINE=\"nope\""));
+    assert!(!std::fs::read_to_string(dir.join("golem.toml")).expect("read").contains("nope"));
 }
 
-// ---- a folder with no launcher ----------------------------------------
+// ---- a bare home --------------------------------------------------------
 
 #[test]
-fn a_folder_with_no_launcher_runs_actions_anyway() {
+fn a_bare_home_runs_actions() {
     // The engine verbs go to the service and the rest run as this binary's
-    // own verbs, so the controls no longer need the shell scripts - a
-    // release folder is enough. The job still has to run and release the
-    // slot, or the page would show a job running forever.
-    let (_dir, cfg) = fixture("no-launcher");
+    // own verbs, so a home with nothing but its files can run an action. The
+    // job still has to run and release the slot, or the page would show a
+    // job running forever.
+    let (_dir, cfg) = fixture("bare-home");
     let addr = spawn(router(cfg));
 
     let response = post(addr, "/api/run", "action=report");

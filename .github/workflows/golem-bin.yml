@@ -1,7 +1,7 @@
 # Portable golem binary: test + build on the three desktop platforms.
 # CI never runs models and never adopts anything (the 200K eval gate stays
 # a manual, on-real-hardware check); it only proves the code builds and the
-# unit tests pass. See docs/plan-portable-binary.md.
+# unit tests pass. See golem-rs/README.md.
 
 name: golem-bin
 

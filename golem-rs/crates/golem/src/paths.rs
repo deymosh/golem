@@ -24,14 +24,13 @@ use std::path::{Path, PathBuf};
 const EMBEDDED_TEMPLATE: &str = include_str!("../../../../bench/report.template.html");
 
 /// The configuration template, compiled in for the same reason: a release
-/// folder has no `golem.toml.example`, and without one the moved keys would
-/// silently fall back to the code's defaults - which work, but leave the user
-/// with no file to read the settings out of or edit them in.
+/// folder has no `golem.toml.example`, and without one every key would fall
+/// back to the code's defaults - which work, but leave the user with no file
+/// to read the settings out of or edit them in.
 ///
 /// The template is what the binary writes as `golem.toml` on first run, and
-/// `golem.toml` is the machine's own file: it is git-ignored, the way `.env`
-/// and `.local/` are, because it holds the port, the key and the model this
-/// machine serves.
+/// `golem.toml` is the machine's own file: it is git-ignored, like `.local/`,
+/// because it holds the port, the key and the model this machine serves.
 const EMBEDDED_CONFIG: &str = include_str!("../../../../golem.toml.example");
 
 /// The directories the binary expects under the home. Created on demand.
@@ -70,9 +69,42 @@ pub fn ensure(home: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The preset file the repository ships, relative to the home: what a home
+/// serves when `MODELS_PRESET` names nothing, and what the tuner tunes from.
+pub const BASE_PRESET: &str = "config/models.ini";
+
+/// The preset file the tuner writes, relative to the home: the base with this
+/// machine's gated overlays merged in. `tune --adopt` points
+/// `MODELS_PRESET` at it.
+pub const EFFECTIVE_PRESET: &str = "data/tuned/models.effective.ini";
+
+/// The engine adapter used when `ENGINE` names none.
+pub const DEFAULT_ENGINE: &str = "llama.cpp";
+
 /// `bench/results.jsonl` under the home.
 pub fn results(home: &Path) -> PathBuf {
     home.join("bench").join("results.jsonl")
+}
+
+/// Where the GGUF files live, and the directory the engine starts in.
+pub fn models_dir(home: &Path) -> PathBuf {
+    home.join("data").join("models")
+}
+
+/// The engine's own log: it writes it itself (`--log-file`).
+pub fn engine_log(home: &Path) -> PathBuf {
+    home.join("logs").join("llama-server.log")
+}
+
+/// The console's job log: what the last action from the page or the screen
+/// printed, which the job pane tails.
+pub fn job_log(home: &Path) -> PathBuf {
+    home.join("logs").join("web-job.log")
+}
+
+/// The running engine's pid.
+pub fn pid_file(home: &Path) -> PathBuf {
+    home.join(".local").join("llama-server.pid")
 }
 
 /// `bench/report.template.html` under the home (written by [`ensure`] when
@@ -143,6 +175,8 @@ mod tests {
         let home = Path::new("/tmp/golem-home");
         assert_eq!(results(home), home.join("bench/results.jsonl"));
         assert_eq!(template(home), home.join("bench/report.template.html"));
+        assert_eq!(engine_log(home), home.join("logs").join("llama-server.log"));
+        assert_eq!(pid_file(home), home.join(".local").join("llama-server.pid"));
     }
 
     #[test]

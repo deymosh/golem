@@ -1,9 +1,8 @@
 //! The regex subset the engine adapters actually use, and nothing more.
 //!
 //! The adapters describe their GitHub release assets as regexes (see
-//! `windows_asset_cuda` in engines/llama.cpp/engine.ini), and
-//! `scripts/start-windows.ps1` applies them with PowerShell's `-match`. The
-//! binary has no regex crate and will not gain one: the patterns are ours,
+//! `windows_asset_cuda` in engines/llama.cpp/engine.ini). The binary has no
+//! regex crate and will not gain one: the patterns are ours,
 //! written by hand, and this is the subset they use — literals, `.`, the three
 //! quantifiers, the three escapes, an escaped literal, `^`/`$`, and character
 //! classes.
@@ -13,10 +12,8 @@
 //! the failure this repository's comments keep warning about — so `(` and `|`
 //! and a stray `\q` are loud here, not quietly part of the text being matched.
 
-/// Whether `pattern` matches anywhere in `text` — PowerShell's `-match`
-/// semantics, which is what `scripts/start-windows.ps1` applies to the
-/// `windows_asset_<backend>` keys: a search, not a full match, with `^` and `$`
-/// anchoring only where the pattern writes them.
+/// Whether `pattern` matches anywhere in `text`: a search, not a full match,
+/// with `^` and `$` anchoring only where the pattern writes them.
 pub fn matches(pattern: &str, text: &str) -> Result<bool, String> {
     let atoms = compile(pattern)?;
     let chars: Vec<char> = text.chars().collect();

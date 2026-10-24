@@ -2,10 +2,9 @@
 //!
 //! The header holds the metadata (architecture, layer and expert counts,
 //! trained context) and the tensor table; the weights after it are never
-//! touched, so this is instant even for a 100 GB file. It answers exactly
-//! what `scripts/gguf-info.sh` answers, because the recorder writes those
-//! numbers into every row and the two must agree - the shell version stays
-//! the reference until a golden test says otherwise.
+//! touched, so this is instant even for a 100 GB file. The recorder writes
+//! these numbers into every row, so a change in what it reads is a change in
+//! every row from then on.
 //!
 //! The metadata can be several megabytes (a 150k-token vocabulary is a
 //! string array), so values are streamed past rather than collected: the
@@ -47,8 +46,8 @@ pub enum Value {
 }
 
 impl Value {
-    /// The number this value holds, as the shell reads it (`+ 0` on a
-    /// missing key gives 0 there too).
+    /// The number this value holds: a string reads as 0 and a negative as 0,
+    /// so an odd value never panics a reader that only wanted a count.
     pub fn as_u64(&self) -> u64 {
         match self {
             Value::Uint(u) => *u,
@@ -90,8 +89,8 @@ pub struct ModelFacts {
 }
 
 impl ModelFacts {
-    /// The same key=value text `scripts/gguf-info.sh` prints, so the two can
-    /// be compared line by line.
+    /// The facts as `key=value` lines, one per fact - what the ignored
+    /// local-model test prints for a person to read.
     pub fn to_info_text(&self) -> String {
         format!(
             "arch={}\nname={}\nn_layer={}\nn_embd={}\nn_ctx_train={}\nn_expert={}\nn_expert_used={}\nmoe={}\nparams_total={}\nparams_active={}\nmtp_tensors={}\ntensors={}\n",
@@ -527,9 +526,9 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_key_reads_as_zero_like_the_shell() {
-        // `kv[arch ".context_length"] + 0` is 0 in awk when the key is
-        // absent, so the two implementations agree on an odd file too.
+    fn a_missing_key_reads_as_zero() {
+        // An absent `<arch>.context_length` is 0, not an error: an odd file
+        // still yields the facts it does have.
         let bytes = write_gguf(
             1,
             |b| kv_str(b, "general.architecture", "mystery"),
@@ -545,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn info_text_matches_the_shells_format() {
+    fn info_text_is_one_key_value_line_per_fact() {
         let path = write_temp("text.gguf", &dense_fixture());
         let text = read(&path).expect("should read").to_info_text();
         assert!(text.starts_with("arch=qwen3\nname=Qwen Test 0.5B\n"));
@@ -556,13 +555,10 @@ mod tests {
     /// Every GGUF this machine has, read end to end. Ignored by default
     /// because it needs the model files (git-ignored, not on CI):
     ///
-    ///     cargo test -- --ignored --nocapture
+    ///     ./scripts/cargo.sh test -- --ignored --nocapture
     ///
-    /// It used to be a golden test against `scripts/gguf-info.sh` - the shell
-    /// reader this one was ported from and had to agree with byte for byte.
-    /// That script is gone with the rest of the shell stack, so what is left
-    /// is the check that still means something: every real model's header
-    /// parses, and the fields the tuner sizes a context from are there.
+    /// The check: every real model's header parses, and the fields the tuner
+    /// sizes a context from are there.
     #[test]
     #[ignore = "needs data/models/*.gguf"]
     fn every_local_model_reads() {

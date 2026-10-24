@@ -1,16 +1,15 @@
 //! The console's Models tab: what each preset is, and the edits behind its
 //! buttons.
 //!
-//! `Get-Models` in `scripts/web.ps1` is the contract, and the page reads its
-//! fields by name (`m.Present`, `m.NcMoe`, `m.ParamsB`, ...), so the JSON
-//! keeps the script's own capitalisation. Three facts come from three
+//! The page reads the fields by name (`m.Present`, `m.NcMoe`, `m.ParamsB`,
+//! ...), so the JSON's capitalisation is a contract with the page template.
+//! Three facts come from three
 //! places: the preset file says what the section *asks for* (its flags and
 //! its `; Download:` source), the disk says whether the file is here and how
 //! big it is, and the GGUF header says what the model *is* - parameters,
 //! experts, trained context.
 //!
-//! The three edits are the script's, including what it refuses: the default
-//! preset and the default's model file cannot be deleted, so a click can
+//! The three edits refuse what would break the setup: the default preset and the default's model file cannot be deleted, so a click can
 //! never leave the setup without one. Every edit that touches
 //! `config/models.ini` copies it to `.bak` first, and the delete only ever
 //! reaches inside `data/models`.
@@ -21,6 +20,7 @@ use golem_core::gguf;
 use golem_core::ini;
 use golem_core::json;
 
+use crate::config;
 use crate::state;
 
 /// One preset, as the page's table shows it.
@@ -28,7 +28,7 @@ use crate::state;
 pub struct Model {
     pub name: String,
     pub file: String,
-    /// The `; Download:` repo the launchers fetch from.
+    /// The `; Download:` repo `up` and `pull` fetch from.
     pub repo: String,
     /// `ctx-size`, or 0 when the section does not say.
     pub ctx: i64,
@@ -51,7 +51,7 @@ pub struct Model {
 /// Every preset in the home's preset file, in file order.
 pub fn list(home: &Path) -> Vec<Model> {
     let Ok(doc) = ini::Document::read(&state::preset_path(home)) else { return Vec::new() };
-    let alias = state::env_value(home, "MODEL_ALIAS").unwrap_or_default();
+    let alias = config::get(home, "MODEL_ALIAS").unwrap_or_default();
     let models_dir = home.join("data/models");
 
     doc.sections
@@ -79,8 +79,8 @@ pub fn list(home: &Path) -> Vec<Model> {
                 repo: section.downloads.first().map(|d| d.repo.clone()).unwrap_or_default(),
                 ctx: number(section.value("ctx-size")).unwrap_or(0),
                 nc_moe: number(section.value("n-cpu-moe")).unwrap_or(-1),
-                // The script treats any `spec-type` as "this preset uses
-                // speculative decoding", whatever the value says.
+                // Any `spec-type` means "this preset uses speculative
+                // decoding", whatever the value says.
                 mtp: section.value("spec-type").is_some(),
                 present,
                 gb: if present { round(file_size_gb(&path), 1) } else { 0.0 },
@@ -107,8 +107,8 @@ pub fn list(home: &Path) -> Vec<Model> {
 
 /// The list as the page's `fetch("api/models")` expects it.
 ///
-/// The field names are the script's, capitals and all: they are what the
-/// page's own template reads.
+/// The field names, capitals and all, are what the page's own template
+/// reads.
 pub fn to_json(models: &[Model]) -> String {
     let items: Vec<String> = models
         .iter()
@@ -143,8 +143,8 @@ pub struct NewModel {
     pub name: String,
     pub repo: String,
     pub file: String,
-    /// Kept as text: the script accepts only digits and falls back to its
-    /// own default, and `""` is not a number.
+    /// Kept as text: only digits are accepted, anything else falls back to
+    /// the default, and `""` is not a number.
     pub ctx: String,
     pub ncpu: String,
     pub mtp: bool,
@@ -154,9 +154,9 @@ pub struct NewModel {
 ///
 /// The name is sanitised rather than rejected (a console user typing
 /// "My Model" gets `my-model`), the repo and file are checked against the
-/// shape the launchers can fetch, and an existing preset name is refused so
-/// a click cannot silently retune a model that is already there. Answers the
-/// script's own `added` / `bad-input`.
+/// shape `up` and `pull` can fetch, and an existing preset name is refused so
+/// a click cannot silently retune a model that is already there. Answers
+/// `added` / `bad-input`, which the page reads.
 pub fn add(home: &Path, form: &NewModel) -> Result<&'static str, std::io::Error> {
     let name = sanitize(&form.name);
     let repo = form.repo.trim().to_string();
@@ -174,8 +174,8 @@ pub fn add(home: &Path, form: &NewModel) -> Result<&'static str, std::io::Error>
     let preset = state::preset_path(home);
     backup(&preset)?;
     let Ok(doc) = ini::Document::read(&preset) else { return Ok("bad-input") };
-    // The leading blank line and the comment are the script's, and they are
-    // what makes the section look hand-written in the file.
+    // The leading blank line and the comment are what make the section look
+    // hand-written in the file.
     let mut block = String::from("\n");
     block.push_str(&format!("; Added from the web console {}\n", golem_core::time::today()));
     block.push_str(&format!("; Download: {repo} -> {file}\n"));
@@ -198,7 +198,7 @@ pub fn add(home: &Path, form: &NewModel) -> Result<&'static str, std::io::Error>
 /// refused - the running setup cannot be broken by a click. Only a `.gguf`
 /// inside `data/models` is ever removed, whatever the section says.
 pub fn delete_file(home: &Path, name: &str) -> Result<&'static str, std::io::Error> {
-    let alias = state::env_value(home, "MODEL_ALIAS").unwrap_or_default();
+    let alias = config::get(home, "MODEL_ALIAS").unwrap_or_default();
     let Some(model) = list(home).into_iter().find(|m| m.name == name) else {
         return Ok("bad-input");
     };
@@ -220,10 +220,9 @@ pub fn delete_file(home: &Path, name: &str) -> Result<&'static str, std::io::Err
 /// `POST /api/delpreset`: remove a preset from the preset file.
 ///
 /// The model file stays on disk, the default is refused, and the section's
-/// own comment block goes with it. Answers the script's `removed` /
-/// `bad-input`.
+/// own comment block goes with it. Answers `removed` / `bad-input`.
 pub fn delete_preset(home: &Path, name: &str) -> Result<&'static str, std::io::Error> {
-    let alias = state::env_value(home, "MODEL_ALIAS").unwrap_or_default();
+    let alias = config::get(home, "MODEL_ALIAS").unwrap_or_default();
     if name.is_empty() || name == alias || !preset_names(home).iter().any(|n| n == name) {
         return Ok("bad-input");
     }
@@ -239,7 +238,7 @@ fn preset_names(home: &Path) -> Vec<String> {
     ini::Document::read(&state::preset_path(home)).map(|doc| doc.preset_names()).unwrap_or_default()
 }
 
-/// Copy the preset file beside itself before an edit, as the script does.
+/// Copy the preset file beside itself (`.bak`) before an edit.
 ///
 /// A failed copy is a failed edit: rewriting the file with no way back is
 /// worse than refusing the click.
@@ -251,7 +250,7 @@ fn backup(preset: &Path) -> Result<(), std::io::Error> {
 /// Whether `path` really is inside `dir`, after both are resolved.
 ///
 /// A section's `model` value comes from a file the user can edit, so it can
-/// say `../../.env`; canonicalising both sides is what makes the check about
+/// say `../../golem.toml`; canonicalising both sides is what makes the check about
 /// the file that would actually be deleted rather than about the string.
 fn inside(dir: &Path, path: &Path) -> bool {
     match (dir.canonicalize(), path.canonicalize()) {
@@ -260,9 +259,9 @@ fn inside(dir: &Path, path: &Path) -> bool {
     }
 }
 
-/// A preset name in the shape the launchers expect: lower case, and nothing
-/// but letters, digits, dot, dash and underscore. Mirrors the script's
-/// `-replace '[^a-z0-9._-]', '-'`, one dash per bad character.
+/// A preset name in the shape `up` and `pull` expect: lower case, and nothing
+/// but letters, digits, dot, dash and underscore - one dash per bad
+/// character.
 fn sanitize(name: &str) -> String {
     name.trim()
         .to_lowercase()
@@ -296,8 +295,8 @@ fn is_file(file: &str) -> bool {
 
 /// A `key = value` number, or `None` when it is absent or not one.
 ///
-/// The scripts accept only digits here, so `4096.0` or `4096k` is not a
-/// number to fall back from - it is a value to ignore.
+/// Only digits count, so `4096.0` or `4096k` is not a number to fall back
+/// from - it is a value to ignore.
 fn number(value: Option<&str>) -> Option<i64> {
     let value = value?.trim();
     if value.is_empty() || !value.chars().all(|c| c.is_ascii_digit()) {
@@ -313,10 +312,8 @@ fn round(value: f64, places: u32) -> f64 {
 
 /// A rounded number as JSON, in the shortest form that still says it.
 ///
-/// The script rounds and then lets PowerShell render the double, so 3.70
-/// comes out as `3.7` and a round 20 GB as `20`. Printing a fixed two
-/// decimals would be valid JSON and the same number, but it would also make
-/// every comparison against the shell console a diff of formatting noise.
+/// 3.70 comes out as `3.7` and a round 20 GB as `20`: the page shows the
+/// number as it arrives, and a fixed two decimals would put `20.00` on it.
 fn number_text(value: f64, places: u32) -> String {
     let text = format!("{:.*}", places as usize, round(value, places));
     match text.split_once('.') {
@@ -364,7 +361,7 @@ ctx-size = 8192
         std::fs::create_dir_all(dir.join("config")).expect("config");
         std::fs::create_dir_all(dir.join("data/models")).expect("models");
         std::fs::write(dir.join("config/models.ini"), PRESET).expect("preset");
-        std::fs::write(dir.join(".env"), "MODEL_ALIAS=\"model-a\"\n").expect("env");
+        std::fs::write(dir.join("golem.toml"), "MODEL_ALIAS=\"model-a\"\n").expect("env");
         dir
     }
 
@@ -380,7 +377,7 @@ ctx-size = 8192
         assert_eq!(a.ctx, 236544);
         assert_eq!(a.nc_moe, 36);
         assert!(a.mtp, "any spec-type means the preset uses one");
-        assert!(a.default, "the .env alias names it");
+        assert!(a.default, "the configured alias names it");
         assert!(!a.present, "the file is not on disk in this fixture");
         assert_eq!(a.gb, 0.0);
         assert_eq!(a.params_b, 0.0, "no file, so no facts to read");
@@ -449,7 +446,7 @@ ctx-size = 8192
     }
 
     #[test]
-    fn numbers_round_and_print_the_way_the_shell_console_prints_them() {
+    fn numbers_round_and_print_in_their_shortest_form() {
         assert_eq!(round(21.712_345, 1), 21.7);
         assert_eq!(round(35.507, 2), 35.51);
         assert_eq!(round(0.0, 1), 0.0);
@@ -491,7 +488,7 @@ ctx-size = 8192
     }
 
     #[test]
-    fn adding_a_model_appends_the_section_the_script_would_write() {
+    fn adding_a_model_appends_a_hand_written_looking_section() {
         let dir = home("add");
         let form = NewModel {
             name: "My Model".into(),
@@ -521,7 +518,7 @@ ctx-size = 8192
     }
 
     #[test]
-    fn adding_refuses_what_the_launchers_could_not_fetch() {
+    fn adding_refuses_what_could_not_be_fetched() {
         let dir = home("add-bad");
         let good = NewModel {
             name: "ok".into(),
@@ -547,7 +544,7 @@ ctx-size = 8192
         assert_eq!(std::fs::read_to_string(dir.join("config/models.ini")).expect("read"), PRESET);
         assert!(!dir.join("config/models.ini.bak").exists());
 
-        // The defaults the script falls back to when ctx/ncpu are not numbers.
+        // The defaults when ctx/ncpu are not numbers.
         assert_eq!(add(&dir, &good).expect("write"), "added");
         let doc = ini::Document::read(&dir.join("config/models.ini")).expect("read");
         assert_eq!(doc.value("ok", "ctx-size"), Some("32768"));
@@ -575,7 +572,7 @@ ctx-size = 8192
         assert_eq!(delete_file(&dir, "model-a").expect("no delete"), "bad-input");
         assert!(file.is_file());
 
-        std::fs::write(dir.join(".env"), "MODEL_ALIAS=\"other\"\n").expect("env");
+        std::fs::write(dir.join("golem.toml"), "MODEL_ALIAS=\"other\"\n").expect("env");
         assert_eq!(delete_file(&dir, "model-a").expect("delete"), "deleted");
         assert!(!file.exists());
         assert!(!dir.join("data/models/model-Q4_K_M.gguf.sha256").exists());
@@ -593,7 +590,7 @@ ctx-size = 8192
         let text = std::fs::read_to_string(dir.join("config/models.ini")).expect("read");
         let escaped = text.replace("model = model-Q4_K_M.gguf", "model = ../secret.gguf");
         std::fs::write(dir.join("config/models.ini"), escaped).expect("write");
-        std::fs::write(dir.join(".env"), "MODEL_ALIAS=\"other\"\n").expect("env");
+        std::fs::write(dir.join("golem.toml"), "MODEL_ALIAS=\"other\"\n").expect("env");
 
         assert_eq!(delete_file(&dir, "model-a").expect("no delete"), "bad-input");
         assert!(dir.join("secret.gguf").is_file(), "the file outside data/models survives");

@@ -1,66 +1,20 @@
 //! Tests for the full-screen console (`src/tui.rs`).
 //!
-//! `golem` is a binary crate with no library target, so the module is pulled
-//! in by path, exactly as `tests/web.rs` pulls in the console.
-//!
-//! `tui.rs` asks `crate::engine` three questions, and this crate root answers
-//! them with a stub: the bin declares `mod engine;` itself, but a test crate
-//! has no such module, so without the stub `tui.rs` would not compile here.
-//! The stub also keeps these tests hermetic and quick - no sockets, no temp
-//! files - and avoids compiling the real engine (and its own tests) a second
-//! time.
+//! Hermetic by construction: everything here goes through `App::new`, the
+//! accessors and `tui::draw`, none of which touches the world. The engine,
+//! the sockets, nvidia-smi and the results file are read only by
+//! `App::refresh` and `run`, which these tests never call - so no test
+//! depends on what this machine has running.
 //!
 //! The screen is rendered into ratatui's `TestBackend` - a buffer, not a
 //! terminal - and read back cell by cell, which is the only way to assert on
 //! what a user would see without a user. `run` itself is left alone: it needs
 //! a real terminal in raw mode.
 
-/// A stand-in for `crate::engine`: the few items `tui.rs` and `state.rs`
-/// reach for and nothing else. It reports the engine down and answers no
-/// socket, which is what a test machine with nothing running would see.
-mod engine {
-    use std::path::Path;
-
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct Endpoint {
-        pub port: u16,
-        pub api_key: String,
-    }
-
-    impl Endpoint {
-        pub fn from_home(_home: &Path) -> Endpoint {
-            Endpoint { port: 8000, api_key: String::new() }
-        }
-    }
-
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct Status {
-        pub up: bool,
-        pub pid: Option<u32>,
-        pub port: u16,
-    }
-
-    pub fn status(_home: &Path) -> Status {
-        Status { up: false, pid: None, port: 8000 }
-    }
-
-    /// No console is running in a test, so nothing answers.
-    pub fn get(_endpoint: &Endpoint, _path: &str) -> Option<(u16, String)> {
-        None
-    }
-}
-
-#[path = "../src/paths.rs"]
-mod paths;
-#[path = "../src/state.rs"]
-mod state;
-#[path = "../src/tui.rs"]
-mod tui;
-
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
-use tui::{Action, App, Facts};
+use golem::tui::{self, Action, App, Facts};
 
 /// Render one frame into a `w`x`h` buffer and return it as text, one line per
 /// row, so the assertions read like the screen looks.
@@ -197,14 +151,14 @@ fn the_message_line_shows_what_set_message_was_given() {
 fn the_message_line_starts_with_a_hint() {
     let text = screen(&App::new());
     assert!(text.contains("enter run"), "the default hint should be drawn:\n{text}");
-    // The wheel is how the shell's screen scrolls, so the port's hint says so.
+    // The wheel moves the marker too, so the hint says so.
     assert!(text.contains("mouse wheel"), "the hint names the wheel:\n{text}");
 }
 
 #[test]
 fn a_window_too_small_for_the_panes_still_shows_the_menu() {
-    // The checklist's "tiny windows": conhost opened at a corner, or a
-    // terminal split down to nothing. The menu is the one thing the screen is
+    // Tiny windows: conhost opened at a corner, or a terminal split down to
+    // nothing. The menu is the one thing the screen is
     // for, so it is what a small window keeps - the header gives way, and so
     // do the panes.
     for (w, h) in [(20u16, 6u16), (12, 5), (40, 3)] {
@@ -229,14 +183,14 @@ fn a_window_too_small_for_the_panes_still_shows_the_menu() {
 fn the_header_names_the_engine_state() {
     let text = screen(&App::new());
     assert!(text.contains("GOLEM"), "the header title is missing:\n{text}");
-    assert!(text.contains("down"), "the stub reports the engine down:\n{text}");
+    assert!(text.contains("down"), "a fresh app reports the engine down:\n{text}");
 }
 
 #[test]
-fn the_header_carries_the_facts_the_shell_screen_shows() {
+fn the_header_carries_every_fact() {
     // The mark, the state, the VRAM, the alias, the engine, the console and
-    // the free memory: the same segments in the same order as scripts/tui.sh.
-    // Wide enough for all of them - at 80 columns the free-memory segment is
+    // the free memory. Wide enough for all of them - at 80 columns the
+    // free-memory segment is
     // the one that does not fit, which is the next test's subject.
     let text = screen_at(&app_with_facts(), 120, 24);
     let header = text.lines().nth(1).expect("the header is the second line");
@@ -251,9 +205,8 @@ fn the_header_carries_the_facts_the_shell_screen_shows() {
 
 #[test]
 fn a_narrow_header_drops_whole_segments_from_the_right() {
-    // Cutting a styled line would slice it mid-escape and colour the rest of
-    // the terminal, so segments are dropped whole - and the ones that matter
-    // most are on the left.
+    // A segment is either whole on the line or not there - and the ones that
+    // matter most are on the left.
     let app = app_with_facts();
     let narrow = screen_at(&app, 40, 24);
     let header = narrow.lines().nth(1).expect("the header");

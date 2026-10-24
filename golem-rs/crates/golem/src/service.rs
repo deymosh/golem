@@ -5,12 +5,12 @@
 //!
 //! Three things want the same answer, and this is it:
 //!
-//! - **Nothing the CLI starts should outlive it, and nothing should be
-//!   inherited by it.** Today `golem up` spawns `llama-server` itself. On
-//!   Windows the child then holds a copy of whatever handles `up` was given -
-//!   including the caller's stdout pipe - so `./golem up | tail` waits for an
-//!   EOF that only comes when the engine stops. A client that spawns nothing
-//!   cannot leak anything.
+//! - **Nothing the CLI starts should inherit the CLI's handles.** On Windows
+//!   `std` spawns with `bInheritHandles = TRUE`, so an engine started by `up`
+//!   held a copy of the caller's stdout pipe and `golem up | tail` waited for
+//!   an EOF that only came when the engine stopped. A client that spawns
+//!   nothing cannot leak anything; only the first `up` after a boot, which
+//!   starts the service itself, still can.
 //! - **A killed run must not leave an orphan.** The engine is a child of the
 //!   service, so it goes when the service goes. A `tune` killed mid-sweep once
 //!   left a 35B resident - 11.7 GB of VRAM that nothing could see, because the
@@ -19,11 +19,13 @@
 //!   moment the engine is healthy; the entrypoint has to be a process that
 //!   owns the engine and stays.
 //!
-//! So the service owns the engine, and every verb is a *client* of it. `up`
-//! sends a command, the service runs the same code the CLI used to run, and
-//! the output streams back a line at a time. The client prints it and exits
-//! with the same code the verb returned - which is why the verb functions
-//! take a sink instead of writing to stdout directly.
+//! So the service owns the engine, and every verb is a *client* of it
+//! ([`request`]). The service runs the verb (`launch.rs`) and the output
+//! streams back a line at a time; the client prints it and exits with the
+//! verb's own code - which is why the verb functions take a sink instead of
+//! writing to stdout directly. Each connection is served on its own thread:
+//! one *start* at a time, but `down` and `status` are answered while a start
+//! runs, so a start that hangs can still be stopped.
 //!
 //! ## The protocol
 //!
@@ -56,11 +58,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use golem_core::json;
 
+use crate::config::Overrides;
 use crate::engine;
 use crate::launch;
 
@@ -145,28 +148,29 @@ fn addr_of(endpoint: &Endpoint) -> Result<SocketAddr, String> {
         .map_err(|e| format!("bad service port {}: {e}", endpoint.port))
 }
 
+/// Ask the service for one verb, starting a service when there is none, and
+/// stream its output to `out`. `Ok` is the verb's own exit code.
+///
+/// The one way every client - the CLI, the screen, the console, the tuner -
+/// reaches the engine, so the overrides travel the same road for all of them.
+pub fn request(home: &Path, verb: &str, overrides: &Overrides, out: &mut dyn Write) -> Result<i32, String> {
+    if let Some(code) = send(home, verb, overrides, out) {
+        return Ok(code);
+    }
+    ensure_running(home, out)?;
+    send(home, verb, overrides, out).ok_or_else(|| "the golem service started but did not answer".to_string())
+}
+
 /// Send one verb to the running service and stream its output to `out`.
 ///
 /// `None` means there is no service to ask - no endpoint file, or nothing
 /// answering on it - which is the caller's cue to start one or to fall back.
 /// `Some(code)` is the verb's exit code, whatever it was.
-pub fn send(home: &Path, verb: &str, out: &mut dyn Write) -> Option<i32> {
-    send_env(home, verb, &[], out)
-}
-
-/// Send one verb, with the caller's `GOLEM_*` overrides for that verb.
 ///
 /// The overrides decide which engine and preset a *start* resolves to, and
 /// the service runs the verb in its own process - so a caller's environment
-/// cannot reach it by inheritance, and this is the only road it can take.
-/// `GOLEM_*` only: the protocol carries what a verb may need to point
-/// somewhere, never configuration at large.
-pub fn send_env(
-    home: &Path,
-    verb: &str,
-    env: &[(String, String)],
-    out: &mut dyn Write,
-) -> Option<i32> {
+/// cannot reach it by inheritance, and the request is the only road there is.
+pub fn send(home: &Path, verb: &str, overrides: &Overrides, out: &mut dyn Write) -> Option<i32> {
     let endpoint = Endpoint::read(home)?;
     let addr = addr_of(&endpoint).ok()?;
     let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).ok()?;
@@ -174,7 +178,7 @@ pub fn send_env(
     // and silence in the middle of that is not a dead service. A service that
     // really dies closes the socket, which reads as the end of the stream.
     stream.set_read_timeout(None).ok()?;
-    let mut request = request_line(&endpoint.token, verb, env);
+    let mut request = request_line(&endpoint.token, verb, &overrides.wire());
     request.push('\n');
     stream.write_all(request.as_bytes()).ok()?;
     stream.flush().ok()?;
@@ -267,7 +271,7 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
     match args {
         [] => serve(home, false),
         [flag] if flag == "--up" => serve(home, true),
-        [word] if word == "stop" => match send(home, "shutdown", &mut std::io::stdout()) {
+        [word] if word == "stop" => match send(home, "shutdown", &Overrides::default(), &mut std::io::stdout()) {
             Some(exit) => exit,
             None => {
                 println!("[INFO] no golem service is running");
@@ -295,7 +299,7 @@ fn start_engine(home: &Path) -> i32 {
             return 0;
         }
     }
-    match launch::up(home, false, &mut std::io::stdout()) {
+    match launch::up(home, &Overrides::from_env(), false, &mut std::io::stdout()) {
         Ok(()) => 0,
         Err(message) => {
             eprintln!("[FAIL] {message}");
@@ -377,83 +381,93 @@ fn serve(home: &Path, start_now: bool) -> i32 {
         return 1;
     }
 
-    // One verb at a time, and the flag is what says so: two `up`s at once
-    // would fight over one engine, one pid file and one card.
-    let busy = AtomicBool::new(false);
-    // The loop's value is the exit code, and only the two ways out set it: a
-    // verb's own code is the client's business, because the service goes on
-    // serving whoever asks next.
-    let code = 'serving: loop {
+    // One start at a time: two `up`s at once would fight over one engine, one
+    // pid file and one card, so the second is refused rather than queued.
+    // Everything else - `down` above all - is served while a start runs,
+    // which is what lets a hung or unwanted start be stopped: the start's own
+    // health wait sees its child go and reports it.
+    let busy = Arc::new(AtomicBool::new(false));
+    // A `shutdown` request's exit code, once its thread has stopped the engine.
+    let shutdown: Arc<Mutex<Option<i32>>> = Arc::new(Mutex::new(None));
+    let code = loop {
+        if let Some(code) = *shutdown.lock().unwrap_or_else(|e| e.into_inner()) {
+            break code;
+        }
         if stop.load(Ordering::SeqCst) {
             println!();
             println!("[ .. ] stopping the engine and the service");
             break launch::down(home, &mut std::io::stdout());
         }
-        let mut stream = match listener.accept() {
+        let stream = match listener.accept() {
             Ok((stream, _)) => stream,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(ACCEPT_POLL);
-                continue;
-            }
-            // A connection that failed to arrive is not a reason to stop
-            // serving the ones that will.
+            // Nothing asking, or a connection that failed to arrive: neither
+            // is a reason to stop serving the ones that will.
             Err(_) => {
                 std::thread::sleep(ACCEPT_POLL);
                 continue;
             }
         };
-        let _ = stream.set_nonblocking(false);
-        let (verb, env) = match read_request(&mut stream, &endpoint.token) {
-            Ok(verb) => verb,
-            Err(message) => {
-                let _ = writeln!(stream, "{}", line_event(&message));
-                let _ = writeln!(stream, "{}", done_event(false, 1));
-                continue;
-            }
-        };
-        if verb == "shutdown" {
-            let _ = writeln!(stream, "{}", line_event("[ .. ] stopping the engine and the service"));
-            let stopped = {
-                let mut stdout = std::io::stdout();
-                let mut sink = Sink::new(Some(&mut stream), &mut stdout);
-                let stopped = launch::down(home, &mut sink);
-                let _ = sink.flush();
-                stopped
-            };
-            let _ = writeln!(stream, "{}", done_event(stopped == 0, stopped));
-            break 'serving stopped;
-        }
-        if busy.swap(true, Ordering::SeqCst) {
-            let _ = writeln!(stream, "{}", line_event("[FAIL] a job is already running"));
-            let _ = writeln!(stream, "{}", done_event(false, 1));
-            continue;
-        }
-        dispatch(home, &verb, &env, &mut stream);
-        busy.store(false, Ordering::SeqCst);
+        let (home, token) = (home.to_path_buf(), endpoint.token.clone());
+        let (busy, shutdown) = (Arc::clone(&busy), Arc::clone(&shutdown));
+        std::thread::spawn(move || serve_one(&home, &token, stream, &busy, &shutdown));
     };
     Endpoint::remove(home);
     println!("[ OK ] golem service stopped");
     code
 }
 
+/// One connection: read the request, run the verb, answer `done`.
+fn serve_one(home: &Path, token: &str, mut stream: TcpStream, busy: &AtomicBool, shutdown: &Mutex<Option<i32>>) {
+    let _ = stream.set_nonblocking(false);
+    let (verb, overrides) = match read_request(&mut stream, token) {
+        Ok(request) => request,
+        Err(message) => {
+            let _ = writeln!(stream, "{}", line_event(&message));
+            let _ = writeln!(stream, "{}", done_event(false, 1));
+            return;
+        }
+    };
+    if verb == "shutdown" {
+        let _ = writeln!(stream, "{}", line_event("[ .. ] stopping the engine and the service"));
+        let stopped = {
+            let mut stdout = std::io::stdout();
+            let mut sink = Sink::new(Some(&mut stream), &mut stdout);
+            let stopped = launch::down(home, &mut sink);
+            let _ = sink.flush();
+            stopped
+        };
+        let _ = writeln!(stream, "{}", done_event(stopped == 0, stopped));
+        *shutdown.lock().unwrap_or_else(|e| e.into_inner()) = Some(stopped);
+        return;
+    }
+    let starts = matches!(verb.as_str(), "up" | "restart");
+    if starts && busy.swap(true, Ordering::SeqCst) {
+        let _ = writeln!(stream, "{}", line_event("[FAIL] the engine is already being started"));
+        let _ = writeln!(stream, "{}", done_event(false, 1));
+        return;
+    }
+    // The service's own `GOLEM_*` environment is the floor every request
+    // stands on: a container sets `GOLEM_LOCAL_AI_HOST=0.0.0.0` once, for the
+    // service, and a request that does not mention it (the tuner putting the
+    // engine back, a button on the page) must not bind the loopback.
+    let overrides = Overrides::from_env().under(&overrides);
+    dispatch(home, &verb, &overrides, &mut stream);
+    if starts {
+        busy.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Run one verb, streaming its output to the client that asked for it.
-///
-/// The request's env goes on for the verb's duration only: [`EnvGuard`]
-/// puts it back on every exit path, so one request's overrides never
-/// decide the next one's engine.
-fn dispatch(home: &Path, verb: &str, env: &[(String, String)], stream: &mut TcpStream) -> i32 {
-    let env = EnvGuard::apply(env);
+fn dispatch(home: &Path, verb: &str, overrides: &Overrides, stream: &mut TcpStream) -> i32 {
     // The sink borrows the socket, so it lives in its own scope: the `done`
     // event below needs the socket back.
     let code = {
-        // `&mut *stream` rather than `stream`: a reborrow, so the socket is
-        // still ours once the sink is finished with it. The two bindings are
-        // what keep the borrow alive long enough - `&mut std::io::stdout()`
-        // inline would be a temporary, freed at the end of the statement.
+        // `&mut *stream`, a reborrow, so the socket is still ours once the
+        // sink is finished with it.
         let mut stdout = std::io::stdout();
         let mut sink = Sink::new(Some(&mut *stream), &mut stdout);
         let code = match verb {
-            "up" => match launch::up(home, false, &mut sink) {
+            "up" => match launch::up(home, overrides, false, &mut sink) {
                 Ok(()) => 0,
                 Err(message) => {
                     let _ = writeln!(sink, "[FAIL] {message}");
@@ -461,7 +475,7 @@ fn dispatch(home: &Path, verb: &str, env: &[(String, String)], stream: &mut TcpS
                 }
             },
             "down" => launch::down(home, &mut sink),
-            "restart" => match launch::restart(home, &mut sink) {
+            "restart" => match launch::restart(home, overrides, &mut sink) {
                 Ok(()) => 0,
                 Err(message) => {
                     let _ = writeln!(sink, "[FAIL] {message}");
@@ -477,40 +491,8 @@ fn dispatch(home: &Path, verb: &str, env: &[(String, String)], stream: &mut TcpS
         let _ = sink.flush();
         code
     };
-    env.restore();
     let _ = writeln!(stream, "{}", done_event(code == 0, code));
     code
-}
-
-/// The request's `GOLEM_*` overrides, set for one verb and put back after.
-///
-/// One verb at a time is the rule, so this is the only writer while it
-/// holds - and restoring is what keeps one request's candidate preset from
-/// deciding the next request's engine.
-struct EnvGuard {
-    saved: Vec<(String, Option<std::ffi::OsString>)>,
-}
-
-impl EnvGuard {
-    /// Record each key's current value, then set the request's.
-    fn apply(env: &[(String, String)]) -> EnvGuard {
-        let saved =
-            env.iter().map(|(key, _)| (key.clone(), std::env::var_os(key))).collect();
-        for (key, value) in env {
-            std::env::set_var(key, value);
-        }
-        EnvGuard { saved }
-    }
-
-    /// Put each key back where it was, absent included.
-    fn restore(self) {
-        for (key, value) in self.saved {
-            match value {
-                Some(value) => std::env::set_var(&key, value),
-                None => std::env::remove_var(&key),
-            }
-        }
-    }
 }
 
 /// The request line: one JSON object, with `env` inside it when there are
@@ -536,8 +518,7 @@ fn request_line(token: &str, verb: &str, env: &[(String, String)]) -> String {
 }
 
 /// Read the request line and check the token.
-fn read_request(stream: &mut TcpStream, token: &str)
--> Result<(String, Vec<(String, String)>), String> {
+fn read_request(stream: &mut TcpStream, token: &str) -> Result<(String, Overrides), String> {
     let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
     let mut line = String::new();
     reader.read_line(&mut line).map_err(|e| format!("cannot read the request: {e}"))?;
@@ -551,7 +532,8 @@ fn read_request(stream: &mut TcpStream, token: &str)
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .ok_or_else(|| "[FAIL] the request named no verb".to_string())?;
-    Ok((verb, env_of(&value)?))
+    let overrides = Overrides::from_wire(&env_of(&value)?).map_err(|e| format!("[FAIL] {e}"))?;
+    Ok((verb, overrides))
 }
 
 /// The request's `env` member as pairs, or empty when it is not there.
@@ -839,26 +821,5 @@ mod tests {
             env_of(&value).unwrap_err(),
             "the request's env is not an object of strings"
         );
-    }
-
-    #[test]
-    fn an_env_guard_sets_and_puts_back() {
-        // An unlikely key, so no other test or environment decides what it
-        // means; both halves in one test because they share the key and the
-        // harness runs tests in parallel.
-        const KEY: &str = "GOLEM_SERVICE_TEST_KEY";
-        // absent before → set → visible → restore → absent again
-        std::env::remove_var(KEY);
-        let guard = EnvGuard::apply(&[(KEY.to_string(), "one".to_string())]);
-        assert_eq!(std::env::var(KEY), Ok("one".to_string()));
-        guard.restore();
-        assert_eq!(std::env::var(KEY), Err(std::env::VarError::NotPresent));
-        // a pre-existing value → override → restore → the original back
-        std::env::set_var(KEY, "original");
-        let guard = EnvGuard::apply(&[(KEY.to_string(), "overridden".to_string())]);
-        assert_eq!(std::env::var(KEY), Ok("overridden".to_string()));
-        guard.restore();
-        assert_eq!(std::env::var(KEY), Ok("original".to_string()));
-        std::env::remove_var(KEY);
     }
 }

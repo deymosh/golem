@@ -1,10 +1,7 @@
-//! The tuner's decisions: which sweep point wins, and how far the context
-//! ladder climbs.
-//!
-//! A port of the decision half of `scripts/tune.sh` - its "5. Winner" and
-//! "6. Gate the winner" sections, plus `maximize_ctx` - with no I/O and no
-//! process spawning: the shell measures, this module decides. The floors and
-//! the reasoning behind them are in `docs/plan-tune-model-context.md`.
+//! The tuner's decisions: where the split frontier is, which point wins, and
+//! how far the context grows - with no I/O and no process spawning. The
+//! binary's `tune.rs` measures; this module decides. The floors, the wall
+//! and the reasoning behind them are in `docs/tuning.md`.
 //!
 //! Three rules travel together and must not be conflated:
 //!
@@ -16,11 +13,11 @@
 //! * the **depth floor** is applied only to a point that already passed the
 //!   eval gate, because a point is ranked before it is gated.
 
-/// The speed floor agreed with the user (docs/plan-tune-model-context.md).
+/// The speed floors a tuned setup has to clear (docs/tuning.md).
 ///
 /// A point under it is unusable however fast it looks next to worse points,
 /// so it is excluded from the ranking rather than merely ranked low. These
-/// are the defaults of `TUNE_MIN_*` in `scripts/tune.sh`.
+/// are the defaults of `TUNE_MIN_*` in golem.toml.
 #[derive(Debug, Clone, Copy)]
 pub struct Floor {
     /// Median decode, tokens/s.
@@ -49,8 +46,8 @@ impl Default for Floor {
 ///
 /// `None` means the two bounds are adjacent - there is nothing left between
 /// them to learn, and the caller stops instead of spending a model load on a
-/// split it can already predict. That is the whole point of this function: the
-/// grid the shell swept spent nine loads to learn what three bisection steps
+/// split it can already predict. That is the whole point of this function: a
+/// walk over the grid spends nine loads to learn what three bisection steps
 /// know.
 pub fn between(fits: u32, spills: u32) -> Option<u32> {
     if fits <= spills + 1 {
@@ -77,7 +74,7 @@ pub struct Point {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Exclusion {
     /// Prefill collapsed against the best the same engine reached: the
-    /// driver spilled to system memory (`scripts/tune.sh` "5. Winner").
+    /// driver spilled to system memory.
     Spilling { prefill: f64, engine_best: f64 },
     /// Decode under the absolute floor.
     BelowDecodeFloor { decode: f64 },
@@ -93,12 +90,11 @@ pub enum Exclusion {
 /// box), so comparing across engines would call an honest slow engine
 /// "spilling". `rank` computes the per-engine best and passes it in.
 ///
-/// The order matches the shell: spilling first, then the decode floor, then
-/// the prefill floor. Every comparison is strict, so a point exactly on a
+/// The order: spilling first, then the decode floor, then the prefill
+/// floor. Every comparison is strict, so a point exactly on a
 /// floor is kept.
 pub fn exclusion(point: &Point, engine_best_prefill: f64, floor: &Floor) -> Option<Exclusion> {
-    // The shell guards the spill test with `m > 0`: with no measurement to
-    // compare against, nothing can be "far under" it.
+    // With no measurement to compare against, nothing can be "far under" it.
     if engine_best_prefill > 0.0 && point.prefill < 0.75 * engine_best_prefill {
         return Some(Exclusion::Spilling {
             prefill: point.prefill,
@@ -137,7 +133,7 @@ fn engine_best(best: &[(String, f64)], engine: &str) -> f64 {
 /// Point indices, best decode first, with excluded points dropped.
 ///
 /// The spill check needs each engine's own best prefill, computed here from
-/// `points` (the shell does the same in its `ENG_MAXPRE` pass). The depth
+/// `points`. The depth
 /// floor is deliberately *not* applied: a point is ranked before it is gated
 /// (see [`winner`]). Ties in decode keep input order, so the sweep's own
 /// order decides.
@@ -157,10 +153,8 @@ pub fn rank(points: &[Point], floor: &Floor) -> Vec<usize> {
 /// depth decode meets the floor. `None` when nothing qualifies.
 ///
 /// A context you cannot use at depth is a fake win, so the depth floor
-/// applies here rather than in `rank`. Mirroring the shell, only a *measured*
-/// depth under the floor disqualifies a point: an unmeasured depth is not a
-/// violation (the shell skips a point only when `gen_tok_s_at_depth` is
-/// present and under the floor).
+/// applies here rather than in `rank`. Only a *measured* depth under the
+/// floor disqualifies a point: an unmeasured depth is not a violation.
 pub fn winner(points: &[Point], floor: &Floor) -> Option<usize> {
     rank(points, floor).into_iter().find(|&i| {
         let p = &points[i];
@@ -180,8 +174,8 @@ pub enum Rung {
 
 /// What the last rung did, fed back to [`next_context`].
 ///
-/// The shell's `maximize_ctx` loop carries two bits the plain
-/// `{ Starting, Fits, Failed }` signature cannot: *which* context a failed
+/// The ladder needs two bits a plain `{ Starting, Fits, Failed }` signature
+/// cannot carry: *which* context a failed
 /// grow was aiming at, and whether the one midpoint probe owed after a
 /// failure has already been spent. So `Failed` carries the attempt and
 /// `Probed` marks the probe as done - the state the ladder needs to stay a
@@ -202,7 +196,8 @@ pub enum RungOutcome {
 
 /// The context ladder: double toward the ceiling; after a failed rung, try
 /// one midpoint; stop when the ceiling is reached or the midpoint adds
-/// nothing. Mirrors `maximize_ctx` in `scripts/tune.sh`.
+/// nothing. `--ctx-ladder` selects it over the prediction
+/// ([`ContextSearch`]).
 ///
 /// `current` is the last context that fit (the caller only advances it on a
 /// `Fits`), and `ceiling` is the model's trained context (or a pinned
@@ -212,8 +207,8 @@ pub enum RungOutcome {
 /// After a `Failed { attempt }` the next rung is the midpoint
 /// `(current + attempt) / 2`, tried exactly once: if it adds nothing
 /// (`<= current`) the ladder stops at once, and once it has been measured
-/// the caller reports `Probed`, which also stops. That is the shell's single
-/// midpoint probe, encoded so the loop always terminates.
+/// the caller reports `Probed`, which also stops. One midpoint probe,
+/// encoded so the loop always terminates.
 pub fn next_context(current: u64, ceiling: u64, last: RungOutcome) -> Rung {
     match last {
         // The probe was the last rung: nothing more to try.
@@ -360,6 +355,60 @@ pub fn next_predicted(fits: &[(u64, u64)], wall_mib: u64, ceiling: u64, last: &P
     }
 }
 
+/// The context search as one value the caller drives: ask [`next`], measure
+/// that context, hand the reading back to [`record`], until `next` says stop.
+///
+/// It exists so the calibration point cannot be forgotten. The winner of the
+/// split search was measured at the preset's context, and that reading is the
+/// first point of the line; a caller that starts [`next_predicted`] from no
+/// points asks it to grow from a context of zero, which stops at once - the
+/// search never ran and the tuner kept the preset's context. Holding the
+/// points here, seeded at construction, is what makes that impossible.
+///
+/// [`next`]: ContextSearch::next
+/// [`record`]: ContextSearch::record
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextSearch {
+    fits: Vec<(u64, u64)>,
+    probe: Probe,
+    wall_mib: u64,
+    ceiling: u64,
+}
+
+impl ContextSearch {
+    /// Start from the point the split search already measured.
+    ///
+    /// A seed already over the wall is no line to extend - there is no room
+    /// to grow into - so the search starts with nothing and stops at once.
+    pub fn new(seed_ctx: u64, seed_vram_mib: u64, wall_mib: u64, ceiling: u64) -> ContextSearch {
+        let fits = if seed_vram_mib <= wall_mib { vec![(seed_ctx, seed_vram_mib)] } else { Vec::new() };
+        ContextSearch { fits, probe: Probe::None, wall_mib, ceiling: ceiling.max(seed_ctx) }
+    }
+
+    /// The context to measure next.
+    pub fn next(&self) -> Rung {
+        next_predicted(&self.fits, self.wall_mib, self.ceiling, &self.probe)
+    }
+
+    /// What measuring `ctx` showed. `under_floor` is the decode floor's
+    /// verdict, which the caller owns; the wall is this search's. Returns
+    /// what the probe was, so the caller can say it.
+    pub fn record(&mut self, ctx: u64, vram_mib: u64, under_floor: bool) -> Probe {
+        // Under the floor wins when both are true: the spill is what made the
+        // decode slow, and its VRAM reading is where the spill ended up rather
+        // than what the context costs.
+        self.probe = if under_floor {
+            Probe::UnderFloor { attempt: ctx }
+        } else if vram_mib > self.wall_mib {
+            Probe::OverWall { attempt: ctx, vram_mib }
+        } else {
+            self.fits.push((ctx, vram_mib));
+            Probe::Fits
+        };
+        self.probe.clone()
+    }
+}
+
 /// The largest context the fit allows, capped by `limit` and only worth
 /// growing to when it beats what already fit.
 fn predict(fit: Option<Fit>, current: u64, wall_mib: u64, limit: u64) -> Rung {
@@ -411,7 +460,7 @@ mod tests {
     fn a_floor_excludes_below_it_but_keeps_a_point_exactly_on_it() {
         let floor = Floor::default();
         // Exactly on both floors, and its engine's own best prefill: kept,
-        // because the shell compares strictly.
+        // because every comparison is strict.
         let on = point("llama.cpp", "n0", 25.0, 350.0, 4096);
         assert_eq!(exclusion(&on, 350.0, &floor), None);
 
@@ -495,7 +544,7 @@ mod tests {
     #[test]
     fn winner_keeps_a_gated_point_with_no_depth_measurement() {
         let floor = Floor::default();
-        // The shell only skips a point whose depth was measured *and* shallow.
+        // Only a point whose depth was measured *and* shallow is skipped.
         let mut points = vec![point("llama.cpp", "x", 50.0, 800.0, 4096)];
         points[0].passed_gate = Some(true);
         assert_eq!(winner(&points, &floor), Some(0));
@@ -731,6 +780,68 @@ mod tests {
         // to bisect, so the loop stops instead of asking twice.
         let probe = Probe::UnderFloor { attempt: 8193 };
         assert_eq!(next_predicted(&fits, 11776, 262144, &probe), Rung::Stop);
+    }
+
+    /// Drive a whole search against a card whose VRAM is a straight line in
+    /// the context, and return (the context it settled on, loads spent).
+    fn search_on_card(seed: u64, wall: u64, ceiling: u64, vram_at: impl Fn(u64) -> u64) -> (u64, u32) {
+        let mut search = ContextSearch::new(seed, vram_at(seed), wall, ceiling);
+        let (mut best, mut loads) = (seed, 0);
+        while let Rung::Grow(ctx) = search.next() {
+            loads += 1;
+            assert!(loads < 20, "the search does not terminate");
+            if search.record(ctx, vram_at(ctx), false) == Probe::Fits {
+                best = ctx;
+            }
+        }
+        (best, loads)
+    }
+
+    #[test]
+    fn the_search_grows_from_the_winners_own_point() {
+        // The regression this type exists for: the winner of the split search
+        // is a measured point, and a search that does not count it never
+        // starts. From the 35B's preset context the first grow is the doubling
+        // capped at the trained context, not a stop.
+        let search = ContextSearch::new(236544, 11060, 11264, 262144);
+        assert_eq!(search.next(), Rung::Grow(262144));
+        // A seed already past the wall has no room to grow into.
+        let full = ContextSearch::new(236544, 11400, 11264, 262144);
+        assert_eq!(full.next(), Rung::Stop);
+    }
+
+    #[test]
+    fn the_search_lands_under_the_wall_in_two_or_three_loads() {
+        // The 35B on this card, as measured while serving: ~0.02 MiB per
+        // context token on top of ~6.3 GB. The true ceiling under an 11264
+        // MiB wall is ~250K; the doubling from 236544 hits the trained 262144,
+        // goes over, and the re-prediction from that real point lands under.
+        let vram_at = |ctx: u64| 6330 + ctx / 50;
+        let true_ceiling = (11264 - 6330) * 50 + 49;
+        let (best, loads) = search_on_card(236544, 11264, 262144, vram_at);
+        assert!(vram_at(best) <= 11264, "{best} is over the wall");
+        assert!(best * 100 >= true_ceiling * 98, "{best} is not within 2% of {true_ceiling}");
+        assert!(loads <= 3, "{loads} loads");
+        // From a small seed the ladder would double five times; the line
+        // needs one doubling and a prediction.
+        let (best, loads) = search_on_card(8192, 11264, 262144, vram_at);
+        assert!(best * 100 >= true_ceiling * 98, "{best}");
+        assert!(loads <= 4, "{loads} loads");
+    }
+
+    #[test]
+    fn the_trained_context_caps_a_model_the_card_could_hold_more_of() {
+        // The 0.5B: the card would hold far more than its 32K trained context.
+        let (best, loads) = search_on_card(8192, 11264, 32768, |ctx| 900 + ctx / 100);
+        assert_eq!((best, loads), (32768, 2));
+    }
+
+    #[test]
+    fn a_floor_failure_bisects_and_is_not_a_point() {
+        let mut search = ContextSearch::new(65536, 7000, 11264, 262144);
+        assert_eq!(search.next(), Rung::Grow(131072));
+        assert_eq!(search.record(131072, 12000, true), Probe::UnderFloor { attempt: 131072 });
+        assert_eq!(search.next(), Rung::Grow(98304));
     }
 
     #[test]

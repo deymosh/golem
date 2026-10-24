@@ -1,16 +1,15 @@
 //! `golem tune --auto`: pick the best installed model, then tune it.
 //!
-//! The port of `scripts/tune-auto.sh`. The worker is this binary's own
-//! `tune::sweep` - the same sweep the single-preset path runs - so what lives
-//! here is the driver: which presets are installed, a cheap sweep for each,
-//! the ranking, and the full tune of the best one.
+//! The worker is `tune::sweep` - the same sweep the single-preset path runs -
+//! so what lives here is the driver: which presets are installed, a cheap
+//! sweep for each, the ranking, and the full tune of the best one.
 //!
 //! The question it answers is the one a new machine asks: *set me up with the
-//! smartest model this machine can run*. Three steps, as the shell:
+//! smartest model this machine can run*. Three steps:
 //!
 //! 1. every preset whose GGUF is already in `data/models` gets a cheap sweep
-//!    (no gate; the refine points are the user's to skip with `--no-refine`,
-//!    as the shell has it), its output in `data/tuned/auto-<preset>.log`;
+//!    (no gate; the refine points are the user's to skip with
+//!    `--no-refine`), its output in `data/tuned/auto-<preset>.log`;
 //! 2. the presets are ranked by their `; Quality: <score>` comment - a vendor
 //!    number that is only ever a RANKING input, never an adoption reason -
 //!    else by parameter count, then the context they reached, then decode;
@@ -27,7 +26,7 @@ use std::path::Path;
 use golem_core::gguf;
 use golem_core::ini;
 
-use crate::state;
+use crate::config;
 use crate::tune;
 
 /// `golem tune --auto [flags]`.
@@ -48,10 +47,10 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
     }
 }
 
-/// The driver's flags, and the `.env` defaults behind them.
+/// The driver's flags, and the golem.toml defaults behind them.
 ///
-/// The floors and the context policy are forwarded verbatim (the shell keeps
-/// them as strings too); `TUNE_RUNS` and `TUNE_PREFILL` are the two numbers
+/// The floors and the context policy are forwarded verbatim, as strings, for
+/// `tune` to parse; `TUNE_RUNS` and `TUNE_PREFILL` are the two numbers
 /// this driver owns, so they are parsed here for a clear error.
 #[derive(Debug, Clone)]
 struct Options {
@@ -115,17 +114,17 @@ fn number(text: &str) -> Result<u32, String> {
 }
 
 fn env_number(home: &Path, key: &str, fallback: u32) -> u32 {
-    state::env_value(home, key).and_then(|v| v.parse().ok()).unwrap_or(fallback)
+    config::get(home, key).and_then(|v| v.parse().ok()).unwrap_or(fallback)
 }
 
 fn env_or(home: &Path, key: &str, fallback: &str) -> String {
-    state::env_value(home, key).unwrap_or_else(|| fallback.to_string())
+    config::get(home, key).unwrap_or_else(|| fallback.to_string())
 }
 
 /// The driver itself: install check, cheap sweeps, ranking, full tune.
 fn auto_tune(home: &Path, opts: &Options) -> Result<(), String> {
     let preset_rel =
-        state::env_value(home, "MODELS_PRESET").unwrap_or_else(|| "config/models.ini".to_string());
+        config::get(home, "MODELS_PRESET").unwrap_or_else(|| "config/models.ini".to_string());
     let preset_path = home.join(&preset_rel);
     let text = std::fs::read_to_string(&preset_path)
         .map_err(|_| format!("preset file not found: {}", preset_path.display()))?;
@@ -142,7 +141,7 @@ fn auto_tune(home: &Path, opts: &Options) -> Result<(), String> {
         let Some(model) = doc.value(&name, "model") else { continue };
         let model = model.to_string();
         if !models_dir.join(&model).is_file() {
-            println!("  {name}: skipped - {model} is not downloaded (./golem pull {name})");
+            println!("  {name}: skipped - {model} is not downloaded (golem pull {name})");
             continue;
         }
         installed.push(Candidate::installed(name, model, &text, &models_dir));
@@ -249,11 +248,11 @@ fn auto_tune(home: &Path, opts: &Options) -> Result<(), String> {
         "[ OK ] auto-tune winner: {winner} (engine + flags in data/tuned/models.effective.ini)"
     );
     if opts.adopt {
-        println!("[ OK ] adopted in .env; restart to serve it (./golem restart)");
+        println!("[ OK ] adopted in golem.toml; restart to serve it (golem restart)");
     } else {
         println!(
             "  to adopt, re-run with --adopt, or set \
-             MODELS_PRESET=\"data/tuned/models.effective.ini\" in .env"
+             MODELS_PRESET = \"data/tuned/models.effective.ini\" in golem.toml"
         );
     }
     Ok(())
@@ -261,12 +260,11 @@ fn auto_tune(home: &Path, opts: &Options) -> Result<(), String> {
 
 /// The cheap sweep's flags: no gate, then the shared knobs.
 ///
-/// The shell passes `--no-gate` here and adds `--no-refine` only when the
-/// *user* asked for it (`if [[ "${REFINE}" == 0 ]]`), so the cheap pass does
-/// refine by default - the script's own header says "no gate, no refine",
-/// and the script is what the port follows, not its comment. Reproducing the
-/// comment instead would measure a different frontier than the shell's, and
-/// the ranking is built from these numbers.
+/// `--no-gate` always; `--no-refine` only when the *user* asked for it, so
+/// the cheap pass does refine by default. Cheap means ungated, not
+/// unrefined: the ranking is built from these numbers, and a pass without
+/// the refine points would rank a different frontier than the full tune
+/// then measures.
 fn sweep_args(preset: &str, opts: &Options) -> Vec<String> {
     let mut args = vec![preset.to_string(), "--no-gate".to_string()];
     if !opts.refine {
@@ -309,7 +307,7 @@ fn shared_args(args: &mut Vec<String>, opts: &Options) {
         args.push("--engine".to_string());
         args.push(opts.engine.clone());
     }
-    // `max` is the tuner's own default, so the shell only forwards a pin.
+    // `max` is the tuner's own default, so only a pin is forwarded.
     if opts.ctx != "max" {
         args.push("--ctx".to_string());
         args.push(opts.ctx.clone());
@@ -332,8 +330,7 @@ struct Candidate {
 
 impl Candidate {
     fn installed(preset: String, model: String, preset_text: &str, models_dir: &Path) -> Candidate {
-        // The same number the shell's `params_of` reads: the GGUF header's
-        // `params_total`, in billions.
+        // The GGUF header's `params_total`, in billions.
         let params_b = gguf::read(&models_dir.join(&model))
             .map(|f| f.params_total as f64 / 1e9)
             .unwrap_or(0.0);
@@ -360,10 +357,10 @@ fn key(c: &Candidate) -> (u8, f64, f64, u64, f64) {
 /// The `; Quality: <score>` comment of `section`, when the file has one.
 ///
 /// The comment may sit immediately above the section header (where this repo
-/// puts `; Download:`) or inside the section; both are read, which an
-/// off-by-one section taught the shell's awk. This mirrors it line for line: a
-/// quality line inside the wanted section answers at once, one in the section
-/// above is held as `pending` until the next header claims it.
+/// puts `; Download:`) or inside the section; both are read, because reading
+/// only one attributes a score to the wrong section. A quality line inside
+/// the wanted section answers at once; one in the section above is held as
+/// `pending` until the next header claims it.
 fn quality_of(text: &str, want: &str) -> Option<String> {
     let mut pending: Option<String> = None;
     let mut in_want = false;

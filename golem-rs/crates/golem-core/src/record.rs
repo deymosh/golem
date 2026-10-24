@@ -1,4 +1,4 @@
-//! The row builder: `scripts/record-result.sh`, ported.
+//! The row builder.
 //!
 //! A bench or an eval prints its numbers on one `RESULT` line; everything
 //! else in a row - the machine, the engine build, the model file, the flags
@@ -6,10 +6,13 @@
 //! machine and the home at the moment of recording. That is what this module
 //! does, and it is the whole reason a measurement can be reproduced later.
 //!
-//! It is the port of `scripts/record-result.sh`, and it must stay
-//! byte-compatible with it: `bench/results.jsonl` is append-only and holds
-//! rows the shell wrote, so a Rust row that spells a field differently is a
-//! row the report reads differently. Verify with a diff, never by reading.
+//! The row's spelling is fixed: `bench/results.jsonl` is append-only and its
+//! earliest rows were written by an earlier recorder, so a new row that
+//! spells a field differently - a number quoted, a `null` turned into `""`,
+//! a different number of decimals - is a row the report reads differently.
+//! A change here is verified by replaying a saved capture (`golem bench
+//! --replay <file>`) and diffing the new row against the recorded one, never
+//! by reading.
 //!
 //! The split: **this module is the part that can be tested** - the row, the
 //! flags a preset effectively serves, the model's own facts - and the
@@ -23,23 +26,23 @@ use std::path::Path;
 use crate::results::Kind;
 use crate::{evalparse, gguf, json};
 
-/// One effective flag's value, and how the shell renders it.
+/// One effective flag's value, and how a row renders it.
 ///
-/// The distinction is not cosmetic. A value that came out of a preset goes
-/// through the awk's own test (numeric or `true`/`false` bare, everything
-/// else quoted), while the single-model branch builds its two keys with
-/// `json_str` and `json_num` directly - so `extra` is *always* quoted even
-/// when it looks like a number, and `ctx-size` is the bare `null` when
-/// `CONTEXT_SIZE` is unset rather than an empty string. Collapsing the three
-/// into one rule makes a row the shell wrote and a row this writes disagree.
+/// The distinction is not cosmetic. A value that came out of a preset is
+/// bare when numeric or `true`/`false` and quoted otherwise, while the
+/// single-model branch's two keys have fixed renderings - `extra` is
+/// *always* quoted even when it looks like a number, and `ctx-size` is the
+/// bare `null` when `CONTEXT_SIZE` is unset rather than an empty string.
+/// Collapsing the three into one rule makes a new row and a recorded one
+/// disagree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlagValue {
     /// From a preset: bare when numeric or `true`/`false`, quoted otherwise.
     Preset(String),
-    /// Always quoted, however numeric it looks (`json_str`).
+    /// Always quoted, however numeric it looks.
     Text(String),
-    /// The shell's `json_num`: the number when it is one, the bare `null`
-    /// when it is not - which is also what an unset value becomes.
+    /// The number when it is one, the bare `null` when it is not - which is
+    /// also what an unset value becomes.
     Number(String),
 }
 
@@ -137,7 +140,7 @@ pub fn reject_row(facts: &Facts, captured: &str) -> String {
 
 /// One JSON line for `captured`, or `Err` when there is nothing to record.
 pub fn row(facts: &Facts, captured: &str) -> Result<String, String> {
-    // The shell's `grep -q '^RESULT'`: a run with no RESULT line is not a
+    // A run with no RESULT line is not a
     // measurement (a failed or interrupted run), and recording it would put a
     // null row in the database.
     if !captured.lines().any(|line| line.starts_with("RESULT")) {
@@ -153,9 +156,9 @@ enum Metrics {
     Eval,
 }
 
-/// The metrics a kind of row carries: the shell's
-/// `if [[ "${KIND}" == bench ]] ... else`, with `reject` on the bench side
-/// because that is what the reject rows in the file already hold.
+/// The metrics a kind of row carries: bench metrics or eval metrics, with
+/// `reject` on the bench side because that is what the reject rows in the
+/// file already hold.
 fn metrics_for(kind: Kind) -> Metrics {
     match kind {
         Kind::Eval => Metrics::Eval,
@@ -193,8 +196,8 @@ fn row_with(facts: &Facts, captured: &str, metrics: Metrics) -> Result<String, S
     members.push(format!("\"n_layer\": {}", num_opt_u32(facts.n_layer)));
     members.push(format!("\"ctx_train\": {}", num_opt_u64(facts.ctx_train)));
     members.push(format!("\"flags\": {}", flags_json(&facts.flags)));
-    // The kind-specific metrics object's members, inlined where the printf
-    // puts `${METRICS}` (the shell's `if [[ "${KIND}" == bench ]] ... else`).
+    // The kind-specific metrics object's members, inlined at this position
+    // in the row.
     members.push(match metrics {
         Metrics::Bench => bench_metrics(captured),
         Metrics::Eval => eval_metrics(captured),
@@ -230,8 +233,8 @@ fn kind_name(kind: Kind) -> &'static str {
     }
 }
 
-/// A number, or bare `null` when it was not measured - the shell's `json_num`
-/// (`-?[0-9]+(\.[0-9]+)?`, so no `+`, no exponent).
+/// A number, or bare `null` when it was not measured (the shape
+/// `-?[0-9]+(\.[0-9]+)?`, so no `+`, no exponent).
 fn num_opt_u64(v: Option<u64>) -> String {
     match v {
         Some(n) => n.to_string(),
@@ -246,7 +249,7 @@ fn num_opt_u32(v: Option<u32>) -> String {
     }
 }
 
-/// `%.2f`, the shell's awk format for `params_b` and `params_active_b`.
+/// `%.2f`, the format of `params_b` and `params_active_b`.
 fn num_opt_f2(v: Option<f64>) -> String {
     match v {
         Some(n) => format!("{n:.2}"),
@@ -254,7 +257,7 @@ fn num_opt_f2(v: Option<f64>) -> String {
     }
 }
 
-/// `%.1f`, the shell's format for the RAM figures.
+/// `%.1f`, the format of the RAM figures.
 fn num_opt_f1(v: Option<f64>) -> String {
     match v {
         Some(n) => format!("{n:.1}"),
@@ -262,8 +265,7 @@ fn num_opt_f1(v: Option<f64>) -> String {
     }
 }
 
-/// The shell's `json_num`: a numeric string passes through, anything else is
-/// `null`.
+/// A numeric string passes through, anything else is `null`.
 fn json_num(value: &str) -> String {
     if is_json_num(value) {
         value.to_string()
@@ -272,7 +274,7 @@ fn json_num(value: &str) -> String {
     }
 }
 
-/// `^-?[0-9]+(\.[0-9]+)?$` - the one number shape the scripts accept.
+/// `^-?[0-9]+(\.[0-9]+)?$` - the one number shape a row accepts.
 fn is_json_num(s: &str) -> bool {
     let body = s.strip_prefix('-').unwrap_or(s);
     match body.split_once('.') {
@@ -288,8 +290,7 @@ fn is_json_num(s: &str) -> bool {
 
 /// `flags` as a JSON object, in the order the preset gave them. Each value is
 /// rendered the way the branch that produced it renders it - see
-/// [`FlagValue`]; the awk's END block is record-result.sh lines 181-191 and
-/// the single-model branch is line 193.
+/// [`FlagValue`].
 fn flags_json(flags: &[Flag]) -> String {
     let mut members: Vec<String> = Vec::with_capacity(flags.len());
     for (key, value) in flags {
@@ -311,8 +312,7 @@ fn flag_value(value: &str) -> String {
     }
 }
 
-/// The last value of `key=` across the `RESULT` lines, or empty - the shell's
-/// `result_field` (`grep '^RESULT' | tr ' ' '\n' | grep "^$key=" | tail -n1`).
+/// The last value of `key=` across the `RESULT` lines, or empty.
 fn result_field(captured: &str, key: &str) -> String {
     let mut found = String::new();
     for line in captured.lines() {
@@ -328,7 +328,7 @@ fn result_field(captured: &str, key: &str) -> String {
     found
 }
 
-/// The bench metrics object's members, inlined. record-result.sh line 258.
+/// The bench metrics object's members, inlined.
 fn bench_metrics(captured: &str) -> String {
     let decode_best = json_num(&result_field(captured, "decode_best"));
     let decode_median = json_num(&result_field(captured, "decode_median"));
@@ -348,13 +348,12 @@ fn draft_accept(captured: &str) -> String {
     if raw.is_empty() || raw == "-" {
         return "null".to_string();
     }
-    // `awk -v a=... 'BEGIN {printf "%.2f", a/100}'`: a non-numeric value reads
-    // as 0 there too.
+    // A non-numeric value reads as 0.
     let percent: f64 = raw.parse().unwrap_or(0.0);
     format!("{:.2}", percent / 100.0)
 }
 
-/// The eval metrics object's members, inlined. record-result.sh line 264.
+/// The eval metrics object's members, inlined.
 fn eval_metrics(captured: &str) -> String {
     let tools = if captured.lines().any(|line| line.starts_with("[ OK ] tool calling")) {
         "PASS"
@@ -376,8 +375,7 @@ fn eval_metrics(captured: &str) -> String {
     )
 }
 
-/// The last `long_ctx_<N>` key on a `RESULT` line, as the shell's
-/// `grep -o '^long_ctx_[0-9]*' | tail -n1` takes it.
+/// The last `long_ctx_<N>` key on a `RESULT` line.
 fn last_needle_key(captured: &str) -> Option<String> {
     let mut found = None;
     for line in captured.lines() {
@@ -409,8 +407,7 @@ fn last_needle_prompt(captured: &str) -> String {
 
 /// The flags a preset effectively serves for `alias`: the shared `[*]`
 /// section first, then the alias's own section, in file order, one entry per
-/// key, the later value winning. `model` is skipped. This is the awk at
-/// record-result.sh lines 172-191.
+/// key, the later value winning. `model` is skipped.
 pub fn flags_of(preset_text: &str, alias: &str) -> Vec<Flag> {
     let doc = crate::ini::parse(preset_text);
     let mut out: Vec<Flag> = Vec::new();
@@ -423,7 +420,7 @@ pub fn flags_of(preset_text: &str, alias: &str) -> Vec<Flag> {
                 continue;
             }
             // A key already seen keeps its first position while the later
-            // value wins (`f[k] = v` with `order[]` recorded once).
+            // value wins.
             let value = FlagValue::Preset(entry.value.clone());
             match out.iter_mut().find(|(k, _)| *k == entry.key) {
                 Some((_, existing)) => *existing = value,
@@ -437,7 +434,7 @@ pub fn flags_of(preset_text: &str, alias: &str) -> Vec<Flag> {
 /// The preset's effective flags as plain `(key, value)` pairs.
 ///
 /// For a caller that is building a command line rather than a row: the
-/// launcher wants the text the preset gave, with no opinion about how a row
+/// engine start wants the text the preset gave, with no opinion about how a row
 /// would quote it. Same parse, same order, same merge as [`flags_of`].
 pub fn preset_flags(preset_text: &str, alias: &str) -> Vec<(String, String)> {
     flags_of(preset_text, alias)
@@ -455,8 +452,8 @@ pub fn preset_flags(preset_text: &str, alias: &str) -> Vec<(String, String)> {
 
 /// The `ctx-size` the preset serves for `alias` (alias section only).
 ///
-/// The awk prints the first such line and exits, so a duplicate key does not
-/// override the first (unlike `Section::value`, which takes the last).
+/// The first such line wins, so a duplicate key does not override it
+/// (unlike `Section::value`, which takes the last).
 pub fn ctx_of(preset_text: &str, alias: &str) -> Option<u64> {
     section_key(preset_text, alias, "ctx-size")?.parse().ok()
 }
@@ -501,8 +498,7 @@ pub fn model_facts(path: &Path) -> ModelFacts {
     }
 }
 
-/// The parameter count in billions, printed to two decimals. The shell's
-/// `awk 'BEGIN {if (v+0 > 0) printf "%.2f", v/1e9}'`: nothing when the count
+/// The parameter count in billions, to two decimals; nothing when the count
 /// is 0.
 fn params_billion(params: u64) -> Option<f64> {
     if params == 0 {
@@ -512,10 +508,9 @@ fn params_billion(params: u64) -> Option<f64> {
 }
 
 /// The anonymous hardware slug a row carries: lower case, the marketing
-/// words dropped, everything else runs of one dash. `scripts/record-result.sh`
-/// line 92, and the same function `scripts/tune.sh` uses for its output
-/// directory - the two must agree, because a row and its tuned setup are
-/// filed under this name.
+/// words dropped, everything else runs of one dash. The tuner names its
+/// output directory (`data/tuned/<host>/`) with the same function - the two
+/// must agree, because a row and its tuned setup are filed under this name.
 pub fn slug(text: &str) -> String {
     let mut stripped = text.to_lowercase().replace("(r)", "").replace("(tm)", "");
     for word in ["nvidia", "geforce", "intel", "core", "amd", "radeon", "processor"] {
@@ -779,7 +774,7 @@ ctx-size = 8192
 
     #[test]
     fn a_parameter_count_becomes_billions_to_two_decimals() {
-        assert_eq!(params_billion(0), None, "the shell prints nothing for 0");
+        assert_eq!(params_billion(0), None, "an unknown count (0) is no count, not 0.00B");
         assert_eq!(params_billion(35_510_000_000), Some(35.51));
         assert_eq!(params_billion(3_520_000_000), Some(3.52));
     }

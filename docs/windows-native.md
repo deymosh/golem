@@ -67,7 +67,7 @@ anything, and `golem install` puts the engine on disk without starting it at all
 |---|---|---|
 | `llama.cpp` (b11379) | **default, adopted** | router mode, `/v1/messages`, MTP |
 | `ik_llama.cpp` (Thireus main-b5483) | **rejected** 2026-10-19 | 16.7-16.9 t/s decode vs llama.cpp 58.1 on the same model and flags (3.4x slower): its `--fit` fills to 12.0 GB (sysmem cliff) and the default split is worse; `-rtr` repack crashes at startup; `mlock` of the 17.7 GB buffer fails; no `/v1/messages`, no router, no idle unload |
-| `strata` (v0.1.45) | **rejected, and unsupported** 2026-10-19 | cannot serve 200K on 12 GB: its VRAM cost per context token is ~57 KB (measured: 32K→64K costs 1.80 GiB) against llama.cpp's ~12.7 KB q8 KV, so 200K needs ~11.5 GB for context alone and the engine reports "0 MiB free" at 236K. Where it runs (32768 ctx) it gives 49.8 t/s vs llama.cpp 58.5 at the same context. Its adapter says it installs itself with its own shell launcher, and the shell is gone, so `golem` refuses it by name |
+| `strata` (v0.1.45) | **rejected, and unsupported** 2026-10-19 | cannot serve 200K on 12 GB: its VRAM cost per context token is ~57 KB (measured: 32K→64K costs 1.80 GiB) against llama.cpp's ~12.7 KB q8 KV, so 200K needs ~11.5 GB for context alone and the engine reports "0 MiB free" at 236K. Where it runs (32768 ctx) it gives 49.8 t/s vs llama.cpp 58.5 at the same context. It installs itself with its own setup, which golem does not run, so its adapter is gone |
 
 Engine gate, 2026-10-19, quiet desktop, all rows in `bench/results.jsonl`:
 
@@ -79,9 +79,9 @@ Engine gate, 2026-10-19, quiet desktop, all rows in `bench/results.jsonl`:
 | strata v0.1.45 | Qwen3.6-35B UD-Q4_K_XL | 236544 | impossible | – | – |
 | ik_llama.cpp main-b5483 | Ornith-1.5-35B Q4_K_M | 236544 | 18.8 / 16.7 | 479 | 12.0 GB |
 
-A future build of either rejected engine is one `ENGINE_BUILD` change plus a paired bench and
-the 200K eval away from being reconsidered — for `ik_llama.cpp`. Strata would need its
-installer ported first.
+A future `ik_llama.cpp` build is one `ENGINE_BUILD` change plus a paired bench and the 200K
+eval away from being reconsidered; Strata would need an adapter golem can install from a
+release first ([engines-and-models.md](engines-and-models.md)).
 
 ## The VRAM cliff
 
