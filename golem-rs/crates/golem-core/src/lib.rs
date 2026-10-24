@@ -48,6 +48,10 @@ pub mod record;
 /// The date stamps a preset comment and a tuned overlay carry.
 pub mod time;
 
+/// The mark: one grid for the terminal glyphs, the icon's pixels and its
+/// `.ico` file.
+pub mod mark;
+
 /// The schema version this build understands (bumped on breaking changes
 /// to a row's fields; old rows keep parsing).
 pub const SCHEMA_VERSION: u32 = 1;

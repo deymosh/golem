@@ -221,20 +221,7 @@ pub fn ensure_running(home: &Path, out: &mut dyn Write) -> Result<(), String> {
     }
     let exe = std::env::current_exe()
         .map_err(|e| format!("cannot find this binary to start the service: {e}"))?;
-    let mut command = std::process::Command::new(exe);
-    command
-        .arg("service")
-        .env("GOLEM_HOME", home)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    let child = command
+    let child = spawn_command(&exe, home)
         .spawn()
         .map_err(|e| format!("cannot start the golem service: {e}"))?;
     let _ = writeln!(out, "[ .. ] golem service started (pid {})", child.id());
@@ -250,6 +237,34 @@ pub fn ensure_running(home: &Path, out: &mut dyn Write) -> Result<(), String> {
         "the golem service did not come up within {}s",
         START_DEADLINE.as_secs()
     ))
+}
+
+/// The detached service's command line and environment.
+///
+/// The `GOLEM_*` overrides are stripped: the service lays every request's
+/// overrides over its own environment, so one inherited from whichever
+/// command happened to start it would point every later verb at that
+/// command's preset or engine. A client's overrides travel with its request
+/// instead. A service started directly (`golem service --up` in a container)
+/// keeps its environment - that is how a container pins its bind address.
+fn spawn_command(exe: &Path, home: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(exe);
+    command
+        .arg("service")
+        .env("GOLEM_HOME", home)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    for key in crate::config::OVERRIDABLE {
+        command.env_remove(format!("GOLEM_{key}"));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
 }
 
 /// `golem service [stop|--up]`: run in the foreground and own the engine.
@@ -644,6 +659,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".local")).expect("temp");
         dir
+    }
+
+    #[test]
+    fn an_auto_started_service_inherits_no_overrides() {
+        // Removed explicitly, so it holds whatever the test runner's own
+        // environment carries.
+        let command = spawn_command(Path::new("golem"), Path::new("/h"));
+        let envs: Vec<_> = command.get_envs().collect();
+        for key in crate::config::OVERRIDABLE {
+            let name = format!("GOLEM_{key}");
+            assert!(
+                envs.iter().any(|(k, v)| *k == name.as_str() && v.is_none()),
+                "{name} is not stripped: {envs:?}"
+            );
+        }
+        assert!(
+            envs.iter().any(|(k, v)| *k == "GOLEM_HOME" && v.is_some()),
+            "the home is still handed on: {envs:?}"
+        );
     }
 
     #[test]

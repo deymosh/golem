@@ -351,6 +351,8 @@ struct Measured {
     prefill: f64,
     vram_mib: f64,
     ctx: u64,
+    /// The `ubatch-size` it ran with, 0 for the engine's default.
+    ubatch: u32,
     overrides: Vec<Entry>,
     n_cpu_moe: String,
     passed_gate: Option<bool>,
@@ -365,6 +367,7 @@ impl Measured {
             decode: self.decode,
             prefill: self.prefill,
             ctx: self.ctx,
+            ubatch: self.ubatch,
             passed_gate: self.passed_gate,
             depth_decode: self.depth_decode,
         }
@@ -1124,6 +1127,15 @@ impl<'a> Tuner<'a> {
             .find(|e| e.key == "ctx-size")
             .and_then(|e| e.value.parse().ok())
             .unwrap_or(self.ctx_seed);
+        // The override when this point set one, else what the preset serves.
+        let ubatch = overrides
+            .iter()
+            .rev()
+            .find(|e| e.key == "ubatch-size")
+            .map(|e| e.value.as_str())
+            .unwrap_or(&self.ubatch)
+            .parse()
+            .unwrap_or(0);
 
         self.emit(format_args!(
             "  {engine:<14} {label:<12} decode {decode:>6.1} t/s  prefill {prefill:>6.0} t/s  vram {vram:>5.0} MiB"
@@ -1135,6 +1147,7 @@ impl<'a> Tuner<'a> {
             prefill,
             vram_mib: vram,
             ctx,
+            ubatch,
             overrides: overrides.to_vec(),
             n_cpu_moe,
             passed_gate: None,
@@ -1220,7 +1233,10 @@ impl<'a> Tuner<'a> {
         let ranked: Vec<usize> = tune::rank(&self.points.iter().map(Measured::point).collect::<Vec<_>>(), &floor);
         let points: Vec<Point> = self.points.iter().map(Measured::point).collect();
         self.emit(format_args!(""));
-        self.emit(format_args!("  ranked (best decode that is not spilling):"));
+        self.emit(format_args!(
+            "  ranked (best decode that is not spilling; within {:.0}% of it, best prefill):",
+            tune::DECODE_TIE * 100.0
+        ));
         for &i in &ranked {
             let p = &points[i];
             self.emit(format_args!(

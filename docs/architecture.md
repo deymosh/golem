@@ -104,7 +104,9 @@ no SIGTERM handler would ignore `docker stop`.
 MODEL_ALIAS and LOCAL_AI_HOST. They are data handed to the plan for that one verb, laid
 over the service's own `GOLEM_*` environment, and never written into the process
 environment. This is how the tuner restarts the engine on a candidate preset, and how a
-container keeps `0.0.0.0` on every restart.
+container keeps `0.0.0.0` on every restart. A service that a client starts on demand
+inherits none of the four: the client's overrides belong to its request, not to every
+later one.
 
 ## Starting an engine
 

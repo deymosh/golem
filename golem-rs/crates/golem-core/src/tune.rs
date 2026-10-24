@@ -6,8 +6,8 @@
 //! Three rules travel together and must not be conflated:
 //!
 //! * the **spill** check is *relative* - a point's prefill against the best
-//!   prefill its own engine reached - and catches the Windows driver
-//!   silently spilling VRAM to system memory;
+//!   prefill its own engine reached at the same `ubatch-size` - and catches
+//!   the Windows driver silently spilling VRAM to system memory;
 //! * the **floors** are *absolute* - a fixed tokens/s bar - and catch a setup
 //!   that is merely slow without spilling;
 //! * the **depth floor** is applied only to a point that already passed the
@@ -64,6 +64,9 @@ pub struct Point {
     pub decode: f64,
     pub prefill: f64,
     pub ctx: u64,
+    /// The `ubatch-size` it ran with, 0 for the engine's default. Prefill
+    /// moves with it by design, so the spill check compares within it.
+    pub ubatch: u32,
     /// Result of the eval gate for this point, when it was gated.
     pub passed_gate: Option<bool>,
     /// Decode at full depth, from the gate's own measurement.
@@ -85,10 +88,11 @@ pub enum Exclusion {
 /// Why a point is out of the ranking, or `None` when it is in.
 ///
 /// `engine_best_prefill` is the best prefill the point's *own* engine
-/// reached, not the best across engines: engines differ in prefill by design
-/// (ik_llama.cpp runs ~480 t/s where llama.cpp runs ~830 on the reference
-/// box), so comparing across engines would call an honest slow engine
-/// "spilling". `rank` computes the per-engine best and passes it in.
+/// reached at the point's own `ubatch-size`, not the best across engines or
+/// batch sizes: both move prefill by design (ik_llama.cpp runs ~480 t/s where
+/// llama.cpp runs ~830 on the reference box; ub1024 prefills ~560 where
+/// ub2048 prefills ~870), so comparing across them would call an honestly
+/// slower setup "spilling". `rank` computes that best and passes it in.
 ///
 /// The order: spilling first, then the decode floor, then the prefill
 /// floor. Every comparison is strict, so a point exactly on a
@@ -110,42 +114,59 @@ pub fn exclusion(point: &Point, engine_best_prefill: f64, floor: &Floor) -> Opti
     None
 }
 
-/// The best prefill each engine reached, in the order engines first appear.
-fn best_prefill_per_engine(points: &[Point]) -> Vec<(String, f64)> {
-    let mut best: Vec<(String, f64)> = Vec::new();
+/// How close to the best decode a point must be to count as tied with it,
+/// as a fraction of the best.
+///
+/// Best-of-3 decode on one unchanged setup varies by about 1% (63.1 to 63.9
+/// t/s in the 2026-10-25 pair), so a gap under 3% is noise, not a ranking.
+/// Within the tie, prefill decides: ub2048 and ub1024 decoded alike there,
+/// and ub2048 prefilled 55% faster - which a session pays on every first
+/// prompt.
+pub const DECODE_TIE: f64 = 0.03;
+
+/// The best prefill each engine reached at each `ubatch-size`, in the order
+/// they first appear.
+fn best_prefill(points: &[Point]) -> Vec<(&str, u32, f64)> {
+    let mut best: Vec<(&str, u32, f64)> = Vec::new();
     for p in points {
-        match best.iter_mut().find(|(e, _)| e == &p.engine) {
-            Some((_, b)) => {
+        match best.iter_mut().find(|(e, u, _)| *e == p.engine && *u == p.ubatch) {
+            Some((_, _, b)) => {
                 if p.prefill > *b {
                     *b = p.prefill;
                 }
             }
-            None => best.push((p.engine.clone(), p.prefill)),
+            None => best.push((p.engine.as_str(), p.ubatch, p.prefill)),
         }
     }
     best
 }
 
-fn engine_best(best: &[(String, f64)], engine: &str) -> f64 {
-    best.iter().find(|(e, _)| e == engine).map(|(_, b)| *b).unwrap_or(0.0)
+fn best_of(best: &[(&str, u32, f64)], point: &Point) -> f64 {
+    best.iter()
+        .find(|(e, u, _)| *e == point.engine && *u == point.ubatch)
+        .map(|(_, _, b)| *b)
+        .unwrap_or(0.0)
 }
 
-/// Point indices, best decode first, with excluded points dropped.
+/// Point indices, best first, with excluded points dropped.
 ///
-/// The spill check needs each engine's own best prefill, computed here from
-/// `points`. The depth
-/// floor is deliberately *not* applied: a point is ranked before it is gated
-/// (see [`winner`]). Ties in decode keep input order, so the sweep's own
-/// order decides.
+/// Best decode first, except that the points within [`DECODE_TIE`] of the
+/// best decode form one band at the top, ordered by prefill. Below the band
+/// decode alone decides. The depth floor is deliberately *not* applied: a
+/// point is ranked before it is gated (see [`winner`]). Exact ties keep input
+/// order, so the sweep's own order decides.
 pub fn rank(points: &[Point], floor: &Floor) -> Vec<usize> {
-    let best = best_prefill_per_engine(points);
+    let best = best_prefill(points);
     let mut kept: Vec<usize> = (0..points.len())
-        .filter(|&i| exclusion(&points[i], engine_best(&best, &points[i].engine), floor).is_none())
+        .filter(|&i| exclusion(&points[i], best_of(&best, &points[i]), floor).is_none())
         .collect();
-    // A stable sort: equal decodes stay in the order they were measured.
-    kept.sort_by(|&a, &b| {
-        points[b].decode.partial_cmp(&points[a].decode).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    let desc = |x: f64, y: f64| y.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal);
+    // Stable sorts: equal values stay in the order they were measured.
+    kept.sort_by(|&a, &b| desc(points[a].decode, points[b].decode));
+    let Some(&top) = kept.first() else { return kept };
+    let cut = points[top].decode * (1.0 - DECODE_TIE);
+    let band = kept.iter().take_while(|&&i| points[i].decode >= cut).count();
+    kept[..band].sort_by(|&a, &b| desc(points[a].prefill, points[b].prefill));
     kept
 }
 
@@ -445,9 +466,46 @@ mod tests {
             decode,
             prefill,
             ctx,
+            ubatch: 0,
             passed_gate: None,
             depth_decode: None,
         }
+    }
+
+    fn at_ubatch(mut p: Point, ubatch: u32) -> Point {
+        p.ubatch = ubatch;
+        p
+    }
+
+    #[test]
+    fn a_smaller_ubatch_is_not_spilling_against_a_larger_one() {
+        // The 2026-10-25 pair: ub1024 prefills ~560 where ub2048 prefills
+        // ~870, on the same engine, with nothing spilled.
+        let floor = Floor::default();
+        let points = vec![
+            at_ubatch(point("llama.cpp", "ub2048", 63.6, 889.0, 4096), 2048),
+            at_ubatch(point("llama.cpp", "ub1024", 63.9, 564.0, 4096), 1024),
+        ];
+        let ranked = rank(&points, &floor);
+        assert!(ranked.contains(&1), "ub1024 is ranked, not excluded: {ranked:?}");
+
+        // A collapse within one ubatch is still a spill.
+        let mut spilled = points.clone();
+        spilled.push(at_ubatch(point("llama.cpp", "n33-ub1024", 66.0, 380.0, 4096), 1024));
+        assert!(!rank(&spilled, &floor).contains(&2));
+    }
+
+    #[test]
+    fn a_decode_tie_goes_to_the_faster_prefill() {
+        let floor = Floor::default();
+        let points = vec![
+            at_ubatch(point("llama.cpp", "ub1024", 63.9, 564.0, 4096), 1024),
+            // Within 3%: a tie, and the faster prefill wins it.
+            at_ubatch(point("llama.cpp", "ub2048", 63.6, 889.0, 4096), 2048),
+            // 9% under the best: not a tie, whatever its prefill.
+            at_ubatch(point("llama.cpp", "slow", 58.0, 900.0, 4096), 2048),
+        ];
+        assert_eq!(rank(&points, &floor), vec![1, 0, 2]);
     }
 
     #[test]

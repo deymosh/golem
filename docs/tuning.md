@@ -41,8 +41,8 @@ fits when that reading is at most **the card's size less `TUNE_VRAM_HEADROOM_MIB
 (1024 by default, `--vram-headroom` per run). The headroom is the desktop's room to grow:
 its own use drifts between half a gigabyte and one and a half over a day, and past the
 card's size the Windows driver spills into system memory silently. A spill also shows as a
-prefill collapse against the engine's own best, which the ranking excludes
-(`golem_core::tune::exclusion`) - so the reading and the measured speed both have to agree
+prefill collapse against the best the same engine reached at the same `ubatch-size`, which
+the ranking excludes (`golem_core::tune::exclusion`) - so the reading and the measured speed both have to agree
 that a point fits.
 
 The engine is stopped before the card is probed (a loaded model would read as "desktop"),
@@ -62,7 +62,9 @@ and put back after the run on the configuration as it then stands.
    lever; the collapse test catches a bad one). A thread count only when decode is within
    25% of the floor - the knob moves decode by a few percent and costs a whole load. MTP
    off, only when the model has a head.
-4. **Rank** what is not excluded by decode, and take the best.
+4. **Rank** what is not excluded by decode, and take the best. Decodes within 3% of the
+   best (`DECODE_TIE`) are a tie, and the tie goes to the faster prefill: a gap that small
+   is run-to-run noise, and prefill is paid on every first prompt.
 5. **Grow the context, by prediction.** VRAM is a straight line in the context at a fixed
    split. The winner's own point is the line's first point; one doubling (capped at the
    trained context) gives the second; from there the largest context under the wall is
@@ -133,6 +135,19 @@ the sweep's own n-cpu-moe 35. The verdict differs from the 2026-10-20 tune in tw
 context reached the full 262144 (that tune stopped at 249344), and `ubatch-size 1024` won
 on decode (62.5 against 55.1 at 2048), which costs prefill - 505 t/s on an 8K prompt
 against the 878 that `ub2048` measured on a quiet desktop in October. Both `ub2048`
-points of this run were measured on the busy desktop, so that comparison is not yet a
-fair pair; the ranking picks by decode alone, and whether prefill should weigh in is the
-question the pair answers (docs/roadmap.md).
+points of this run were measured on the busy desktop.
+
+The quiet-desktop pair, 2026-10-25: n-cpu-moe 35, ctx 262144, same session, best of
+three benches of three runs each.
+
+| Setup | Decode | Prefill 30K | Prefill 8K | VRAM (whole card) |
+|---|---|---|---|---|
+| `ub1024` | 63.9 t/s | 559 t/s | 564 t/s | 10358-10472 MiB |
+| `ub2048` | 63.6 t/s | 866 t/s | 889 t/s | 11635-11807 MiB |
+
+Decode is a tie and `ub2048` prefills 55-58% faster, but at the trained context it reads
+400-550 MiB over the wall, so the tuner was right to refuse it there. Two rules changed
+with it: the spill check compares within one `ubatch-size` (against `ub2048`'s 889,
+`ub1024`'s 564 read as a spill), and a decode tie goes to prefill. Whether `ub2048` at
+the largest context under the wall beats `ub1024` at the trained one is the next tune's
+question.

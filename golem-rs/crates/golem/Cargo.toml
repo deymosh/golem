@@ -1,21 +1,21 @@
 [package]
 name = "golem"
-description = "One portable front door for the local model server: results, console, tuner"
+description = "Golem: install, tune and serve one local model for coding agents"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 # golem-core is the workspace's own logic; axum/tokio are the console's
-# server (phase 2). Nothing else is added without a phase that needs it.
+# server. Nothing else is added without a feature that needs it.
 [dependencies]
 golem-core = { path = "../golem-core" }
 axum = "0.7"
-# process/time: the controls spawn the shell drivers and poll them.
-# signal: `golem service` stops the engine it owns when it is interrupted,
-# which is what keeps a Ctrl+C from leaving a model resident.
+# fs: the console reads its page and its records asynchronously. signal:
+# `golem service` stops the engine it owns when it is interrupted, which is
+# what keeps a Ctrl+C from leaving a model resident.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "process", "time", "io-util", "signal"] }
-# The full-screen console (phase 5).
+# The full-screen console.
 ratatui = "0.29"
 crossterm = "0.28"
 
@@ -23,3 +23,7 @@ crossterm = "0.28"
 # ratatui's TestBackend renders into a buffer, so the TUI is testable
 # without a terminal.
 ratatui = "0.29"
+
+# build.rs draws the executable's icon from the mark.
+[build-dependencies]
+golem-core = { path = "../golem-core" }
