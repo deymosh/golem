@@ -333,7 +333,7 @@ fn start_engine(home: &Path) -> i32 {
 fn start_console(home: &Path) {
     let cfg = crate::web::Config {
         results: crate::paths::results(home),
-        template: crate::paths::template(home),
+        template: None,
         home: home.to_path_buf(),
         host: crate::desktop::console_host(home),
         port: crate::desktop::console_port(home),
@@ -367,6 +367,16 @@ fn start_console(home: &Path) {
 
 /// The service itself: bind, announce, and serve until told to stop.
 fn serve(home: &Path, start_now: bool) -> i32 {
+    // One service per home: a second would fight the first for the engine,
+    // its pid file and the console's port.
+    if running(home) {
+        let port = Endpoint::read(home).map_or(0, |e| e.port);
+        eprintln!(
+            "[FAIL] a golem service is already running for this home (127.0.0.1:{port}) - \
+             stop it first with: golem service stop"
+        );
+        return 1;
+    }
     let listener = match TcpListener::bind("127.0.0.1:0") {
         Ok(listener) => listener,
         Err(e) => {

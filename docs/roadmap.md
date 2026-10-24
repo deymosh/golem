@@ -40,35 +40,28 @@ compiled into the binary, `golem pull <name>` fetches a library model by name, a
 outside the library by measured speed and size, since the Hub publishes no benchmark
 scores.
 
-## 3. The mark and one look
+## 3. The app
 
-The mark is the README's block golem, `▟█▙` over `▜█▛`, with a lit row across it: the
-spark. It is a grid in `golem-core`, so the terminal header, the page, the executable's
-icon and the tray all draw the same cells, and the spark carries the engine's state
-(serving, loading, stopped).
+The mark (`golem_core::mark`), the icon and version block in the executable, the
+redesigned console, the screen's header, and `golem app` - a frameless window on the
+console, its title bar drawn by the page, with a tray whose spark shows the engine's state,
+and `golemw.exe` to start it with no console window (`--features desktop`) - are in.
+What is left:
 
-- **The executable.** A version resource and the icon in `golem.exe`, built by `build.rs`
-  from the same grid: `windres` locally, `rc.exe` in CI.
-- **The console and the screen.** One look across both: the mark, three state colours,
-  the model list as the first view with each model's measured speed, one pull box, and
-  progress for every long step.
+- **A shortcut.** `golem setup` could put `golemw.exe` in the Start menu and on the
+  desktop; today a shortcut is made by hand.
+- **Linux.** The desktop build needs WebKitGTK on the build machine; CI builds Linux
+  without it until the runner installs it.
+- **Progress for long steps** in the console: a pull or a tune shows its log, not yet a
+  bar.
 
-## 4. The tray
-
-A tray icon for `golem service` on Windows: the state in the spark, and Open console,
-Restart, Stop and Quit (which stops the engine first). Windows has no tray API without
-`unsafe`, which the workspace forbids, so it is the `tray-icon` crate behind a build
-feature; Linux and the container build without it. Starting the service at log-on already
-works without it (`schtasks` or a shortcut to `golem service --up`,
-[windows-native.md](windows-native.md)).
-
-## 5. Release
+## 4. Release
 
 `.github/workflows/golem-bin.yml` builds and tests on the three platforms and attaches a
 binary per OS to a `v*` tag. A fresh clone has no binary until then and builds one with
 `./scripts/cargo.sh build`. Tagging is a push, and it waits for the go-ahead.
 
-## 6. Candidates, when the GPU is free
+## 5. Candidates, when the GPU is free
 
 From [engines-and-models.md](engines-and-models.md): the everyday-slot pair (Ornith-1.5-9B,
 Gemma 4 12B QAT), a paired retest of llama.cpp b11755, and Strata's 0.2.x engine line

@@ -60,4 +60,16 @@ if [[ "${sub}" == "build" || "${sub}" == "test" ]]; then
         cp -f "${built}" "${ROOT_DIR}/${copy}"
         echo "[ OK ] ${copy} at the repository root (git-ignored) from ${built#"${ROOT_DIR}/"}"
     fi
+    # The windowed launcher, when the desktop feature built it.
+    launcher="${built%/*}/golemw.exe"
+    if [[ -n "${built}" && -f "${launcher}" ]]; then
+        cp -f "${launcher}" "${ROOT_DIR}/golemw.exe"
+    fi
+    # A GNU build with the desktop feature loads WebView2Loader.dll at run
+    # time (an MSVC build, like CI's release, links it in); it goes beside
+    # the binary, where Windows looks first.
+    loader="$(ls -1t "${ROOT_DIR}/golem-rs/target"/*/"${profile}"/build/webview2-com-sys-*/out/x64/WebView2Loader.dll 2>/dev/null | head -n1 || true)"
+    if [[ -n "${loader}" ]]; then
+        cp -f "${loader}" "${ROOT_DIR}/WebView2Loader.dll"
+    fi
 fi

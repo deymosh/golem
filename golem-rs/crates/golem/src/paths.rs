@@ -11,17 +11,16 @@
 //! `scripts/cargo.sh` puts it) uses the checkout's own `bench/`, `data/` and
 //! `logs/` by virtue of sitting next to them.
 //!
-//! One file is not created from nothing: the page template is compiled into
-//! the binary, and written into the home the first time it is needed. An
-//! existing template is never overwritten - a developer editing it expects
-//! the edit to win over the embedded copy.
+//! The page (the console and `golem report`) is compiled into the binary and
+//! never written into the home: it is the binary's own, so a copy in the
+//! home would keep serving an old page after an upgrade. In the checkout it
+//! is `bench/report.template.html`, which the build compiles in.
 
 use std::path::{Path, PathBuf};
 
-/// The page template, compiled in so a release is a single file and still
-/// has a console. The repository has the same file under `bench/`; this copy
-/// is what a downloaded binary uses.
-const EMBEDDED_TEMPLATE: &str = include_str!("../../../../bench/report.template.html");
+/// The page, compiled in: the console and `golem report` both render it, in
+/// a release and in the checkout alike.
+pub const PAGE: &str = include_str!("../../../../bench/report.template.html");
 
 /// The configuration template, compiled in for the same reason: a release
 /// folder has no `golem.toml.example`, and without one every key would fall
@@ -70,10 +69,6 @@ pub fn ensure(home: &Path) -> std::io::Result<()> {
     for dir in DIRS {
         std::fs::create_dir_all(home.join(dir))?;
     }
-    let template = template(home);
-    if !template.is_file() {
-        std::fs::write(&template, EMBEDDED_TEMPLATE)?;
-    }
     let config = home.join("golem.toml");
     if !config.is_file() {
         std::fs::write(&config, EMBEDDED_CONFIG)?;
@@ -119,11 +114,6 @@ pub fn pid_file(home: &Path) -> PathBuf {
     home.join(".local").join("llama-server.pid")
 }
 
-/// `bench/report.template.html` under the home (written by [`ensure`] when
-/// it is missing).
-pub fn template(home: &Path) -> PathBuf {
-    home.join("bench").join("report.template.html")
-}
 
 #[cfg(test)]
 mod tests {
@@ -166,19 +156,12 @@ mod tests {
     }
 
     #[test]
-    fn ensure_writes_the_embedded_template_once() {
+    fn the_page_is_the_binarys_and_never_written_into_the_home() {
         let dir = std::env::temp_dir().join("golem-rs-paths-template-test");
         let _ = std::fs::remove_dir_all(&dir);
         ensure(&dir).expect("first run");
-        let written = std::fs::read_to_string(template(&dir)).expect("template");
-        assert_eq!(written, EMBEDDED_TEMPLATE);
-        assert!(written.contains("/*GOLEM_DATA*/"), "the page's data marker");
-
-        // A developer's edit must win over the embedded copy.
-        std::fs::write(template(&dir), "edited").expect("edit");
-        ensure(&dir).expect("second run");
-        assert_eq!(std::fs::read_to_string(template(&dir)).expect("read"), "edited");
-
+        assert!(!dir.join("bench/report.template.html").exists());
+        assert!(PAGE.contains("/*GOLEM_DATA*/"), "the page's data marker");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -186,7 +169,6 @@ mod tests {
     fn the_paths_hang_off_the_home() {
         let home = Path::new("/tmp/golem-home");
         assert_eq!(results(home), home.join("bench/results.jsonl"));
-        assert_eq!(template(home), home.join("bench/report.template.html"));
         assert_eq!(engine_log(home), home.join("logs").join("llama-server.log"));
         assert_eq!(pid_file(home), home.join(".local").join("llama-server.pid"));
     }

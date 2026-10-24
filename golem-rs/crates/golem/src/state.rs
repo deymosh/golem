@@ -27,6 +27,22 @@ pub fn presets(home: &Path) -> Vec<String> {
     ini::Document::read(&preset_path(home)).map(|doc| doc.preset_names()).unwrap_or_default()
 }
 
+/// Point the setup at another preset (`alias`) or engine (`engine`), by
+/// rewriting golem.toml: `applied`, or `bad-input` for a name that is not
+/// installed - the same lists the console's choices and the screen offer, so
+/// a hand-made request cannot write a name that would not start.
+pub fn apply(home: &Path, setting: &str, value: &str) -> std::io::Result<&'static str> {
+    let (key, installed) = match setting {
+        "alias" => ("MODEL_ALIAS", presets(home)),
+        "engine" => ("ENGINE", engines(home)),
+        _ => return Ok("bad-input"),
+    };
+    if !installed.iter().any(|name| name == value) {
+        return Ok("bad-input");
+    }
+    config::set(home, key, value).map(|()| "applied")
+}
+
 /// The engine adapters installed under `engines/`, by directory name.
 ///
 /// This is what the console's engine dropdown offers, so it lists what is

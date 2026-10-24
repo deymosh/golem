@@ -19,6 +19,16 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "
 ratatui = "0.29"
 crossterm = "0.28"
 
+# The native window and the tray (`--features desktop`): a webview showing the
+# console the service hosts, and the tray icon on the same event loop. Off by
+# default, so a server or a container builds with no GUI libraries.
+tao = { version = "0.30", optional = true }
+wry = { version = "0.47", optional = true }
+tray-icon = { version = "0.19", optional = true }
+
+[features]
+desktop = ["dep:tao", "dep:wry", "dep:tray-icon"]
+
 [dev-dependencies]
 # ratatui's TestBackend renders into a buffer, so the TUI is testable
 # without a terminal.
@@ -27,3 +37,10 @@ ratatui = "0.29"
 # build.rs draws the executable's icon from the mark.
 [build-dependencies]
 golem-core = { path = "../golem-core" }
+
+# The windowed launcher: a GUI-subsystem program, so starting it opens no
+# console. It starts `golem app` beside it and exits.
+[[bin]]
+name = "golemw"
+path = "src/bin/golemw.rs"
+required-features = ["desktop"]

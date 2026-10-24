@@ -6,6 +6,8 @@
 //! by path. The layers - front ends, commands, engine, foundation - are in
 //! `docs/architecture.md`.
 
+#[cfg(feature = "desktop")]
+pub mod app;
 pub mod auto_tune;
 pub mod bench;
 pub mod client;

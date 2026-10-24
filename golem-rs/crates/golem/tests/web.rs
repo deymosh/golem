@@ -45,6 +45,21 @@ fn render_page_replaces_only_the_data_marker() {
     assert_eq!(render_page("<p>hi</p>", "[]"), "<p>hi</p>");
 }
 
+#[test]
+fn the_page_draws_the_same_mark_as_the_icon_and_the_screen() {
+    let template = include_str!("../../../../bench/report.template.html");
+    let cells: Vec<String> = golem_core::mark::GRID.iter().map(|row| format!("\"{row}\"")).collect();
+    let line = format!("const GRID = [{}];", cells.join(", "));
+    assert!(template.contains(&line), "the page's GRID is not golem_core::mark::GRID ({line})");
+}
+
+#[test]
+fn the_page_keeps_the_data_marker_the_generator_replaces() {
+    let template = include_str!("../../../../bench/report.template.html");
+    assert_eq!(template.matches("/*GOLEM_DATA*/").count(), 1);
+    assert!(template.contains(r#"<script id="golem-data" type="application/json">"#));
+}
+
 // ---- end to end over a real socket -------------------------------------
 
 /// A fresh, empty directory under the system temp dir, unique per process and
@@ -100,7 +115,7 @@ fn fixture(tag: &str) -> (PathBuf, Config) {
     std::fs::write(&template, TEMPLATE).expect("write template");
     let cfg = Config {
         results,
-        template,
+        template: Some(template),
         host: "127.0.0.1".to_string(),
         port: 0,
         home: dir.clone(),
@@ -178,7 +193,7 @@ fn a_missing_file_is_a_500_not_a_panic() {
     let dir = temp_dir("missing");
     let cfg = Config {
         results: dir.join("absent.jsonl"),
-        template: dir.join("absent.html"),
+        template: Some(dir.join("absent.html")),
         host: "127.0.0.1".to_string(),
         port: 0,
         home: dir.clone(),

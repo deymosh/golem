@@ -25,7 +25,6 @@ use axum::routing::{get, post};
 
 use golem_core::json;
 
-use crate::config;
 use crate::runner;
 use crate::models;
 use crate::state::{self, Job, SharedJob};
@@ -38,8 +37,9 @@ use crate::state::{self, Job, SharedJob};
 pub struct Config {
     /// e.g. `bench/results.jsonl`
     pub results: PathBuf,
-    /// e.g. `bench/report.template.html`
-    pub template: PathBuf,
+    /// The page to render: `None` for the compiled-in one, which is what
+    /// the service serves; a path for a test's fixture.
+    pub template: Option<PathBuf>,
     /// default `"127.0.0.1"`
     pub host: String,
     /// default `8787`
@@ -53,7 +53,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             results: PathBuf::from("bench/results.jsonl"),
-            template: PathBuf::from("bench/report.template.html"),
+            template: None,
             host: "127.0.0.1".to_string(),
             port: 8787,
             home: PathBuf::from("."),
@@ -147,9 +147,12 @@ pub async fn serve_on(listener: tokio::net::TcpListener, cfg: Config) -> std::io
 /// measured, and the page renders an empty table happily. A file that exists
 /// but cannot be read is a real error and says so.
 async fn index(State(app): State<Arc<App>>) -> Response {
-    let template = match tokio::fs::read_to_string(&app.cfg.template).await {
-        Ok(t) => t,
-        Err(e) => return read_error(&app.cfg.template, &e),
+    let template = match &app.cfg.template {
+        None => crate::paths::PAGE.to_string(),
+        Some(path) => match tokio::fs::read_to_string(path).await {
+            Ok(t) => t,
+            Err(e) => return read_error(path, &e),
+        },
     };
     let raw = match read_results(&app.cfg.results).await {
         Ok(r) => r,
@@ -392,17 +395,7 @@ async fn apply_setting(app: &Arc<App>, action: &str, arg: &str) -> Response {
     let home = app.cfg.home.clone();
     let action = action.to_string();
     let arg = arg.to_string();
-    let outcome = tokio::task::spawn_blocking(move || {
-        let (key, installed) = match action.as_str() {
-            "alias" => ("MODEL_ALIAS", state::presets(&home)),
-            _ => ("ENGINE", state::engines(&home)),
-        };
-        if !installed.iter().any(|name| name == &arg) {
-            return Ok("bad-input");
-        }
-        config::set(&home, key, &arg).map(|()| "applied")
-    })
-    .await;
+    let outcome = tokio::task::spawn_blocking(move || state::apply(&home, &action, &arg)).await;
     match outcome {
         Ok(Ok(result)) => json(StatusCode::OK, result_json(result)),
         Ok(Err(e)) => plain(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")),

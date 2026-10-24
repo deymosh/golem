@@ -3,152 +3,261 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Golem Benchmarks</title>
-<!-- Template for golem report: the generator replaces the GOLEM_DATA
-     marker with a JSON array of bench/results.jsonl lines. Self-contained:
-     no server, no CDN, opens from file://. -->
+<title>Golem</title>
+<!-- One page, three places. Served by `golem service` it is the console:
+     models, controls, results and the engine log, live. In the Golem window
+     (`golem app`) the same page also draws the window's title bar. Written
+     by `golem report` it is a snapshot of the results alone. The generator
+     replaces the GOLEM_DATA marker with the results.jsonl lines.
+     Self-contained: no CDN, no web fonts, opens from file://. -->
 <style>
+/* The title bar is the header: mark and name, the tabs, the state, and in
+   the app the window's own buttons. Under it one working column. Colours
+   follow the mark - clay greys, a patina accent, amber kept for "alive" -
+   and the one loud element is each model's decode speed. */
 :root {
-  --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a64; --line: #e3e1da;
-  --accent: #b4532a; --pass: #2f7d4f; --fail: #b3261e; --warn: #9a6b00;
-  --s1: #b4532a; --s2: #2b6cb0; --s3: #2f7d4f; --s4: #7b4fa8; --s5: #9a6b00; --s6: #0f7c86;
+  --ground: #e8ebe8; --surface: #f7f8f7; --raised: #ffffff; --ink: #1b2321; --soft: #56635f;
+  --hair: #d5dbd8; --clay: #7a8883; --patina: #1d7466; --spark: #c98a24;
+  --ok: #2b8a4b; --busy: #b5731a; --bad: #b23a2e;
+  --s1: #1d7466; --s2: #2f67b1; --s3: #b5731a; --s4: #7a4fa6; --s5: #b23a2e; --s6: #56635f;
+  --ui: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", sans-serif;
+  --display: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --code: "Cascadia Mono", "Cascadia Code", ui-monospace, Consolas, monospace;
+  --bar: 44px;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #151513; --panel: #1e1e1b; --ink: #ecebe6; --muted: #9b9a92; --line: #33322d;
-    --accent: #e0814f; --pass: #5cc184; --fail: #f07167; --warn: #e0b54f;
-    --s1: #e0814f; --s2: #6aa8f0; --s3: #5cc184; --s4: #b48ae0; --s5: #e0b54f; --s6: #4cc3cc;
+    --ground: #1f2523; --surface: #262d2b; --raised: #2c3431; --ink: #e3e9e6; --soft: #9aa7a2;
+    --hair: #36403d; --clay: #8f9d98; --patina: #52c2ae; --spark: #efb24c;
+    --ok: #5cc47e; --busy: #e8a845; --bad: #f07868;
+    --s1: #52c2ae; --s2: #6ea9f0; --s3: #e8a845; --s4: #b58ce0; --s5: #f07868; --s6: #9aa7a2;
     color-scheme: dark;
   }
 }
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--ink);
-  font: 14px/1.45 ui-sans-serif, system-ui, "Segoe UI", sans-serif; }
-/* Wide by default: this page is mostly tables and charts, which read better
-   filling the window than in a narrow column. The cap only exists so an
-   ultrawide monitor does not stretch rows into unreadable lines. */
-main { max-width: 2200px; margin: 0 auto; padding: 28px 18px 60px; }
-header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-h1 { font: 600 22px/1.2 ui-monospace, "Cascadia Code", Consolas, monospace; margin: 0; letter-spacing: -.01em; }
-h1 b { color: var(--accent); }
-h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 34px 0 10px; font-weight: 600; }
-.meta { color: var(--muted); font-size: 13px; }
-.filters { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 18px; padding: 12px 14px;
-  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
-.filters label { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
-select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 5px; padding: 3px 6px; max-width: 260px; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; }
+:root[data-theme="dark"] {
+  --ground: #1f2523; --surface: #262d2b; --raised: #2c3431; --ink: #e3e9e6; --soft: #9aa7a2;
+  --hair: #36403d; --clay: #8f9d98; --patina: #52c2ae; --spark: #efb24c;
+  --ok: #5cc47e; --busy: #e8a845; --bad: #f07868;
+  --s1: #52c2ae; --s2: #6ea9f0; --s3: #e8a845; --s4: #b58ce0; --s5: #f07868; --s6: #9aa7a2;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--soft) 45%, transparent) transparent; }
+html, body { height: 100%; }
+/* An app, not a document: the title bar and the controls stay, and each
+   content area - the model list, the results, the log - scrolls itself. */
+body { margin: 0; background: var(--ground); color: var(--ink); font: 14px/1.5 var(--ui); -webkit-font-smoothing: antialiased;
+  display: flex; flex-direction: column; overflow: hidden; }
+code, .code { font-family: var(--code); font-size: 12.5px; }
+button, select, input { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--patina); outline-offset: 2px; }
+
+/* ---- title bar --------------------------------------------------------- */
+.bar { flex: none; position: relative; z-index: 20; height: var(--bar); display: grid; grid-template-columns: 1fr auto 1fr;
+  align-items: center; background: var(--surface); border-bottom: 1px solid var(--hair); user-select: none;
+  padding-left: max(14px, env(safe-area-inset-left, 0px)); }
+.brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.brand svg { width: 22px; height: 22px; flex: none; }
+.brand span { font: 600 14px/1 var(--display); letter-spacing: .01em; }
+.tabs { display: flex; gap: 2px; padding: 4px; background: var(--ground); border-radius: 8px; }
+.tabs a { padding: 5px 14px; border-radius: 6px; color: var(--soft); text-decoration: none; font-size: 13px; }
+.tabs a:hover { color: var(--ink); }
+.tabs a[aria-current="page"] { background: var(--raised); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / .08); }
+.right { display: flex; align-items: center; justify-content: flex-end; gap: 14px; min-width: 0; height: 100%;
+  padding-right: max(14px, env(safe-area-inset-right, 0px)); }
+.state { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--soft); white-space: nowrap; overflow: hidden; }
+.state i { width: 8px; height: 8px; border-radius: 50%; background: var(--soft); flex: none; }
+.state.up i { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+.state.busy i { background: var(--busy); }
+.state b { color: var(--ink); font-weight: 600; }
+.winbtns { display: none; height: 100%; }
+.winbtns button { width: 46px; height: 100%; border: 0; background: transparent; color: var(--soft); cursor: default; display: grid; place-items: center; }
+.winbtns button:hover { background: color-mix(in srgb, var(--ink) 8%, transparent); color: var(--ink); }
+.winbtns button.x:hover { background: #c42b1c; color: #fff; }
+.winbtns svg { width: 10px; height: 10px; stroke: currentColor; fill: none; stroke-width: 1; }
+html.app .winbtns { display: flex; }
+html.app .right { padding-right: 0; }
+.edge { position: fixed; z-index: 30; display: none; }
+html.app .edge { display: block; }
+.edge.n { top: 0; left: 6px; right: 6px; height: 4px; cursor: n-resize; }
+.edge.s { bottom: 0; left: 6px; right: 6px; height: 5px; cursor: s-resize; }
+.edge.e { right: 0; top: 6px; bottom: 6px; width: 5px; cursor: e-resize; }
+.edge.w { left: 0; top: 6px; bottom: 6px; width: 5px; cursor: w-resize; }
+.edge.ne { top: 0; right: 0; width: 8px; height: 8px; cursor: ne-resize; }
+.edge.nw { top: 0; left: 0; width: 8px; height: 8px; cursor: nw-resize; }
+.edge.se { bottom: 0; right: 0; width: 10px; height: 10px; cursor: se-resize; }
+.edge.sw { bottom: 0; left: 0; width: 10px; height: 10px; cursor: sw-resize; }
+@media (max-width: 760px) { .bar { grid-template-columns: auto 1fr; } .tabs { grid-column: 1 / -1; grid-row: 2; justify-self: start; }
+  .bar { height: auto; padding-block: 8px; row-gap: 8px; } .state span { display: none; } }
+
+/* ---- page -------------------------------------------------------------- */
+main { flex: 1; min-height: 0; width: 100%; max-width: 1240px; margin: 0 auto; display: flex;
+  padding: 22px max(18px, env(safe-area-inset-right, 0px)) 18px max(18px, env(safe-area-inset-left, 0px)); }
+section { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 16px; }
+section[hidden] { display: none; }
+section > * { flex: none; }
+/* What scrolls in each tab. */
+#m-list { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
+#tab-results { overflow-y: auto; padding-right: 4px; margin-right: -4px; }
+#tab-log > .surface { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#engine-log { flex: 1; min-height: 0; }
+h2 { font: 600 15px/1.3 var(--display); margin: 14px 0 -6px; }
+.sub { color: var(--soft); font-size: 13px; }
+.surface { background: var(--surface); border: 1px solid var(--hair); border-radius: 10px; min-width: 0; }
+.scroll { overflow-x: auto; }
+
+.btn { font-size: 13px; background: var(--raised); border: 1px solid var(--hair); border-radius: 6px; padding: 5px 12px; cursor: pointer; white-space: nowrap; }
+.btn:hover { border-color: color-mix(in srgb, var(--patina) 60%, var(--hair)); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.go { background: var(--patina); border-color: var(--patina); color: var(--surface); font-weight: 600; }
+.btn.quiet { background: transparent; border-color: transparent; color: var(--soft); }
+.btn.quiet:hover { color: var(--ink); border-color: var(--hair); }
+.btn.danger:hover { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 50%, var(--hair)); }
+select, input[type=text] { background: var(--raised); border: 1px solid var(--hair); border-radius: 6px; padding: 5px 9px; font-size: 13px; max-width: 100%; }
+
+/* the engine strip */
+.strip { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; }
+.strip .group { display: flex; gap: 6px; align-items: center; }
+.strip .group + .group { padding-left: 10px; border-left: 1px solid var(--hair); }
+.strip label { color: var(--soft); font-size: 13px; }
+pre.log { margin: 0; padding: 12px 14px; font: 12px/1.55 var(--code); color: var(--soft); white-space: pre-wrap; overflow-y: auto; }
+#c-log { border-top: 1px solid var(--hair); max-height: 240px; }
+
+/* pull */
+.pull { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 10px 12px; }
+.pull input { flex: 1 1 300px; font-family: var(--code); font-size: 12.5px; padding: 7px 10px; }
+.pull .sub { flex-basis: 100%; padding-left: 2px; }
+
+/* the model list: one surface, one row per preset */
+.models { padding: 0; margin: 0; list-style: none; }
+.model { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 24px; padding: 16px 18px; border-top: 1px solid var(--hair); }
+.model:first-child { border-top: 0; }
+.model .name { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.model .name strong { font: 600 16px/1.3 var(--display); }
+.model .facts { display: flex; flex-wrap: wrap; gap: 2px 16px; color: var(--soft); font-size: 13px; }
+.model .facts .code { color: var(--soft); }
+.model .speed { grid-column: 2; grid-row: 1 / span 3; align-self: center; text-align: right; font-variant-numeric: tabular-nums; }
+.model .speed b { display: block; font: 300 34px/1 var(--display); letter-spacing: -.02em; }
+.model .speed b small { font-size: 14px; font-weight: 400; color: var(--soft); letter-spacing: 0; margin-left: 3px; }
+.model .speed span { font-size: 12px; color: var(--soft); }
+.model .speed.none b { color: var(--hair); }
+.model .acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.model.serving .name strong::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 9px; border-radius: 50%;
+  background: var(--ok); vertical-align: 3px; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+.chip { font-size: 12px; padding: 1px 8px; border-radius: 99px; color: var(--soft); background: color-mix(in srgb, var(--soft) 12%, transparent); }
+.chip.role { color: var(--patina); background: color-mix(in srgb, var(--patina) 13%, transparent); }
+.chip.away { background: transparent; border: 1px dashed var(--hair); }
+.empty { padding: 28px 18px; color: var(--soft); text-align: center; }
+@media (max-width: 620px) { .model { grid-template-columns: minmax(0, 1fr); } .model .speed { grid-column: 1; grid-row: auto; text-align: left; } }
+
+/* results */
+.filters { display: flex; flex-wrap: wrap; gap: 10px 18px; padding: 10px 12px; }
+.filters label { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--soft); }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
-th, td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
-th { font-weight: 600; color: var(--muted); font-size: 12px; cursor: pointer; user-select: none; position: sticky; top: 0; background: var(--panel); }
+th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--hair); white-space: nowrap; }
+th { font-weight: 600; color: var(--soft); font-size: 12px; cursor: pointer; user-select: none; background: var(--surface); }
 th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
 tr:last-child td { border-bottom: 0; }
 tr.suspect td { opacity: .45; }
-.badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
-.PASS { color: var(--pass); border: 1px solid var(--pass); }
-.FAIL { color: var(--fail); border: 1px solid var(--fail); }
-.none { color: var(--muted); border: 1px dashed var(--line); }
-.best { font-weight: 700; color: var(--accent); }
-.swatch { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
-.flags { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
-tr.classrow td { background: var(--bg); color: var(--muted); font-size: 11px; letter-spacing: .08em;
-  text-transform: uppercase; padding-top: 14px; border-bottom: 1px solid var(--line); }
-.chart-note { color: var(--muted); font-size: 12px; padding: 0 14px 10px; }
-.note { color: var(--muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+tr.classrow td { color: var(--soft); font-size: 12px; font-weight: 600; padding-top: 16px; background: var(--ground); }
+.badge { display: inline-block; padding: 0 8px; border-radius: 99px; font-size: 12px; font-weight: 600; }
+.PASS { color: var(--ok); background: color-mix(in srgb, var(--ok) 13%, transparent); }
+.FAIL { color: var(--bad); background: color-mix(in srgb, var(--bad) 13%, transparent); }
+.none { color: var(--soft); border: 1px dashed var(--hair); }
+.best { font-weight: 700; color: var(--patina); }
+.swatch { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 7px; }
+.flags { color: var(--soft); font-family: var(--code); font-size: 12px; }
+.note { color: var(--soft); max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
 .chart { padding: 10px 6px 4px; }
 .chart svg { width: 100%; height: auto; display: block; }
-.chart text { fill: var(--muted); font-size: 11px; }
-.chart .grid { stroke: var(--line); }
+.chart text { fill: var(--soft); font-size: 11px; }
+.chart .grid { stroke: var(--hair); }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 4px 14px 12px; font-size: 12px; }
-.empty { padding: 24px; color: var(--muted); text-align: center; }
-.ctl { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; padding: 12px 14px; }
-.btn { font: inherit; font-size: 13px; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
-  border-radius: 5px; padding: 5px 12px; cursor: pointer; }
-.btn:hover { border-color: var(--accent); }
-.btn:disabled { opacity: .5; cursor: default; }
-.btn.warn { color: var(--accent); }
-.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 5px; }
-.dot.on { background: var(--pass); } .dot.off { background: var(--fail); }
-.state { font-size: 13px; color: var(--muted); margin-right: auto; }
-.state b { color: var(--ink); font-weight: 600; }
-input[type=text], input:not([type]) { font: inherit; font-size: 13px; color: var(--ink); background: var(--bg);
-  border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; }
-pre.log { margin: 0; padding: 10px 14px; border-top: 1px solid var(--line); font: 11px/1.5 ui-monospace, Consolas, monospace;
-  color: var(--muted); white-space: pre-wrap; max-height: 180px; overflow-y: auto; }
-h2[hidden] { display: none; }
-#tip { position: fixed; z-index: 40; max-width: 420px; padding: 8px 10px; border: 1px solid var(--line);
-  border-radius: 6px; background: var(--panel); color: var(--ink); font-size: 12px; line-height: 1.5;
-  box-shadow: 0 6px 20px rgba(0,0,0,.18); pointer-events: none; }
-#tip i { color: var(--muted); }
+#tip { position: fixed; z-index: 40; max-width: 420px; padding: 8px 10px; border: 1px solid var(--hair); border-radius: 8px;
+  background: var(--raised); color: var(--ink); font-size: 12px; line-height: 1.5; box-shadow: 0 8px 24px rgb(0 0 0 / .18); pointer-events: none; }
+#tip i { color: var(--soft); }
+@media (prefers-reduced-motion: no-preference) { .btn, .tabs a { transition: background-color .12s, border-color .12s, color .12s; } }
 </style>
 </head>
 <body>
+<header class="bar" id="bar">
+  <div class="brand"><svg id="mark" viewBox="0 0 64 68" role="img" aria-label="Golem"></svg><span>Golem</span></div>
+  <nav class="tabs" aria-label="Sections">
+    <a href="#models" data-tab="models" hidden>Models</a>
+    <a href="#results" data-tab="results">Results</a>
+    <a href="#log" data-tab="log" hidden>Engine log</a>
+  </nav>
+  <div class="right">
+    <div class="state" id="c-state"><i></i><span id="c-state-text">Snapshot</span></div>
+    <div class="winbtns" aria-label="Window">
+      <button data-win="minimize" title="Minimize" aria-label="Minimize"><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></button>
+      <button data-win="maximize" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9"/></svg></button>
+      <button data-win="close" class="x" title="Close to the tray" aria-label="Close"><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></button>
+    </div>
+  </div>
+</header>
+<div class="edge n" data-edge="n"></div><div class="edge s" data-edge="s"></div><div class="edge e" data-edge="e"></div><div class="edge w" data-edge="w"></div>
+<div class="edge ne" data-edge="ne"></div><div class="edge nw" data-edge="nw"></div><div class="edge se" data-edge="se"></div><div class="edge sw" data-edge="sw"></div>
+
 <main>
-  <header>
-    <h1><b>▟█▙</b> golem benchmarks</h1>
-    <div class="meta" id="meta"></div>
-  </header>
-
-  <div class="filters">
-    <label>host <select id="f-host"></select></label>
-    <label>engine <select id="f-engine"></select></label>
-    <label>model <select id="f-model"></select></label>
-    <label>size class <select id="f-class"></select></label>
-    <label><input type="checkbox" id="f-quiet" checked> quiet runs only</label>
-  </div>
-
-  <h2 id="control-h" hidden>Control <span class="meta">served by <code>golem web</code> — snapshot pages have no buttons</span></h2>
-  <div class="card" id="control" hidden>
-    <div class="ctl">
-      <span class="state" id="c-state"></span>
-      <button class="btn" data-run="start">Start</button>
-      <button class="btn warn" data-run="stop">Stop</button>
-      <button class="btn" data-run="restart">Restart</button>
-      <button class="btn" data-run="bench">Bench</button>
-      <button class="btn" data-run="eval">Eval 200K</button>
-      <button class="btn" data-run="tune" data-arg="c-alias">Tune this model</button>
-      <label>default <select id="c-alias"></select><button class="btn" data-apply="c-alias">Set</button></label>
-      <label>engine <select id="c-engine"></select><button class="btn" data-apply="c-engine">Set</button></label>
+  <section id="tab-models" hidden>
+    <div class="surface">
+      <div class="strip" id="control">
+        <div class="group">
+          <button class="btn" data-run="start">Start</button>
+          <button class="btn" data-run="restart">Restart</button>
+          <button class="btn danger" data-run="stop">Stop</button>
+        </div>
+        <div class="group">
+          <button class="btn" data-run="bench">Bench</button>
+          <button class="btn" data-run="eval">Run the 200K eval</button>
+        </div>
+        <div class="group">
+          <label for="c-engine">Engine</label>
+          <select id="c-engine"></select>
+          <button class="btn quiet" data-apply="c-engine">Use</button>
+        </div>
+      </div>
+      <pre class="log" id="c-log" hidden></pre>
     </div>
-    <pre class="log" id="c-log" hidden></pre>
-  </div>
 
-  <h2 id="models-h" hidden>Models</h2>
-  <div class="card" id="models" hidden><table id="m-table"></table></div>
-  <div class="card" id="addmodel" hidden>
-    <div class="ctl">
-      <label>name <input id="m-name" placeholder="my-coder" size="14"></label>
-      <label>HF repo <input id="m-repo" placeholder="owner/repo" size="26"></label>
-      <label>file <input id="m-file" placeholder="model-Q4_K_M.gguf" size="26"></label>
-      <label>ctx <input id="m-ctx" value="236544" size="7"></label>
-      <label>n-cpu-moe <input id="m-ncpu" value="36" size="4"></label>
-      <label><input type="checkbox" id="m-mtp" checked> MTP</label>
-      <button class="btn" id="m-add">Add preset</button>
-      <span class="state" id="m-msg"></span>
+    <form class="surface pull" id="pull-form">
+      <input type="text" id="pull-ref" placeholder="unsloth/Qwen3.5-9B-GGUF" aria-label="Model to pull from Hugging Face: owner/repo, owner/repo:quant, or a library name" autocomplete="off" spellcheck="false">
+      <button class="btn go" type="submit">Pull</button>
+      <span class="sub" id="pull-msg">Any GGUF repo on Hugging Face, with :quant to choose one, or a library name. Golem picks the quant this machine can hold and writes the preset.</span>
+    </form>
+
+    <ul class="surface models" id="m-list"></ul>
+  </section>
+
+  <section id="tab-results">
+    <div class="surface filters">
+      <label>Host <select id="f-host"></select></label>
+      <label>Engine <select id="f-engine"></select></label>
+      <label>Model <select id="f-model"></select></label>
+      <label>Size <select id="f-class"></select></label>
+      <label><input type="checkbox" id="f-quiet" checked> Quiet runs only</label>
     </div>
-  </div>
 
-  <h2 id="log-h" hidden>Engine log <span class="meta" id="log-file"></span></h2>
-  <div class="card" id="logcard" hidden><pre class="log" id="engine-log"></pre></div>
+    <h2>Best decode per model and engine build</h2>
+    <div class="surface scroll"><table id="board"></table></div>
 
-  <h2>Leaderboard — best decode per model × engine build</h2>
-  <div class="card"><table id="board"></table></div>
-
-  <h2>Decode vs prefill (every bench run) <span class="meta" id="chart-class"></span></h2>
-  <div class="card chart">
-    <div class="ctl" style="padding:10px 14px 0">
-      <label>show <select id="f-class-chart"></select></label>
+    <h2>Decode against prefill <span class="sub" id="chart-class"></span></h2>
+    <div class="surface chart">
+      <div class="filters" style="padding:6px 8px 0"><label>Show <select id="f-class-chart"></select></label></div>
+      <div id="scatter"></div><div class="legend" id="legend"></div>
+      <p class="sub" style="margin:0;padding:0 14px 12px">Models of different sizes do not compare: a 0.5B at 269 t/s says nothing
+        about a 35B at 59. Pick a size, or read t/s per active B in the table.</p>
     </div>
-    <div id="scatter"></div><div class="legend" id="legend"></div>
-    <div class="chart-note">Points of different model sizes are not comparable: a 0.5B at 269 t/s
-      says nothing about a 35B at 59. Pick a size class here, or use the leaderboard's
-      "t/s per active B" column for a cross-size ratio.</div>
-  </div>
+
+    <h2>All runs <span class="sub" id="meta"></span></h2>
+    <div class="surface scroll"><table id="runs"></table></div>
+  </section>
+
+  <section id="tab-log" hidden>
+    <div class="surface"><div class="strip sub" id="log-file"></div><pre class="log" id="engine-log"></pre></div>
+  </section>
   <div id="tip" hidden></div>
-
-  <h2>All runs</h2>
-  <div class="card"><table id="runs"></table></div>
 </main>
 
 <script id="golem-data" type="application/json">/*GOLEM_DATA*/</script>
@@ -161,25 +270,74 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const fmt = (v, d = 1) => (v == null || isNaN(v)) ? "–" : Number(v).toFixed(d);
 const day = (ts) => (ts || "").slice(0, 10);
-const decode = (r) => r.kind === "bench" ? r.decode_median : null;
+const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+
+// ---- the window (golem app) -------------------------------------------
+// The app opens the page with ?app; the title bar then moves, resizes and
+// closes the window through the webview's message channel - wry's
+// window.ipc, or WebView2's own chrome.webview under it.
+const send = window.ipc?.postMessage ? (m) => window.ipc.postMessage(m)
+  : window.chrome?.webview?.postMessage ? (m) => window.chrome.webview.postMessage(m) : null;
+const APP = (new URLSearchParams(location.search).has("app") || !!window.__GOLEM_APP__) && !!send;
+if (APP) {
+  document.documentElement.classList.add("app");
+  const ask = send;
+  $("bar").addEventListener("mousedown", (e) => {
+    if (e.button !== 0 || e.target.closest("a, button, select, input")) return;
+    if (e.detail === 2) ask("maximize"); else ask("drag");
+  });
+  document.querySelectorAll("[data-win]").forEach((b) => b.onclick = () => ask(b.dataset.win));
+  document.querySelectorAll("[data-edge]").forEach((d) => d.addEventListener("mousedown", (e) => {
+    if (e.button === 0) { e.preventDefault(); ask("resize:" + d.dataset.edge); }
+  }));
+}
+
+// ---- the mark ---------------------------------------------------------
+// The same cells as golem_core::mark::GRID (a test keeps them equal):
+// 0 empty, 1 clay, 2 spark. The spark shows the engine's state.
+const GRID = ["011110", "122221", "111111", "011110"];
+function drawMark(state) {
+  const cw = 10, ch = 16, pad = 2;
+  const spark = state === "up" ? "var(--ok)" : state === "busy" ? "var(--busy)" : state === "down" ? "var(--soft)" : "var(--spark)";
+  let out = "";
+  GRID.forEach((row, r) => [...row].forEach((c, k) => {
+    if (c === "0") return;
+    out += `<rect x="${pad + k * cw}" y="${pad + r * ch}" width="${cw + .3}" height="${ch + .3}" fill="${c === "2" ? spark : "var(--clay)"}"/>`;
+  }));
+  $("mark").innerHTML = out;
+}
+drawMark();
+
+// ---- tabs -------------------------------------------------------------
+let LIVE = false;
+function showTab(name) {
+  const tabs = [...document.querySelectorAll(".tabs a")].filter((a) => !a.hidden).map((a) => a.dataset.tab);
+  if (!tabs.includes(name)) name = tabs[0];
+  document.querySelectorAll(".tabs a").forEach((a) => {
+    if (a.dataset.tab === name) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  });
+  ["models", "results", "log"].forEach((t) => { $("tab-" + t).hidden = t !== name; });
+}
+window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
+
+// ---- results ----------------------------------------------------------
 const KEY_FLAGS = ["n-cpu-moe", "fit", "fit-target", "ubatch-size", "spec-type", "ctx-size", "cache-type-k"];
 const flagStr = (f) => KEY_FLAGS.filter((k) => f && f[k] != null).map((k) => `${k.replace("cache-type-", "kv-")}=${f[k]}`).join(" ");
 
-// "35.51B / 3.52B active · MoE 256x8" — what the model actually is, read
-// from its GGUF header by scripts/gguf-info.sh at record time.
+// What the model is, read from its GGUF header when the row was recorded.
 const paramsCell = (r) => {
   if (r.params_b == null) return "–";
   let s = `${fmt(r.params_b, 1)}B`;
   if (r.moe && r.params_active_b != null) s += ` / ${fmt(r.params_active_b, 1)}B active`;
-  if (r.experts) s += ` · ${esc(r.experts)}`;
+  if (r.experts) s += `, ${esc(r.experts)}`;
   return s;
 };
 
-// Comparing tok/s across model sizes is not a comparison: a 0.5B at 269 t/s
-// says nothing about a 35B at 59. So the leaderboard ranks inside size
-// classes, and the cross-size column is an explicit ratio - decode per
-// billion *active* parameters (what the GPU actually has to push per token).
-const CLASSES = ["≤2B active", "2–8B active", "8–20B active", "20B+ active", "unknown size"];
+// Comparing tok/s across model sizes is not a comparison, so the leaderboard
+// ranks inside size classes, and the cross-size column is an explicit
+// ratio - decode per billion *active* parameters.
+const CLASSES = ["Up to 2B active", "2–8B active", "8–20B active", "20B+ active", "Unknown size"];
 const classOf = (r) => {
   const p = r.params_active_b ?? r.params_b;
   if (p == null) return CLASSES[4];
@@ -198,30 +356,33 @@ const modelLine = (r) => {
   if (r.moe) bits.push(`MoE${r.experts ? " " + r.experts : ""}`);
   if (r.n_layer) bits.push(`${r.n_layer} layers`);
   if (r.ctx) bits.push(`served ctx ${(r.ctx / 1024).toFixed(0)}K` + (r.ctx_train && r.ctx_train != r.ctx ? ` (native ${(r.ctx_train / 1024).toFixed(0)}K)` : ""));
-  return bits.join(" · ");
+  return bits.join(", ");
 };
 
-const models = [...new Set(ROWS.map((r) => r.model))].sort();
-const colorOf = (m) => `var(--s${(models.indexOf(m) % 6) + 1})`;
-
+let modelNames = [];
+const colorOf = (m) => `var(--s${(modelNames.indexOf(m) % 6) + 1})`;
 function fillSelect(id, values) {
-  const sel = $(id);
-  sel.innerHTML = `<option value="">all</option>` + values.map((v) => `<option>${esc(v)}</option>`).join("");
+  const sel = $(id), cur = sel.value;
+  sel.innerHTML = `<option value="">All</option>` + values.map((v) => `<option>${esc(v)}</option>`).join("");
+  if (values.includes(cur)) sel.value = cur;
 }
-fillSelect("f-host", [...new Set(ROWS.map((r) => r.host))].sort());
-fillSelect("f-engine", [...new Set(ROWS.map((r) => r.engine))].sort());
-fillSelect("f-model", models);
+function fillFilters() {
+  modelNames = [...new Set(ROWS.map((r) => r.model))].sort();
+  fillSelect("f-host", [...new Set(ROWS.map((r) => r.host))].sort());
+  fillSelect("f-engine", [...new Set(ROWS.map((r) => r.engine))].sort());
+  fillSelect("f-model", modelNames);
+}
+fillFilters();
 fillSelect("f-class", CLASSES);
 fillSelect("f-class-chart", CLASSES);
-// Default to the most common host: numbers only compare on the same box.
+// The most common host by default: numbers only compare on the same box.
 const hostCount = {};
 ROWS.forEach((r) => { hostCount[r.host] = (hostCount[r.host] || 0) + 1; });
 const topHost = Object.keys(hostCount).sort((a, b) => hostCount[b] - hostCount[a])[0];
 if (topHost) $("f-host").value = topHost;
 
 function filtered() {
-  const h = $("f-host").value, e = $("f-engine").value, m = $("f-model").value, q = $("f-quiet").checked;
-  const c = $("f-class").value;
+  const h = $("f-host").value, e = $("f-engine").value, m = $("f-model").value, q = $("f-quiet").checked, c = $("f-class").value;
   return ROWS.filter((r) => (!h || r.host === h) && (!e || r.engine === e) && (!m || r.model === m)
     && (!q || r.quiet !== false) && (!c || classOf(r) === c));
 }
@@ -237,27 +398,24 @@ function renderBoard(rows) {
     const ev = g.eval.sort((a, b) => (a.ts < b.ts ? 1 : -1))[0];
     return { best, ev };
   }).sort((a, b) => {
-    // Size class first: the numbers only compare inside one class.
     const ca = CLASSES.indexOf(classOf(a.best)), cb = CLASSES.indexOf(classOf(b.best));
     return ca - cb || (b.best.decode_median ?? 0) - (a.best.decode_median ?? 0);
   });
   if (!lines.length) { $("board").innerHTML = `<tr><td class="empty">No bench runs match the filters.</td></tr>`; return; }
-  // "best" is highlighted per class, not across the whole table.
   const bestByClass = {};
   lines.forEach(({ best: r }) => {
     const c = classOf(r);
     if (!(c in bestByClass) || (r.decode_median ?? 0) > bestByClass[c]) bestByClass[c] = r.decode_median;
   });
   let lastClass = null;
-  $("board").innerHTML = `<thead><tr><th>model</th><th>class</th><th>engine</th><th>params</th><th class="num">ctx</th><th class="num">threads</th><th class="num">decode med</th><th class="num">best</th>
-    <th class="num">MTP acc.</th><th class="num">prefill</th><th class="num">t/s per active B</th><th class="num">VRAM GB</th><th class="num">RAM GB</th><th>200K needle</th><th class="num">decode @depth</th><th>date</th><th>flags</th></tr></thead><tbody>` +
+  $("board").innerHTML = `<thead><tr><th>Model</th><th>Engine</th><th>Params</th><th class="num">Ctx</th><th class="num">Threads</th><th class="num">Decode</th><th class="num">Best</th>
+    <th class="num">MTP</th><th class="num">Prefill</th><th class="num">t/s per active B</th><th class="num">VRAM GB</th><th class="num">RAM GB</th><th>200K needle</th><th class="num">At depth</th><th>Date</th><th>Flags</th></tr></thead><tbody>` +
     lines.map(({ best: r, ev }) => {
       const needle = ev?.eval?.needle;
       const cls = classOf(r);
-      const head = cls !== lastClass ? `<tr><td colspan="17" class="classrow">${esc(cls)}</td></tr>` : "";
+      const head = cls !== lastClass ? `<tr class="classrow"><td colspan="16">${esc(cls)}</td></tr>` : "";
       lastClass = cls;
       return head + `<tr><td><span class="swatch" style="background:${colorOf(r.model)}"></span>${esc(r.model)}</td>
-        <td class="flags">${esc(cls)}</td>
         <td>${esc(r.engine)} <span class="flags">${esc(r.engine_build)}</span></td>
         <td>${paramsCell(r)}</td>
         <td class="num">${r.ctx ? (r.ctx / 1024).toFixed(0) + "K" : "–"}</td>
@@ -267,16 +425,15 @@ function renderBoard(rows) {
         <td class="num">${fmt(r.prefill, 0)}</td><td class="num">${fmt(efficiency(r), 1)}</td>
         <td class="num">${r.vram_mib ? fmt(r.vram_mib / 1024) : "–"}</td>
         <td class="num">${r.ram_used_gib != null ? fmt(r.ram_used_gib) : "–"}</td>
-        <td>${needle ? `<span class="badge ${needle}">${needle}</span>` : `<span class="badge none">not run</span>`}${ev?.eval?.tools === "FAIL" ? ` <span class="badge FAIL">tools</span>` : ""}</td>
+        <td>${needle ? `<span class="badge ${needle}">${needle === "PASS" ? "Pass" : "Fail"}</span>` : `<span class="badge none">Not run</span>`}${ev?.eval?.tools === "FAIL" ? ` <span class="badge FAIL">Tools</span>` : ""}</td>
         <td class="num">${fmt(ev?.eval?.depth_decode)}</td><td>${day(r.ts)}</td><td class="flags">${esc(flagStr(r.flags))}</td></tr>`;
     }).join("") + "</tbody>";
 }
 
 function renderScatter(rows) {
   const active = $("f-class-chart").value;
-  $("chart-class").textContent = active ? "· " + active : "· all sizes (not comparable across them)";
-  const pts = rows.filter((r) => r.kind === "bench" && r.decode_median && r.prefill
-    && (!active || classOf(r) === active));
+  $("chart-class").textContent = active ? active : "every size";
+  const pts = rows.filter((r) => r.kind === "bench" && r.decode_median && r.prefill && (!active || classOf(r) === active));
   if (!pts.length) { $("scatter").innerHTML = `<div class="empty">No bench runs with both decode and prefill.</div>`; $("legend").innerHTML = ""; return; }
   const W = 900, H = 320, L = 48, R = 16, T = 12, B = 34;
   const xs = pts.map((p) => p.prefill), ys = pts.map((p) => p.decode_median);
@@ -284,23 +441,22 @@ function renderScatter(rows) {
   const [x0, x1] = pad(Math.min(...xs), Math.max(...xs)), [y0, y1] = pad(Math.min(...ys), Math.max(...ys));
   const X = (v) => L + (v - x0) / (x1 - x0) * (W - L - R), Y = (v) => H - B - (v - y0) / (y1 - y0) * (H - T - B);
   const ticks = (lo, hi) => { const s = Math.pow(10, Math.floor(Math.log10((hi - lo) / 4))); const st = [1, 2, 5, 10].map((m) => m * s).find((v) => (hi - lo) / v <= 6); const out = []; for (let v = Math.ceil(lo / st) * st; v <= hi; v += st) out.push(+v.toFixed(6)); return out; };
-  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="decode versus prefill scatter">`;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Decode against prefill">`;
   ticks(y0, y1).forEach((v) => { svg += `<line class="grid" x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}"/><text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end">${v}</text>`; });
   ticks(x0, x1).forEach((v) => { svg += `<text x="${X(v)}" y="${H - B + 16}" text-anchor="middle">${v}</text>`; });
-  svg += `<text x="${(L + W - R) / 2}" y="${H - 4}" text-anchor="middle">prefill tok/s (~28.6K-token prompt)</text>`;
-  svg += `<text x="12" y="${(T + H - B) / 2}" text-anchor="middle" transform="rotate(-90 12 ${(T + H - B) / 2})">decode tok/s (median)</text>`;
-  pts.forEach((p) => {
-    svg += `<circle cx="${X(p.prefill)}" cy="${Y(p.decode_median)}" r="6" fill="${colorOf(p.model)}" fill-opacity=".8"
-      stroke="var(--panel)" stroke-width="1.5" data-i="${pts.indexOf(p)}" class="pt">
-      <title>${esc(p.model)}</title></circle>`;
+  svg += `<text x="${(L + W - R) / 2}" y="${H - 4}" text-anchor="middle">Prefill tok/s</text>`;
+  svg += `<text x="12" y="${(T + H - B) / 2}" text-anchor="middle" transform="rotate(-90 12 ${(T + H - B) / 2})">Decode tok/s (median)</text>`;
+  pts.forEach((p, i) => {
+    svg += `<circle cx="${X(p.prefill)}" cy="${Y(p.decode_median)}" r="6" fill="${colorOf(p.model)}" fill-opacity=".85"
+      stroke="var(--surface)" stroke-width="1.5" data-i="${i}" class="pt"><title>${esc(p.model)}</title></circle>`;
   });
   $("scatter").innerHTML = svg + "</svg>";
   $("legend").innerHTML = [...new Set(pts.map((p) => p.model))].map((m) => `<span><span class="swatch" style="background:${colorOf(m)}"></span>${esc(m)}</span>`).join("");
   wireTip(pts);
 }
 
-// Hovering a point shows what it was: the model and what it is made of, the
-// engine and build, the context and flags it ran with, and every number.
+// Hovering a point shows what it was: the model, the engine and build, the
+// context and flags it ran with, and every number.
 function wireTip(pts) {
   const tip = $("tip");
   document.querySelectorAll("#scatter .pt").forEach((c) => {
@@ -309,12 +465,12 @@ function wireTip(pts) {
       tip.innerHTML =
         `<b>${esc(p.model)}</b> <span class="flags">${esc(p.model_file || "")}</span><br>` +
         `${esc(modelLine(p))}<br>` +
-        `${esc(p.engine)} <span class="flags">${esc(p.engine_build)}</span> · ${esc(day(p.ts))}<br>` +
+        `${esc(p.engine)} <span class="flags">${esc(p.engine_build)}</span>, ${esc(day(p.ts))}<br>` +
         `<b>${fmt(p.decode_median)}</b> t/s decode (best ${fmt(p.decode_best)})` +
-        (p.draft_accept != null ? ` · MTP ${Math.round(p.draft_accept * 100)}%` : "") + `<br>` +
-        `${fmt(p.prefill, 0)} t/s prefill · VRAM ${p.vram_mib ? fmt(p.vram_mib / 1024) : "–"} GB` +
-        (p.ram_used_gib != null ? ` · RAM ${fmt(p.ram_used_gib)} GB` : "") +
-        (p.threads != null ? ` · ${p.threads} threads` : "") + `<br>` +
+        (p.draft_accept != null ? `, MTP ${Math.round(p.draft_accept * 100)}%` : "") + `<br>` +
+        `${fmt(p.prefill, 0)} t/s prefill, VRAM ${p.vram_mib ? fmt(p.vram_mib / 1024) : "–"} GB` +
+        (p.ram_used_gib != null ? `, RAM ${fmt(p.ram_used_gib)} GB` : "") +
+        (p.threads != null ? `, ${p.threads} threads` : "") + `<br>` +
         `<span class="flags">${esc(flagStr(p.flags))}</span>` +
         (p.note ? `<br><i>${esc(p.note)}</i>` : "");
       tip.hidden = false;
@@ -325,9 +481,7 @@ function wireTip(pts) {
   });
 }
 function moveTip(e) {
-  const tip = $("tip");
-  const pad = 14;
-  const w = tip.offsetWidth, h = tip.offsetHeight;
+  const tip = $("tip"), pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
   let x = e.clientX + pad, y = e.clientY + pad;
   if (x + w > window.innerWidth - 8) x = e.clientX - w - pad;
   if (y + h > window.innerHeight - 8) y = e.clientY - h - pad;
@@ -337,20 +491,20 @@ function moveTip(e) {
 
 let sortKey = "ts", sortDir = -1;
 const COLS = [
-  ["ts", "time", (r) => (r.ts || "").replace("T", " ").slice(0, 16)],
-  ["kind", "kind", (r) => r.kind],
-  ["model", "model", (r) => `<span class="swatch" style="background:${colorOf(r.model)}"></span>${esc(r.model)}`],
-  ["engine_build", "build", (r) => esc(`${r.engine} ${r.engine_build}`)],
-  ["model_stats", "params", (r) => paramsCell(r), false],
-  ["ctx", "ctx", (r) => (r.ctx ? (r.ctx / 1024).toFixed(0) + "K" : "–"), true],
-  ["threads", "threads", (r) => (r.threads != null ? r.threads : "–"), true],
-  ["decode", "decode", (r) => fmt(r.kind === "eval" ? r.eval?.decode_best : r.decode_median), true],
-  ["prefill", "prefill", (r) => fmt(r.kind === "eval" ? r.eval?.needle_prefill : r.prefill, 0), true],
+  ["ts", "Time", (r) => (r.ts || "").replace("T", " ").slice(0, 16)],
+  ["kind", "Kind", (r) => r.kind],
+  ["model", "Model", (r) => `<span class="swatch" style="background:${colorOf(r.model)}"></span>${esc(r.model)}`],
+  ["engine_build", "Build", (r) => esc(`${r.engine} ${r.engine_build}`)],
+  ["model_stats", "Params", (r) => paramsCell(r), false],
+  ["ctx", "Ctx", (r) => (r.ctx ? (r.ctx / 1024).toFixed(0) + "K" : "–"), true],
+  ["threads", "Threads", (r) => (r.threads != null ? r.threads : "–"), true],
+  ["decode", "Decode", (r) => fmt(r.kind === "eval" ? r.eval?.decode_best : r.decode_median), true],
+  ["prefill", "Prefill", (r) => fmt(r.kind === "eval" ? r.eval?.needle_prefill : r.prefill, 0), true],
   ["vram_mib", "VRAM GB", (r) => (r.vram_mib ? fmt(r.vram_mib / 1024) : "–"), true],
   ["ram_used_gib", "RAM GB", (r) => (r.ram_used_gib != null ? fmt(r.ram_used_gib) : "–"), true],
-  ["result", "eval", (r) => (r.kind === "eval" ? `<span class="badge ${r.eval?.needle || "none"}">${r.eval?.needle || "–"}</span>` : "")],
-  ["flags", "flags", (r) => `<span class="flags">${esc(flagStr(r.flags))}</span>`],
-  ["note", "note", (r) => `<span class="note" title="${esc(r.note)}">${esc(r.note)}</span>`],
+  ["result", "Eval", (r) => (r.kind === "eval" ? `<span class="badge ${r.eval?.needle || "none"}">${r.eval?.needle === "PASS" ? "Pass" : r.eval?.needle === "FAIL" ? "Fail" : "–"}</span>` : "")],
+  ["flags", "Flags", (r) => `<span class="flags">${esc(flagStr(r.flags))}</span>`],
+  ["note", "Note", (r) => `<span class="note" title="${esc(r.note)}">${esc(r.note)}</span>`],
 ];
 const sortVal = (r, k) => k === "decode" ? (r.kind === "eval" ? r.eval?.decode_best : r.decode_median) ?? -1
   : k === "prefill" ? (r.kind === "eval" ? r.eval?.needle_prefill : r.prefill) ?? -1
@@ -367,138 +521,142 @@ function renderRuns(rows) {
 function render() {
   const rows = filtered();
   const last = ROWS.map((r) => r.ts).sort().pop();
-  $("meta").textContent = `${ROWS.length} runs recorded · ${rows.length} shown · last ${last ? last.replace("T", " ").slice(0, 16) + " UTC" : "–"}`;
+  $("meta").textContent = `${ROWS.length} recorded, the last ${last ? last.replace("T", " ").slice(0, 16) + " UTC" : "never"}`;
   renderBoard(rows); renderScatter(rows); renderRuns(rows);
 }
 ["f-host", "f-engine", "f-model", "f-class", "f-class-chart", "f-quiet"].forEach((id) => $(id).addEventListener("change", render));
 render();
 
-// ------------------------------------------------------------
-// Served mode (golem web): results.jsonl is the single source of
-// truth - poll it and the server state; show the control panel.
-// Snapshot pages (file://) keep the embedded data, no buttons.
-// ------------------------------------------------------------
-let STALE = false;
-function fillOpts(id, values, cur) {
-  const sel = $(id);
-  sel.innerHTML = values.map((v) => `<option${v === cur ? " selected" : ""}>${esc(v)}</option>`).join("");
+// ---- the console (served by golem service) ------------------------------
+// results.jsonl is the single source of truth: poll it and the state. A
+// snapshot page (file://) answers neither, keeps its data and shows Results.
+
+// A model's best measured decode on this machine: the fastest bench row for
+// it, with that row's prefill.
+function bestRun(name) {
+  const runs = ROWS.filter((r) => r.kind === "bench" && r.model === name && r.decode_median);
+  return runs.reduce((a, b) => (!a || b.decode_median > a.decode_median ? b : a), null);
 }
+
+const busyNote = "The console is not answering. Is golem service running?";
+function renderModels(models, state) {
+  const running = !!state?.job_running;
+  const serving = state?.up ? state.alias : null;
+  $("m-list").innerHTML = models.length ? models.map((m) => {
+    const run = bestRun(m.Name);
+    const chips = [
+      m.Role ? `<span class="chip role">${esc(m.Role)}</span>` : "",
+      m.Default ? `<span class="chip">default</span>` : "",
+      m.Moe ? `<span class="chip">MoE ${esc(m.Experts)}</span>` : "",
+      m.Mtp ? `<span class="chip">MTP</span>` : "",
+      m.Present ? "" : `<span class="chip away">not downloaded</span>`,
+    ].join("");
+    const facts = [
+      m.ParamsB ? `<span>${fmt(m.ParamsB, 1)}B${m.Moe && m.ParamsActiveB ? `, ${fmt(m.ParamsActiveB, 1)}B active` : ""}</span>` : "",
+      m.Gb ? `<span>${fmt(m.Gb)} GB</span>` : "",
+      m.Ctx ? `<span>${Math.round(m.Ctx / 1024)}K context</span>` : "",
+      `<span class="code">${esc(m.Repo || m.File)}</span>`,
+    ].join("");
+    const acts = [
+      m.Present
+        ? (m.Default ? "" : `<button class="btn" data-alias="${esc(m.Name)}">Make default</button>`)
+        : `<button class="btn" data-pull="${esc(m.Name)}">Download</button>`,
+      m.Present ? `<button class="btn" data-tune="${esc(m.Name)}" title="Find the split and context for this machine, then gate it">Tune</button>` : "",
+      m.Present ? `<button class="btn quiet danger" data-delmodel="${esc(m.Name)}">Delete file</button>` : "",
+      m.Default ? "" : `<button class="btn quiet danger" data-delpreset="${esc(m.Name)}">Remove</button>`,
+    ].join("");
+    return `<li class="model${m.Name === serving ? " serving" : ""}">
+      <div class="name"><strong>${esc(m.Name)}</strong>${chips}</div>
+      <div class="facts">${facts}</div>
+      <div class="speed${run ? "" : " none"}">${run ? `<b>${fmt(run.decode_median)}<small>t/s</small></b><span>${fmt(run.prefill, 0)} prefill</span>` : `<b>–</b><span>not measured yet</span>`}</div>
+      <div class="acts">${acts}</div></li>`;
+  }).join("") : `<li class="empty">No models yet. Pull one above.</li>`;
+  $("m-list").querySelectorAll("button").forEach((b) => { b.disabled = running; });
+
+  const act = (sel, fn) => $("m-list").querySelectorAll(sel).forEach((b) => b.onclick = async () => {
+    b.disabled = true;
+    try { await fn(b); } catch (e) { $("pull-msg").textContent = busyNote; }
+    setTimeout(pollLive, 1200);
+  });
+  act("[data-alias]", (b) => post("api/run", `action=alias&arg=${encodeURIComponent(b.dataset.alias)}`));
+  act("[data-pull]", (b) => post("api/run", `action=pull&arg=${encodeURIComponent(b.dataset.pull)}`));
+  act("[data-tune]", (b) => post("api/run", `action=tune&arg=${encodeURIComponent(b.dataset.tune)}`));
+  // Deleting asks first: the file can be downloaded again, the preset has a
+  // .bak beside it.
+  act("[data-delmodel]", (b) => confirm(`Delete the model file of ${b.dataset.delmodel}?\n\nIt can be downloaded again later.`)
+    ? post("api/delmodel", `arg=${encodeURIComponent(b.dataset.delmodel)}`) : null);
+  act("[data-delpreset]", (b) => confirm(`Remove ${b.dataset.delpreset} from the presets?\n\nThe model file stays on disk.`)
+    ? post("api/delpreset", `arg=${encodeURIComponent(b.dataset.delpreset)}`) : null);
+}
+
+function renderState(s) {
+  const busy = s.job_running;
+  $("c-state").className = "state " + (busy ? "busy" : s.up ? "up" : "");
+  $("c-state-text").innerHTML = busy ? `<b>${esc(s.job_action)}</b> running`
+    : s.up ? `Serving <b>${esc(s.alias)}</b>${s.vram ? `, ${(s.vram / 1024).toFixed(1)} GB VRAM` : ""}`
+    : `Stopped, default <b>${esc(s.alias || "none")}</b>`;
+  drawMark(busy ? "busy" : s.up ? "up" : "down");
+  $("c-engine").innerHTML = (s.engines || []).map((v) => `<option${v === s.engine ? " selected" : ""}>${esc(v)}</option>`).join("");
+  const log = $("c-log");
+  log.hidden = !s.job_tail;
+  if (s.job_tail) { log.textContent = s.job_tail; log.scrollTop = log.scrollHeight; }
+  document.querySelectorAll("#control .btn, #pull-form .btn").forEach((b) => { b.disabled = !!busy; });
+}
+
 async function pollLive() {
   let live = false;
   try {
     const r = await fetch("results.jsonl", { cache: "no-store" });
     if (r.ok) {
       const rows = (await r.text()).split("\n").filter((l) => l.trim().startsWith("{")).map((l) => JSON.parse(l));
-      if (rows.length !== ROWS.length || !ROWS.length || rows[rows.length - 1].ts !== ROWS[ROWS.length - 1].ts) {
+      if (rows.length !== ROWS.length || (rows.length && rows[rows.length - 1].ts !== ROWS[ROWS.length - 1]?.ts)) {
         ROWS = rows;
-        fillSelect("f-host", [...new Set(ROWS.map((r2) => r2.host))].sort());
-        fillSelect("f-engine", [...new Set(ROWS.map((r2) => r2.engine))].sort());
-        fillSelect("f-model", [...new Set(ROWS.map((r2) => r2.model))].sort());
+        fillFilters();
         render();
       }
       live = true;
     }
   } catch (e) { live = false; }
-  $("control").hidden = $("control-h").hidden = !live;
-  ["models-h", "models", "addmodel", "log-h", "logcard"].forEach((id) => { $(id).hidden = !live; });
-  if (!live) {
-    if (!STALE) { STALE = true; $("meta").textContent += " · snapshot (run report again, or golem web for live)"; }
-    return;
+  if (live !== LIVE) {
+    LIVE = live;
+    document.querySelectorAll('.tabs a[data-tab="models"], .tabs a[data-tab="log"]').forEach((a) => { a.hidden = !live; });
+    showTab(location.hash.slice(1) || (live ? "models" : "results"));
   }
-  try {
-    const s = await (await fetch("api/state", { cache: "no-store" })).json();
-    $("c-state").innerHTML =
-      `<span class="dot ${s.up ? "on" : "off"}"></span>${s.up ? "server up" : "server down"}` +
-      (s.up && s.vram ? ` · <b>${(s.vram / 1024).toFixed(1)} GB</b> VRAM` : "") +
-      ` · default <b>${esc(s.alias)}</b> · engine <b>${esc(s.engine)}</b>` +
-      (s.job_running ? ` · <b>${esc(s.job_action)}</b> running…` : "");
-    fillOpts("c-alias", s.presets, s.alias);
-    fillOpts("c-engine", s.engines, s.engine);
-    const log = $("c-log");
-    log.hidden = !s.job_tail;
-    if (s.job_tail) log.textContent = s.job_tail;
-    document.querySelectorAll("#control .btn").forEach((b) => { b.disabled = !!s.job_running; });
-  } catch (e) { $("c-state").textContent = "state error: " + e; }
-  try {
-    const models = await (await fetch("api/models", { cache: "no-store" })).json();
-    $("m-table").innerHTML = `<thead><tr><th>preset</th><th>params</th><th class="num">file GB</th><th>state</th><th>ctx</th>
-      <th class="num">n-cpu-moe</th><th>MTP</th><th>source</th><th></th></tr></thead><tbody>` +
-      models.map((m) => `<tr>
-        <td>${m.Default ? "<b>" + esc(m.Name) + "</b>" : esc(m.Name)}</td>
-        <td>${m.ParamsB ? fmt(m.ParamsB, 1) + "B" + (m.Moe && m.ParamsActiveB ? " / " + fmt(m.ParamsActiveB, 1) + "B active" : "") + (m.Experts ? " · " + esc(m.Experts) : "") : "–"}</td>
-        <td class="num">${m.Gb ? fmt(m.Gb) : "–"}</td>
-        <td><span class="badge ${m.Present ? "PASS" : "none"}">${m.Present ? "on disk" : "missing"}</span></td>
-        <td>${m.Ctx || "–"}</td><td class="num">${m.NcMoe >= 0 ? m.NcMoe : "–"}</td>
-        <td>${m.Mtp ? "yes" : ""}</td>
-        <td class="flags">${esc(m.Repo ? m.Repo + " → " + m.File : m.File)}</td>
-        <td><button class="btn" data-fetch="${esc(m.Name)}">${m.Present ? "Set default" : "Fetch"}</button>
-            <button class="btn" data-tunep="${esc(m.Name)}">Tune</button>
-            ${m.Present ? `<button class="btn warn" data-delmodel="${esc(m.Name)}" title="delete the model file from disk">Delete file</button>` : ""}
-            ${m.Default ? "" : `<button class="btn warn" data-delpreset="${esc(m.Name)}" title="remove this preset from config/models.ini">Remove</button>`}</td></tr>`).join("") + "</tbody>";
-    $("m-table").querySelectorAll("[data-fetch]").forEach((b) => b.onclick = async () => {
-      const name = b.dataset.fetch, m = models.find((x) => x.Name === name);
-      b.disabled = true;
-      const body = m.Present ? `action=alias&arg=${encodeURIComponent(name)}` : `action=pull&arg=${encodeURIComponent(name)}`;
-      try { await fetch("api/run", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body }); }
-      catch (e) { alert("web server not running"); }
-      setTimeout(pollLive, 1500);
-    });
-    $("m-table").querySelectorAll("[data-tunep]").forEach((b) => b.onclick = async () => {
-      b.disabled = true;
-      try { await fetch("api/run", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: `action=tune&arg=${encodeURIComponent(b.dataset.tunep)}` }); }
-      catch (e) { alert("web server not running"); }
-      setTimeout(pollLive, 1500);
-    });
-    // Deleting asks first: the model file is re-downloadable, the preset is
-    // in config/models.ini (a .bak is kept next to it).
-    $("m-table").querySelectorAll("[data-delmodel]").forEach((b) => b.onclick = async () => {
-      const name = b.dataset.delmodel;
-      if (!confirm(`Delete ${name}'s model file from disk?\n\nIt can be fetched again later.`)) return;
-      b.disabled = true;
-      try { await fetch("api/delmodel", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: `arg=${encodeURIComponent(name)}` }); }
-      catch (e) { alert("web server not running"); }
-      setTimeout(pollLive, 1200);
-    });
-    $("m-table").querySelectorAll("[data-delpreset]").forEach((b) => b.onclick = async () => {
-      const name = b.dataset.delpreset;
-      if (!confirm(`Remove the preset "${name}" from config/models.ini?\n\nThe model file stays on disk.`)) return;
-      b.disabled = true;
-      try { await fetch("api/delpreset", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: `arg=${encodeURIComponent(name)}` }); }
-      catch (e) { alert("web server not running"); }
-      setTimeout(pollLive, 1200);
-    });
-  } catch (e) { /* older page state */ }
+  if (!live) return;
+  let state = null;
+  try { state = await (await fetch("api/state", { cache: "no-store" })).json(); renderState(state); }
+  catch (e) { $("c-state-text").textContent = "No state"; }
+  try { renderModels(await (await fetch("api/models", { cache: "no-store" })).json(), state); } catch (e) { /* older service */ }
   try {
     const l = await (await fetch("api/logs", { cache: "no-store" })).json();
-    $("log-file").textContent = l.file ? "· " + l.file : "";
+    $("log-file").textContent = l.file ? l.file : "No engine log yet. It starts with the engine.";
     $("engine-log").textContent = l.text || "";
   } catch (e) { /* no log */ }
 }
+
 document.querySelectorAll("#control .btn").forEach((b) => b.onclick = async () => {
   b.disabled = true;
   const apply = b.dataset.apply;
-  let body = `action=${b.dataset.run || apply}`;
-  const argSel = b.dataset.arg ? $(b.dataset.arg).value : null;
-  if (apply) body += `&arg=${encodeURIComponent($(apply).value)}`;
-  else if (argSel) body += `&arg=${encodeURIComponent(argSel)}`;
-  try { await fetch("api/run", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body }); }
-  catch (e) { alert("web server not running (golem web)"); }
-  setTimeout(pollLive, 1500);
+  const body = apply ? `action=engine&arg=${encodeURIComponent($(apply).value)}` : `action=${b.dataset.run}`;
+  try { await post("api/run", body); } catch (e) { $("pull-msg").textContent = busyNote; }
+  setTimeout(pollLive, 1200);
 });
-$("m-add").onclick = async () => {
-  const body = new URLSearchParams({
-    name: $("m-name").value, repo: $("m-repo").value, file: $("m-file").value,
-    ctx: $("m-ctx").value, ncpu: $("m-ncpu").value, mtp: $("m-mtp").checked ? "on" : "off",
-  }).toString();
-  $("m-msg").textContent = "…";
+$("pull-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const ref = $("pull-ref").value.trim();
+  if (!ref) { $("pull-msg").textContent = "Type owner/repo, owner/repo:quant or a library name."; return; }
+  $("pull-msg").textContent = `Pulling ${ref}. Its progress shows under the engine buttons.`;
   try {
-    const r = await (await fetch("api/addmodel", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body })).json();
-    $("m-msg").textContent = r.result === "added" ? "added — press Fetch to download it" : "check the fields (owner/repo, name.gguf, unique name)";
-  } catch (e) { $("m-msg").textContent = "web server not running"; }
-  setTimeout(pollLive, 1500);
+    const r = await post("api/run", `action=pull&arg=${encodeURIComponent(ref)}`);
+    if (!r.ok) $("pull-msg").textContent = await r.text();
+    else $("pull-ref").value = "";
+  } catch (err) { $("pull-msg").textContent = busyNote; }
+  setTimeout(pollLive, 1200);
 };
+
+showTab(location.hash.slice(1) || "results");
 pollLive();
-setInterval(pollLive, 15000);
+setInterval(pollLive, 5000);
 </script>
 </body>
 </html>

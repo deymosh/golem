@@ -50,6 +50,8 @@ Measuring:
   tune --auto      Pick the best installed model, then tune it
 
 Results:
+  app              The Golem window and tray (the console in the browser
+                   in a build without the desktop feature)
   tui              The full-screen screen in the terminal
   report [--md]    Static results page (or bench/RESULTS.md)
   results          List the recorded rows
@@ -81,6 +83,7 @@ async fn main() -> ExitCode {
         Some("report") => cmd_report(&args[1..]),
         Some("results") => cmd_results(&args[1..]),
         Some("tui") => cmd_tui().await,
+        Some("app") => cmd_open_console().await,
         Some("status") => cmd_status(),
         Some("bench") => code(measure::bench(&prepare_home(), &args[1..])),
         Some("eval") => code(measure::eval(&prepare_home(), &args[1..])),
@@ -190,13 +193,23 @@ fn cmd_driver(action: &str, rest: &[String]) -> ExitCode {
     ExitCode::from(2)
 }
 
-/// A double-clicked `golem`: the service (which hosts the console) and the
-/// console in the browser. When that fails there is a console window to
-/// fall back to, so the screen opens there and says why.
+/// A double-clicked `golem` (and `golem app`): the app window and its tray
+/// in a build with the desktop feature, else the console in the browser -
+/// either way through the service, which hosts the console. When that fails
+/// there is a console window to fall back to, so the screen opens there and
+/// says why.
 async fn cmd_open_console() -> ExitCode {
     let home = prepare_home();
-    match desktop::open_console(&home, &mut std::io::sink()) {
-        Ok(_) => ExitCode::SUCCESS,
+    #[cfg(feature = "desktop")]
+    let opened = match golem::app::detach() {
+        Ok(true) => Ok(()),
+        Ok(false) => golem::app::run(&home),
+        Err(e) => Err(e),
+    };
+    #[cfg(not(feature = "desktop"))]
+    let opened = desktop::open_console(&home, &mut std::io::sink()).map(|_| ());
+    match opened {
+        Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("[FAIL] cannot open the console: {e}");
             cmd_tui().await
@@ -218,16 +231,13 @@ async fn cmd_tui() -> ExitCode {
     // thread per action, so nothing here can borrow from this function.
     let act_home = home.clone();
 
-    let outcome = tui::run(&home, move |action| match action {
+    let outcome = tui::run(&home, move |action, arg| match action {
         tui::Action::Console => match desktop::open_console(&act_home, &mut std::io::sink()) {
             Ok(url) => format!("console on {url}"),
             Err(e) => format!("console: {e}"),
         },
-        // `run` returns on Quit without asking, so this arm is unreachable;
-        // it exists because the match has to be total.
-        tui::Action::Quit => String::new(),
         other => match verb_of(other) {
-            Some(verb) => describe(verb, runner::run(&act_home, verb, "", &log)),
+            Some(verb) => describe(verb, runner::run(&act_home, verb, &arg, &log)),
             None => format!("{other:?} has no action"),
         },
     });
@@ -245,7 +255,6 @@ async fn cmd_tui() -> ExitCode {
 /// answers itself.
 fn verb_of(action: tui::Action) -> Option<&'static str> {
     match action {
-        tui::Action::Status => Some("status"),
         // The console's own words, which is what the page posts too.
         tui::Action::Start => Some("start"),
         tui::Action::Stop => Some("stop"),
@@ -254,7 +263,8 @@ fn verb_of(action: tui::Action) -> Option<&'static str> {
         tui::Action::Eval => Some("eval"),
         tui::Action::Tune => Some("tune"),
         tui::Action::Report => Some("report"),
-        tui::Action::Console | tui::Action::Quit => None,
+        tui::Action::Pull => Some("pull"),
+        tui::Action::Console => None,
     }
 }
 
@@ -348,18 +358,7 @@ fn cmd_report(args: &[String]) -> ExitCode {
 
     // The page is the template with the records inlined: the raw lines, not
     // a re-serialization, so the page can never disagree with the file.
-    let template_path = paths::template(&home);
-    if !template_path.is_file() {
-        eprintln!("[FAIL] no report template at {}", template_path.display());
-        return ExitCode::from(1);
-    }
-    let template = match std::fs::read_to_string(&template_path) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("[FAIL] cannot read {}: {e}", template_path.display());
-            return ExitCode::from(1);
-        }
-    };
+    let template = paths::PAGE;
     let raw = match std::fs::read_to_string(&results) {
         Ok(r) => r,
         Err(e) => {

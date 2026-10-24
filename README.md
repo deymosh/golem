@@ -110,6 +110,7 @@ commands.
 | `bench [--runs N] [--prefill TOKENS]` | speed: decode best/median + MTP acceptance, prefill on a ~30K prompt |
 | `eval [--long TOKENS]` | quality gate: arithmetic, tool calls, throughput, needle + decode at depth |
 | `report [--no-open] [--md]` | build `bench/report.html` (self-contained) from the recorded runs; `--md` writes `bench/RESULTS.md` for GitHub instead |
+| `app` | the Golem window and tray, showing the console (a build with `--features desktop`; the release for Windows and macOS has it). On Windows `golemw.exe` beside `golem.exe` starts it without a console window - point shortcuts at it |
 | `tui` | the full-screen screen in the terminal (what a bare `golem` opens there) |
 | `tune [preset] [--adopt] [--dry-run]` / `tune --auto` | the fastest gated setup for this model (or the best installed model) on this machine |
 | `claude [args…]` | `exec claude` with `ANTHROPIC_*` already set |

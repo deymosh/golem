@@ -60,7 +60,7 @@ BEGIN
   BEGIN
     BLOCK "040904b0"
     BEGIN
-      VALUE "FileDescription", "Golem local model server"
+      VALUE "FileDescription", "Golem"
       VALUE "ProductName", "Golem"
       VALUE "InternalName", "golem"
       VALUE "OriginalFilename", "golem.exe"
@@ -80,7 +80,13 @@ END
 /// A GNU build: `windres` writes a COFF object the linker takes as it is.
 fn windres(rc: &Path, out: &Path) -> Result<PathBuf, String> {
     let object = out.join("golem-res.o");
-    let tool = std::env::var("WINDRES").unwrap_or_else(|_| "windres".to_string());
+    // Found on PATH here rather than by the spawn: the spawn's own lookup has
+    // missed a windres that was on PATH, and a full path cannot be missed.
+    let tool = match std::env::var("WINDRES") {
+        Ok(tool) => PathBuf::from(tool),
+        Err(_) => on_path(&["windres.exe", "windres"]).ok_or("no windres on PATH")?,
+    };
+    let tool = tool.display().to_string();
     let status = Command::new(&tool)
         .arg("--input")
         .arg(rc)
@@ -110,6 +116,14 @@ fn rc_exe(rc: &Path, out: &Path) -> Result<PathBuf, String> {
         return Err(format!("{} exited {status}", tool.display()));
     }
     Ok(res)
+}
+
+/// The first of `names` in a PATH directory.
+fn on_path(names: &[&str]) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .find(|candidate| candidate.is_file())
 }
 
 fn find_rc() -> Option<PathBuf> {

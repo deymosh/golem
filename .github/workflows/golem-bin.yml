@@ -35,6 +35,11 @@ jobs:
         run: cargo test --workspace --manifest-path golem-rs/Cargo.toml
       - name: Build (release)
         run: cargo build --release --manifest-path golem-rs/Cargo.toml
+      # The app window and tray: the system webview on Windows and macOS.
+      # Linux would need WebKitGTK on the runner, so it builds without it.
+      - name: Build (release, desktop)
+        if: runner.os != 'Linux'
+        run: cargo build --release --features desktop --manifest-path golem-rs/Cargo.toml
       - name: Smoke
         run: ./golem-rs/target/release/golem --version
         shell: bash
@@ -48,22 +53,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # A zip: golemw.exe (the windowed launcher) finds golem.exe by
+          # name beside it, so neither can be renamed.
           - os: windows-latest
-            asset: golem-windows-x86_64.exe
+            asset: golem-windows-x86_64.zip
+            features: --features desktop
           - os: ubuntu-latest
             asset: golem-linux-x86_64
+            features: ""
           - os: macos-latest
             asset: golem-macos-arm64
+            features: --features desktop
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --manifest-path golem-rs/Cargo.toml
-      - name: Rename
+      - run: cargo build --release ${{ matrix.features }} --manifest-path golem-rs/Cargo.toml
+      - name: Package
         shell: bash
         run: |
           src=golem-rs/target/release/golem
-          [[ "${{ runner.os }}" == Windows ]] && src="${src}.exe" || true
-          cp "${src}" "${{ matrix.asset }}"
+          if [[ "${{ runner.os }}" == Windows ]]; then
+            7z a "${{ matrix.asset }}" "${src}.exe" "${src}w.exe"
+          else
+            cp "${src}" "${{ matrix.asset }}"
+          fi
       - uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.asset }}

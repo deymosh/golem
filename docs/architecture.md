@@ -49,7 +49,7 @@ command line. The binary's layers, top to bottom:
 
 | Layer | Modules | Owns |
 |---|---|---|
-| Front ends | `main`, `desktop`, `tui`, `web`, `runner` | the CLI, which front end a bare `golem` opens, the full-screen screen, the console; `runner` is the one path a menu entry or a page button takes |
+| Front ends | `main`, `desktop`, `app`, `tui`, `web`, `runner` | the CLI, which front end a bare `golem` opens, the window and tray (`--features desktop`), the full-screen screen, the console; `runner` is the one path a menu entry or a page button takes |
 | Commands | `bench`, `eval`, `measure`, `tune`, `auto_tune`, `pull`, `install`, `setup`, `logs`, `client` | one command each; `measure` records a row after `bench`/`eval` |
 | Engine | `service`, `launch`, `release`, `engine` | who owns the engine, how it is started and stopped, how its build is installed, how it is spoken to |
 | Foundation | `config`, `paths`, `machine`, `proc`, `state`, `facts`, `models` | the configuration, the home's files, the hardware probes, child processes, what the console shows, what a row says |
@@ -70,8 +70,11 @@ back.
 
 A bare `golem` picks its front end from how it was started (`desktop.rs`): double-clicked
 on a desktop (Explorer as the parent on Windows; a graphical session with no terminal on
-Linux), it starts the service if needed and opens the console in the browser; in a
-terminal, the full-screen screen; with neither, the usage.
+Linux), it starts the service if needed and opens the console - in the Golem window in a
+build with the desktop feature, in the browser otherwise; in a terminal, the full-screen
+screen; with neither, the usage. golem.exe is a console program, so on Windows a
+double-click still opens a console window for a moment; `golemw.exe`, a windowed
+launcher built beside it, starts the app with none.
 
 Why a long-lived owner rather than an `up` that spawns and exits:
 
