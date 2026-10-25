@@ -100,12 +100,17 @@ fn from_desktop() -> bool {
         );
         machine::powershell(&script).is_some_and(|name| name.trim().eq_ignore_ascii_case("explorer"))
     } else if cfg!(target_os = "linux") {
-        let display = ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|k| std::env::var_os(k).is_some());
-        let ssh = std::env::var_os("SSH_CONNECTION").is_some();
-        display && !ssh && !std::io::stdin().is_terminal()
+        graphical_session() && !std::io::stdin().is_terminal()
     } else {
         false
     }
+}
+
+/// Whether this Linux process runs in a graphical session someone sits at:
+/// a display to draw on, and not reached over SSH.
+pub fn graphical_session() -> bool {
+    let display = ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|k| std::env::var_os(k).is_some());
+    display && std::env::var_os("SSH_CONNECTION").is_none()
 }
 
 /// Start the service if it is not running - it hosts the console - and open

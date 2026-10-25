@@ -2,10 +2,12 @@
 //! log, and the one job that may be running - read from `golem.toml`, the
 //! preset file, the engine's own HTTP endpoints, and the card.
 
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use golem_core::ini;
+use golem_core::progress::{self, Progress};
 
 use crate::config;
 use crate::engine;
@@ -62,7 +64,8 @@ pub fn engines(home: &Path) -> Vec<String> {
     names
 }
 
-/// The tail of the last job's log, for the console's job pane.
+/// The tail of the last job's log, for the console's job pane, without its
+/// `PROGRESS` lines - those are the bar's ([`job_progress`]).
 ///
 /// Empty when nothing has ever run, which is how the page decides whether to
 /// show the pane at all.
@@ -70,9 +73,24 @@ pub fn job_tail(home: &Path, lines: usize) -> String {
     let Ok(text) = std::fs::read_to_string(paths::job_log(home)) else {
         return String::new();
     };
-    let all: Vec<&str> = text.lines().collect();
+    let all: Vec<&str> = text.lines().filter(|line| !progress::is_line(line)).collect();
     let start = all.len().saturating_sub(lines);
     all[start..].join("\n")
+}
+
+/// How far the running job has got, from the newest `PROGRESS` line in the
+/// job log, or `None` when it says nothing or has cleared its bar.
+///
+/// Only the log's end is read: the screen asks several times a second, and
+/// the log keeps every job there has been.
+pub fn job_progress(home: &Path) -> Option<Progress> {
+    const TAIL_BYTES: u64 = 16 * 1024;
+    let mut file = std::fs::File::open(paths::job_log(home)).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(TAIL_BYTES))).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    progress::latest(&String::from_utf8_lossy(&bytes))
 }
 
 /// Whether a console answers on `port`.
@@ -132,6 +150,8 @@ pub struct Snapshot {
     pub job_action: String,
     /// The running job's log tail; empty when nothing has run.
     pub job_tail: String,
+    /// The running job's bar, when it has one.
+    pub job_progress: Option<Progress>,
 }
 
 pub fn snapshot(home: &Path, job: &SharedJob) -> Snapshot {
@@ -153,6 +173,7 @@ pub fn snapshot(home: &Path, job: &SharedJob) -> Snapshot {
         // finished job's log is still worth
         // reading, and that is usually the one you came back for.
         job_tail: job_tail(home, 14),
+        job_progress: if job_running { job_progress(home) } else { None },
     }
 }
 
@@ -224,6 +245,23 @@ mod tests {
         std::fs::write(dir.join("logs/web-job.log"), "a\nb\nc\n").expect("write");
         assert_eq!(job_tail(&dir, 2), "b\nc");
         assert_eq!(job_tail(&dir, 99), "a\nb\nc");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn progress_lines_are_the_bar_and_not_the_tail() {
+        let dir = home("job-progress");
+        std::fs::create_dir_all(dir.join("logs")).expect("logs");
+        let log = dir.join("logs/web-job.log");
+        // A job's log as the runner and a pull write it: the clear, text,
+        // the download's lines.
+        std::fs::write(&log, "PROGRESS -\n[INFO] Downloading x\nPROGRESS 5/10 bytes pull: x\n").expect("write");
+        assert_eq!(job_tail(&dir, 14), "[INFO] Downloading x");
+        assert_eq!(job_progress(&dir), Some(Progress::bytes(5, 10, "pull: x")));
+        // The job ended: the runner's clear takes the bar away.
+        std::fs::write(&log, "PROGRESS 5/10 bytes pull: x\n[ OK ] x downloaded\nPROGRESS -\n").expect("write");
+        assert_eq!(job_progress(&dir), None);
+        assert_eq!(job_tail(&dir, 14), "[ OK ] x downloaded");
         std::fs::remove_dir_all(&dir).ok();
     }
 

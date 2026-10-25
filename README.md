@@ -100,7 +100,7 @@ commands.
 
 | Command | Does |
 |---|---|
-| `setup` | machine report, build deps, directory scaffold |
+| `setup` | Linux: machine report, build deps, directory scaffold, and on a desktop the app's libraries and applications-menu entry; Windows: the app's Start-menu and desktop shortcuts |
 | `install` | put the pinned engine build on this machine (~600 MB, no compiler needed) |
 | `pull [preset \| name \| owner/repo[:quant]]` | fetch a preset's files, a library model, or any GGUF repo on Hugging Face (picks the quant, writes the preset); with no argument `MODEL_FILE` from `HF_REPO` (`up` fetches anything missing itself) |
 | `up` / `down` / `restart` | start / stop / cycle the engine, through the service that owns it |
@@ -110,8 +110,8 @@ commands.
 | `bench [--runs N] [--prefill TOKENS]` | speed: decode best/median + MTP acceptance, prefill on a ~30K prompt |
 | `eval [--long TOKENS]` | quality gate: arithmetic, tool calls, throughput, needle + decode at depth |
 | `report [--no-open] [--md]` | build `bench/report.html` (self-contained) from the recorded runs; `--md` writes `bench/RESULTS.md` for GitHub instead |
-| `app` | the Golem window and tray, showing the console (a build with `--features desktop`; the release for Windows and macOS has it). On Windows `golemw.exe` beside `golem.exe` starts it without a console window - point shortcuts at it |
-| `tui` | the full-screen screen in the terminal (what a bare `golem` opens there) |
+| `app` | the Golem window and tray, showing the console (a build with `--features desktop`; the release for Windows and macOS has it, and `golem-linux-x86_64-desktop` on Linux, which needs WebKitGTK). On Windows `golemw.exe` beside `golem.exe` starts it without a console window - point shortcuts at it |
+| `tui` | the full-screen screen in the terminal (what a bare `golem` opens there): the actions, the model list (Tab; Enter makes the default or downloads, `t` tunes, `x` deletes the file, Del removes the preset), `p` pull, `e` engine, `w` console |
 | `tune [preset] [--adopt] [--dry-run]` / `tune --auto` | the fastest gated setup for this model (or the best installed model) on this machine |
 | `claude [args…]` | `exec claude` with `ANTHROPIC_*` already set |
 | `env` | print those exports |

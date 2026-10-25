@@ -13,6 +13,8 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
+use golem_core::progress;
+
 use crate::config::Overrides;
 use crate::proc;
 use crate::service;
@@ -78,10 +80,18 @@ pub fn plan(action: &str, arg: &str) -> Option<Plan> {
         // starts with `-` would reach the command as a flag, so it is no
         // action at all.
         "tune" | "pull" if arg.starts_with('-') => None,
-        "tune" | "pull" if !arg.is_empty() => {
-            Some(Plan::Command(vec![action.to_string(), arg.to_string()]))
+        // The button tunes to serve: a tune always gates here, so what it
+        // adopts has passed the eval, and the engine comes back on it.
+        "tune" => {
+            let mut args = vec!["tune".to_string()];
+            if !arg.is_empty() {
+                args.push(arg.to_string());
+            }
+            args.push("--adopt".to_string());
+            Some(Plan::Command(args))
         }
-        "bench" | "tune" | "pull" | "report" => Some(Plan::Command(vec![action.to_string()])),
+        "pull" if !arg.is_empty() => Some(Plan::Command(vec![action.to_string(), arg.to_string()])),
+        "bench" | "pull" | "report" => Some(Plan::Command(vec![action.to_string()])),
         _ => None,
     }
 }
@@ -91,8 +101,12 @@ pub fn plan(action: &str, arg: &str) -> Option<Plan> {
 ///
 /// The log is the console's job pane (`logs/web-job.log`): the page polls it
 /// through `api/state`, so it is where a service's streamed lines belong.
+///
+/// A job starts and ends with the progress clear, so the bar the page and
+/// the screen draw is always this job's, and goes when it is done.
 pub fn run(home: &Path, action: &str, arg: &str, log: &Path) -> i32 {
-    match plan(action, arg) {
+    let _ = line(log, progress::CLEAR);
+    let code = match plan(action, arg) {
         Some(Plan::Read(verb)) => read(home, verb, log),
         Some(Plan::Engine(verb)) => through_service(home, verb, log),
         Some(Plan::Command(args)) => self_run(home, &args, log),
@@ -100,7 +114,9 @@ pub fn run(home: &Path, action: &str, arg: &str, log: &Path) -> i32 {
             let _ = line(log, &format!("[FAIL] unknown action: {action}"));
             2
         }
-    }
+    };
+    let _ = line(log, progress::CLEAR);
+    code
 }
 
 /// A read of the engine's state, answered here rather than by the service.
@@ -215,10 +231,13 @@ mod tests {
 
     #[test]
     fn tune_and_pull_carry_the_preset_they_were_given() {
-        assert_eq!(plan("tune", "ornith-1.5-35b"), Some(command(&["tune", "ornith-1.5-35b"])));
+        assert_eq!(
+            plan("tune", "ornith-1.5-35b"),
+            Some(command(&["tune", "ornith-1.5-35b", "--adopt"]))
+        );
         assert_eq!(plan("pull", "tiny"), Some(command(&["pull", "tiny"])));
         // No name: the verb alone, not an empty argument.
-        assert_eq!(plan("tune", ""), Some(command(&["tune"])));
+        assert_eq!(plan("tune", ""), Some(command(&["tune", "--adopt"])));
         assert_eq!(plan("pull", ""), Some(command(&["pull"])));
         // A repository, as the console's pull box sends it.
         assert_eq!(
@@ -229,9 +248,9 @@ mod tests {
 
     #[test]
     fn an_argument_that_looks_like_a_flag_is_refused() {
-        // `tune --adopt` from a page would change what serves without the
-        // person at the screen asking for it.
-        assert_eq!(plan("tune", "--adopt"), None);
+        // The field names a model; `--no-gate` from it would adopt a setup
+        // no eval has passed.
+        assert_eq!(plan("tune", "--no-gate"), None);
         assert_eq!(plan("pull", "-x"), None);
     }
 

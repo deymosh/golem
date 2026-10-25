@@ -9,8 +9,9 @@
 //!   `std` spawns with `bInheritHandles = TRUE`, so an engine started by `up`
 //!   held a copy of the caller's stdout pipe and `golem up | tail` waited for
 //!   an EOF that only came when the engine stopped. A client that spawns
-//!   nothing cannot leak anything; only the first `up` after a boot, which
-//!   starts the service itself, still can.
+//!   nothing cannot leak anything, and the one spawn a client does make -
+//!   the service itself, on the first verb after a boot - goes through
+//!   `Start-Process`, which inherits nothing ([`ensure_running`]).
 //! - **A killed run must not leave an orphan.** The engine is a child of the
 //!   service, so it goes when the service goes. A `tune` killed mid-sweep once
 //!   left a 35B resident - 11.7 GB of VRAM that nothing could see, because the
@@ -221,10 +222,14 @@ pub fn ensure_running(home: &Path, out: &mut dyn Write) -> Result<(), String> {
     }
     let exe = std::env::current_exe()
         .map_err(|e| format!("cannot find this binary to start the service: {e}"))?;
-    let child = spawn_command(&exe, home)
-        .spawn()
-        .map_err(|e| format!("cannot start the golem service: {e}"))?;
-    let _ = writeln!(out, "[ .. ] golem service started (pid {})", child.id());
+    let pid = match start_without_handles(&exe, home) {
+        Some(pid) => pid,
+        None => spawn_command(&exe, home)
+            .spawn()
+            .map_err(|e| format!("cannot start the golem service: {e}"))?
+            .id(),
+    };
+    let _ = writeln!(out, "[ .. ] golem service started (pid {pid})");
 
     let deadline = Instant::now() + START_DEADLINE;
     while Instant::now() < deadline {
@@ -237,6 +242,52 @@ pub fn ensure_running(home: &Path, out: &mut dyn Write) -> Result<(), String> {
         "the golem service did not come up within {}s",
         START_DEADLINE.as_secs()
     ))
+}
+
+/// The script that starts the service on Windows: `Start-Process` goes
+/// through `ShellExecuteEx`, which hands the new process no handles, and
+/// prints its pid. The binary's path comes from the environment, never the
+/// script's text.
+const START_SCRIPT: &str =
+    "(Start-Process -FilePath $env:GOLEM_SERVICE_EXE -ArgumentList 'service' -WindowStyle Hidden -PassThru).Id";
+
+/// Start the service with no inherited handles, and return its pid - or
+/// `None` off Windows, or when PowerShell cannot do it, for the caller to
+/// spawn directly.
+///
+/// `std` spawns with `bInheritHandles = TRUE`, so a service spawned directly
+/// keeps a copy of every inheritable handle this client holds: the pipe of a
+/// `golem up | tail` among them, and `tail` then waits for an EOF that comes
+/// only when the service exits (measured: a piped `restart` that had long
+/// finished held its reader for the whole 30 s it was given). PowerShell
+/// holds that copy for the half-second it runs, then exits; the service it
+/// starts has none. The service's environment is PowerShell's, which is this
+/// command's: `GOLEM_HOME` set, the overrides removed.
+fn start_without_handles(exe: &Path, home: &Path) -> Option<u32> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let mut command = std::process::Command::new("powershell.exe");
+    command
+        .args(["-NoProfile", "-NonInteractive", "-Command", START_SCRIPT])
+        .env("GOLEM_SERVICE_EXE", exe)
+        .env("GOLEM_HOME", home)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    for key in crate::config::OVERRIDABLE {
+        command.env_remove(format!("GOLEM_{key}"));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = command.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
 /// The detached service's command line and environment.
@@ -714,6 +765,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".local")).expect("temp");
         dir
+    }
+
+    #[test]
+    fn the_start_script_takes_the_binary_from_its_environment() {
+        // A path spliced into the text would be PowerShell to run.
+        assert!(START_SCRIPT.contains("-FilePath $env:GOLEM_SERVICE_EXE"));
+        assert!(START_SCRIPT.contains("-ArgumentList 'service'"));
+        assert!(START_SCRIPT.ends_with(".Id"), "the pid is what the client reports");
     }
 
     #[test]

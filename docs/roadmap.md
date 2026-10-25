@@ -8,16 +8,7 @@ fetches models from Hugging Face, measures them on the machine at hand, tunes th
 card and the RAM, and gates a setup before it becomes a default. The items below serve
 that.
 
-## 1. Settle the tuner's verdict on a quiet desktop
-
-The quiet-desktop pair ([tuning.md](tuning.md#measured)) found `ub1024` and `ub2048` tied
-on decode with `ub2048` 55-58% faster at prefill, and `ub2048` over the wall at the trained
-context. The ranking now compares spills within one `ubatch-size` and breaks a decode tie
-on prefill. Next: one `golem tune ornith-1.5-35b` on a free desktop, so the tuner itself
-weighs `ub2048` at the largest context under the wall against `ub1024` at the trained one,
-and gates the winner.
-
-## 2. Models by name, from Hugging Face
+## 1. Models by name, from Hugging Face
 
 Hugging Face is the one model source. Adding a model takes one name -
 `golem pull owner/repo[:quant]`, or a name from the shipped library - and golem works out
@@ -36,32 +27,35 @@ Each fact about a model then lives in one place:
 
 `golem pull owner/repo[:quant]` writes the first two (`golem_core::hub`); the library is
 compiled into the binary, `golem pull <name>` fetches a library model by name, and `tune
---auto` ranks by its scores. Still to do: the console's pull box, and ranking a model
-outside the library by measured speed and size, since the Hub publishes no benchmark
-scores.
+--auto` ranks by its scores; the console and the screen pull by the same name. A model
+outside the library has no score to read - the Hub publishes none, and the model cards
+checked (Ornith 1.5 9B and 35B) carry no `model-index` either - so `tune --auto` ranks it
+after every scored one, by parameters, then the context and the decode its cheap sweep
+reached, and a model under the floors is no candidate at all.
 
-## 3. The app
+## 2. The app
 
 The mark (`golem_core::mark`), the icon and version block in the executable, the
-redesigned console, the screen's header, and `golem app` - a frameless window on the
+redesigned console, the screen's header, `golem app` - a frameless window on the
 console, its title bar drawn by the page, with a tray whose spark shows the engine's state,
-and `golemw.exe` to start it with no console window (`--features desktop`) - are in.
-What is left:
+and `golemw.exe` to start it with no console window (`--features desktop`) - and the
+Start-menu and desktop shortcuts `golem setup` makes on Windows, and a bar for a pull, a
+tune or an eval in the console, the screen and the terminal are in. What is left:
 
-- **A shortcut.** `golem setup` could put `golemw.exe` in the Start menu and on the
-  desktop; today a shortcut is made by hand.
-- **Linux.** The desktop build needs WebKitGTK on the build machine; CI builds Linux
-  without it until the runner installs it.
-- **Progress for long steps** in the console: a pull or a tune shows its log, not yet a
-  bar.
+- **The Linux tray.** The desktop build (`golem-linux-x86_64-desktop`, WebKitGTK from the
+  system) opens its window and the page's title bar under WSLg; WSLg has no tray, so the
+  tray and its menu have not been seen on a Linux desktop yet. `golem setup` on a
+  graphical session installs the libraries and writes the applications-menu entry.
 
-## 4. Release
+## 3. Release
 
-`.github/workflows/golem-bin.yml` builds and tests on the three platforms and attaches a
-binary per OS to a `v*` tag. A fresh clone has no binary until then and builds one with
-`./scripts/cargo.sh build`. Tagging is a push, and it waits for the go-ahead.
+`.github/workflows/golem-bin.yml` builds and tests on the three platforms and attaches the
+binaries to a `v*` tag, each with nothing to install beside it: `golem.exe` and
+`golemw.exe` with the WebView2 loader and the C runtime linked in, a static (musl)
+`golem` for Linux, a Linux desktop build that uses the system's WebKitGTK, and macOS. A
+fresh clone has no binary until then and builds one with `./scripts/cargo.sh build`. Tagging is a push, and it waits for the go-ahead.
 
-## 5. Candidates, when the GPU is free
+## 4. Candidates, when the GPU is free
 
 From [engines-and-models.md](engines-and-models.md): the everyday-slot pair (Ornith-1.5-9B,
 Gemma 4 12B QAT), a paired retest of llama.cpp b11755, and Strata's 0.2.x engine line
@@ -72,6 +66,4 @@ against the 200K requirement. Each is a preset or an adapter, a paired bench and
 - The AMD path (`GPU_BACKEND = "rocm"`, the rocm release assets, the rocm image) has never
   been through the eval gate here, and `golem status` / the tuner read VRAM through
   `nvidia-smi` only.
-- The first `golem up` after a boot starts the service itself and can still hold a piped
-  caller's handle on Windows; clearing the inherit flag around that one spawn closes it.
 - mintty and raw conhost have not been walked by hand with the screen.

@@ -14,7 +14,26 @@
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
-use golem::tui::{self, Action, App, Facts, ModelRow};
+use golem::tui::{self, Action, App, Facts, Focus, ModelRow};
+
+/// The mark as the screen draws it, derived from the icon's grid: one column
+/// per cell, two rows per line in half blocks.
+fn mark_text() -> [String; 2] {
+    let g = golem_core::mark::GRID;
+    let line = |upper: &str, lower: &str| -> String {
+        upper
+            .bytes()
+            .zip(lower.bytes())
+            .map(|(u, l)| match (u != b'0', l != b'0') {
+                (true, true) if u == l => '\u{2588}',
+                (true, _) => '\u{2580}',
+                (false, true) => '\u{2584}',
+                (false, false) => ' ',
+            })
+            .collect()
+    };
+    [line(g[0], g[1]), line(g[2], g[3])]
+}
 
 /// Render one frame into a `w`x`h` buffer and return it as text, one line per
 /// row, so the assertions read like the screen looks.
@@ -125,7 +144,7 @@ fn the_marker_is_on_the_selected_action() {
 fn the_bottom_line_starts_with_the_keys() {
     let text = screen(&App::new());
     let last = text.lines().last().expect("a last line");
-    for key in ["enter run", "p pull", "w console", "q quit"] {
+    for key in ["enter run", "tab models", "p pull", "e engine", "w console", "q quit"] {
         assert!(last.contains(key), "{key:?} is not in the hint: {last:?}");
     }
 }
@@ -171,24 +190,81 @@ fn the_header_carries_every_fact() {
     let mut lines = text.lines();
     let first = lines.next().expect("the header's first line");
     let second = lines.next().expect("the header's second line");
-    assert!(first.contains("\u{259f}\u{2588}\u{2599} GOLEM"), "{first:?}");
+    let [top, bottom] = mark_text();
+    assert!(first.contains(&format!("{top} GOLEM")), "{first:?}");
     assert!(first.contains("\u{25cf} serving"), "{first:?}");
     assert!(first.contains("ornith-1.5-35b"), "{first:?}");
     assert!(first.contains("10.7/12.0 GB"), "{first:?}");
     assert!(first.contains("[llama.cpp]"), "{first:?}");
-    assert!(second.contains("\u{259c}\u{2588}\u{259b}"), "{second:?}");
+    assert!(second.contains(&bottom), "{second:?}");
     assert!(second.contains("console :8787"), "{second:?}");
     assert!(second.contains("8.4 GB free"), "{second:?}");
 }
 
 #[test]
-fn the_header_mark_is_the_icons_grid() {
+fn the_header_mark_is_the_icons_grid_in_half_blocks() {
     let text = screen(&App::new());
     let mut lines = text.lines();
-    for glyphs in golem_core::mark::GLYPHS {
+    for drawn in mark_text() {
         let line = lines.next().expect("a header line");
-        assert!(line.starts_with(&format!("  {glyphs}")), "{line:?}");
+        assert!(line.starts_with(&format!("  {drawn}")), "{line:?} does not start with {drawn:?}");
     }
+    // The spark row is the lower half of the first line: a body cell over a
+    // spark cell is drawn as an upper half block in two colours.
+    let [top, _] = tui::mark_lines(golem_core::mark::Spark::Serving);
+    let spark = &top[1];
+    assert_eq!(spark.content, "\u{2580}");
+    assert_ne!(spark.style.fg, spark.style.bg, "the body and the spark keep their own colours");
+}
+
+// ---- the model list's own keys -----------------------------------------------
+
+#[test]
+fn tab_moves_the_focus_to_the_models_and_the_marker_with_it() {
+    let mut app = populated();
+    assert_eq!(app.focus(), Focus::Actions);
+    app.toggle_focus();
+    assert_eq!(app.focus(), Focus::Models);
+    let text = screen(&app);
+    assert!(marked_row(&text).contains("ornith-1.5-35b"), "the marker is on the first model:\n{text}");
+    assert!(!text.contains("\u{25b8} Start"), "and off the actions:\n{text}");
+    let last = text.lines().last().expect("a last line");
+    assert!(last.contains("make default") && last.contains("t tune") && last.contains("x delete file"), "{last:?}");
+    app.model_next();
+    assert_eq!(app.selected_model().map(|m| m.name.as_str()), Some("qwen3.5-9b"));
+    assert!(marked_row(&screen(&app)).contains("qwen3.5-9b"));
+    app.toggle_focus();
+    assert_eq!(app.focus(), Focus::Actions);
+}
+
+#[test]
+fn an_empty_list_keeps_the_focus_on_the_actions() {
+    let mut app = App::new();
+    app.toggle_focus();
+    assert_eq!(app.focus(), Focus::Actions);
+}
+
+#[test]
+fn a_question_waits_on_the_bottom_line_and_only_a_yes_runs_it() {
+    let mut app = populated();
+    app.ask("remove the preset qwen3.5-9b?", Action::RemovePreset, "qwen3.5-9b");
+    let last = screen(&app).lines().last().expect("a last line").to_string();
+    assert!(last.contains("remove the preset qwen3.5-9b?") && last.contains("y yes"), "{last:?}");
+    assert_eq!(app.answer(true), Some((Action::RemovePreset, "qwen3.5-9b".to_string())));
+    assert_eq!(app.question(), None);
+    app.ask("delete?", Action::DeleteFile, "x");
+    assert_eq!(app.answer(false), None, "a no runs nothing");
+    assert_eq!(app.question(), None, "and clears the question");
+}
+
+#[test]
+fn e_cycles_through_the_installed_engines() {
+    let mut app = populated(); // the engine is llama.cpp
+    assert_eq!(app.next_engine(), None, "nothing installed, nothing to switch to");
+    app.set_engines(vec!["ik_llama.cpp".into(), "llama.cpp".into()]);
+    assert_eq!(app.next_engine().as_deref(), Some("ik_llama.cpp"), "wraps past the last");
+    app.set_engines(vec!["llama.cpp".into(), "strata".into()]);
+    assert_eq!(app.next_engine().as_deref(), Some("strata"));
 }
 
 #[test]
@@ -268,4 +344,21 @@ fn a_narrow_window_flows_the_grid_onto_more_rows_and_keeps_the_selection() {
     }
     let text = screen_at(&app, 26, 30);
     assert!(marked_row(&text).contains("\u{25b8} Tune"), "{text}");
+}
+
+#[test]
+fn a_running_action_with_progress_draws_its_bar_on_the_bottom_line() {
+    let mut app = populated();
+    app.set_busy(true);
+    app.set_progress(Some(golem_core::progress::Progress::bytes(8_800_000_000, 21_600_000_000, "pull: x.gguf")));
+    let text = screen(&app);
+    let bottom = text.lines().last().expect("a bottom line");
+    assert!(bottom.contains("pull: x.gguf"), "{bottom}");
+    assert!(bottom.contains("\u{2501}") && bottom.contains("\u{2500}"), "{bottom}");
+    assert!(bottom.contains(" 40%  8.2 of 20.1 GB"), "{bottom}");
+    // The action ends: the bar goes with it, and the message is back.
+    app.set_busy(false);
+    app.set_message("pull: done");
+    let text = screen(&app);
+    assert!(text.lines().last().expect("a bottom line").contains("pull: done"));
 }

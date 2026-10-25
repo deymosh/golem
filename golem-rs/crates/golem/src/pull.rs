@@ -16,11 +16,12 @@
 //! The decisions are `golem_core::hub`'s.
 
 use std::fs::File;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use golem_core::progress::Progress;
 use golem_core::{hub, ini};
 use golem_core::time::civil_from_days;
 
@@ -32,6 +33,9 @@ const MIN_FREE_GB: u64 = 25;
 
 /// The completeness floor when Hugging Face does not report a size.
 const FLOOR_FALLBACK: u64 = 1_000_000_000;
+
+/// How often a download in a job's log says how far it has got.
+const PROGRESS_EVERY: Duration = Duration::from_secs(2);
 
 /// The model fetched when golem.toml names none.
 const DEFAULT_REPO: &str = "unsloth/Qwen3.6-35B-A3B-GGUF";
@@ -109,7 +113,7 @@ fn run_inner(home: &Path, preset: Option<&str>, log: &mut Log) -> Result<(), Str
                 "Insufficient disk space: {gb} GB free, {MIN_FREE_GB} GB recommended."
             ))
         }
-        None => return Err("cannot read free disk space (df -Pk)".to_string()),
+        None => return Err("cannot read the free disk space".to_string()),
     }
 
     let models_dir = home.join("data/models");
@@ -436,7 +440,7 @@ fn hf_get(
     // -L follows the CDN redirect; -C - resumes the .part if one is lying
     // around; --retry rides out flaky links.
     let part = with_suffix(&path, ".part");
-    let status = curl_download(&url, &part, token)?;
+    let status = curl_download(log, &url, &part, token, expected.map(|size| (file, size)))?;
     if !status.success() {
         return Err(format!("curl failed for {file} (exit {:?})", status.code()));
     }
@@ -509,15 +513,26 @@ fn parse_linked_size(headers: &str) -> Option<u64> {
 
 /// `curl -fL -C - --retry 5 --retry-delay 3 -o <part> <url>`.
 ///
-/// Progress goes to the inherited stderr, so a long download shows a meter;
-/// the exit status is returned for the caller to judge.
+/// On a terminal curl draws its own meter on the inherited stderr. Anywhere
+/// else - the job log the console and the screen tail - its meter would be
+/// carriage-return noise, so curl runs quiet and the download says how far
+/// it has got as `PROGRESS` lines instead: the `.part` file's size against
+/// the size the Hub reported (`sized`, the file's name and its bytes), every
+/// [`PROGRESS_EVERY`]. The exit status is returned for the caller to judge.
 fn curl_download(
+    log: &mut Log,
     url: &str,
     part: &Path,
     token: Option<&str>,
+    sized: Option<(&str, u64)>,
 ) -> Result<std::process::ExitStatus, String> {
+    let quiet = !std::io::stderr().is_terminal();
     let mut command = Command::new("curl");
     command.args(["-fL", "-C", "-", "--retry", "5", "--retry-delay", "3"]);
+    if quiet {
+        // Silent, but errors still said.
+        command.arg("-sS");
+    }
     if let Some(token) = token {
         command.arg("-H").arg(format!("Authorization: Bearer {token}"));
     }
@@ -528,7 +543,25 @@ fn curl_download(
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    command.status().map_err(|e| format!("cannot run curl: {e}"))
+    let Some((file, total)) = sized.filter(|_| quiet) else {
+        return command.status().map_err(|e| format!("cannot run curl: {e}"));
+    };
+    let mut child = command.spawn().map_err(|e| format!("cannot run curl: {e}"))?;
+    let label = format!("pull: {file}");
+    let mut said = Instant::now().checked_sub(PROGRESS_EVERY).unwrap_or_else(Instant::now);
+    loop {
+        if let Some(status) = child.try_wait().map_err(|e| format!("cannot wait for curl: {e}"))? {
+            // The bar goes: the next line says how the download ended.
+            log.progress_done();
+            return Ok(status);
+        }
+        if said.elapsed() >= PROGRESS_EVERY {
+            let done = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0);
+            log.progress(&Progress::bytes(done.min(total), total, &label));
+            said = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 /// `sha256sum <path>`, whose one output line becomes the `.sha256` file.
@@ -544,8 +577,21 @@ fn sha256sum(path: &Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Free space in GB on the filesystem holding `home`, from `df -Pk`.
+/// Free space in GB on the filesystem holding `home`.
+///
+/// Windows has no `df` outside a Git or MSYS shell - and the console and the
+/// screen run this as a child with no such shell - so there it is .NET's own
+/// reading of the drive; elsewhere `df -Pk`.
 fn free_gb(home: &Path) -> Option<u64> {
+    if cfg!(windows) {
+        // Single quotes in a PowerShell string are doubled, nothing else.
+        let path = home.display().to_string().replace('\'', "''");
+        let script = format!(
+            "[System.IO.DriveInfo]::new([System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath('{path}'))).AvailableFreeSpace"
+        );
+        let bytes: u64 = crate::machine::powershell(&script)?.parse().ok()?;
+        return Some(bytes / 1_000_000_000);
+    }
     let out = Command::new("df").arg("-Pk").arg(home).output().ok()?;
     if !out.status.success() {
         return None;
@@ -632,6 +678,16 @@ impl<'a> Log<'a> {
     fn error(&mut self, text: &str) {
         let _ = writeln!(self.out, "[ERROR] {text}");
         self.write(&format!("[ERROR] {text}"));
+    }
+
+    /// A `PROGRESS` line, to the sink only: the download log keeps what
+    /// happened, not how fast.
+    fn progress(&mut self, progress: &Progress) {
+        let _ = writeln!(self.out, "{}", progress.line());
+    }
+
+    fn progress_done(&mut self) {
+        let _ = writeln!(self.out, "{}", golem_core::progress::CLEAR);
     }
 
     fn info(&mut self, message: &str) {

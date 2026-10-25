@@ -25,9 +25,9 @@
 //! found by measurement, never by arithmetic: a candidate whose prefill is
 //! far under the best prefill its own engine reached is the spill.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt::Arguments;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -37,8 +37,9 @@ use std::time::{Duration, Instant};
 use golem_core::evalparse::{self, Verdict as Gate};
 use golem_core::gguf;
 use golem_core::ini::{self, Entry};
+use golem_core::progress::Progress;
 use golem_core::time;
-use golem_core::tune::{self, ContextSearch, Floor, Point, Probe, Rung, RungOutcome};
+use golem_core::tune::{self, ContextSearch, Floor, Phase, Point, Probe, Rung, RungOutcome};
 
 use crate::config::{self, Overrides};
 use crate::engine;
@@ -412,6 +413,15 @@ struct Tuner<'a> {
     /// for the `--auto` driver. A `RefCell` so every `&self` method can write
     /// without threading a mutable borrow through the whole sweep.
     out: RefCell<Box<dyn Write>>,
+    /// Whether the narration carries `PROGRESS` lines: when it lands in a
+    /// job's log rather than on a terminal, where the narration is the
+    /// progress.
+    progress: bool,
+    /// The stage the next load belongs to, the loads it has spent, and the
+    /// loads the whole run has.
+    phase: Cell<Phase>,
+    in_phase: Cell<u32>,
+    loads: Cell<u32>,
 }
 
 /// Run `golem tune`. Returns the process exit code.
@@ -530,6 +540,10 @@ impl<'a> Tuner<'a> {
             port,
             points: Vec::new(),
             out: RefCell::new(out),
+            progress: !std::io::stdout().is_terminal(),
+            phase: Cell::new(Phase::Frontier),
+            in_phase: Cell::new(0),
+            loads: Cell::new(0),
         })
     }
 
@@ -542,6 +556,25 @@ impl<'a> Tuner<'a> {
         let mut out = self.out.borrow_mut();
         let _ = out.write_fmt(args);
         let _ = out.write_all(b"\n");
+    }
+
+    /// The stage the loads from here on belong to.
+    fn enter(&self, phase: Phase) {
+        self.phase.set(phase);
+        self.in_phase.set(0);
+    }
+
+    /// A model load is starting: count it, and say how far the run is
+    /// against what it still expects to spend ([`tune::loads_left`]).
+    fn load(&self) {
+        let (phase, done) = (self.phase.get(), self.loads.get());
+        if self.progress {
+            let total = done + tune::loads_left(phase, self.in_phase.get());
+            let label = format!("tune: {}, load {}", phase.name(), done + 1);
+            self.emit(format_args!("{}", Progress::steps(done as u64, total as u64, label).line()));
+        }
+        self.loads.set(done + 1);
+        self.in_phase.set(self.in_phase.get() + 1);
     }
 
     /// The whole run: plan, sweep, decide, gate, report.
@@ -742,6 +775,7 @@ impl<'a> Tuner<'a> {
     /// `--candidates a,b,c` still measures exactly the splits it is given -
     /// the escape hatch for reproducing an old sweep or checking this one.
     fn sweep_engine(&mut self, engine: &str) {
+        self.enter(Phase::Frontier);
         let seed = self.seed_for(engine);
         self.emit(format_args!(""));
         if !self.opts.candidates.is_empty() {
@@ -868,6 +902,7 @@ impl<'a> Tuner<'a> {
     /// neighbourhoods around values the documentation already settled was the
     /// other half of a seventeen-load sweep.
     fn refine(&mut self, engine: &str, best: u32) {
+        self.enter(Phase::Refine);
         self.emit(format_args!("  --- {engine}: refining n-cpu-moe {best} (batch, threads, spec)"));
         let base = || vec![Entry::new("n-cpu-moe", best.to_string()), Entry::new("fit", "off")];
 
@@ -1050,6 +1085,7 @@ impl<'a> Tuner<'a> {
         let text = ini::write_candidate(&self.preset_text, &self.opts.target, &for_file);
         std::fs::write(&candidate, text).ok()?;
 
+        self.load();
         self.emit(format_args!("  {engine} {label}: restarting..."));
         // The launcher's exit code, not just whether it could be spawned: a
         // launcher that ran and failed is the common case (a model that would
@@ -1290,6 +1326,8 @@ impl<'a> Tuner<'a> {
             }
             let staged = self.stage(&engine, &overlay)?;
 
+            self.enter(Phase::Gate);
+            self.load();
             self.emit(format_args!("[ .. ] gating {engine} {}: restarting and running the {gate_tokens}-token needle (this takes a while)...", self.points[key].label));
             let restarted = matches!(self.restart(&engine, &staged, GATE_LOG, true), Ok(0));
             if !restarted || !self.wait_healthy() {
@@ -1351,6 +1389,7 @@ impl<'a> Tuner<'a> {
     /// sweep says the prediction is at least as good
     /// (docs/roadmap.md).
     fn maximize_ctx(&mut self, candidate: usize) -> usize {
+        self.enter(Phase::Context);
         let engine = self.points[candidate].engine.clone();
         let overrides = self.points[candidate].overrides.clone();
 
@@ -1869,6 +1908,10 @@ mod tests {
             port: 8000,
             points: Vec::new(),
             out: RefCell::new(Box::new(std::io::sink())),
+            progress: false,
+            phase: Cell::new(Phase::Frontier),
+            in_phase: Cell::new(0),
+            loads: Cell::new(0),
         }
     }
 

@@ -1,9 +1,9 @@
 //! `golem setup`: inspect the machine and get it ready to build and serve.
 //!
 //! A section report, two guards (not root, Linux only), the package install
-//! and the directory scaffolding. It is Linux (native, WSL2, or a
-//! GPU-passthrough VM) only, and it says so by stopping early - no
-//! `/etc/os-release` means no report.
+//! and the directory scaffolding, on Linux (native, WSL2, or a
+//! GPU-passthrough VM) - no `/etc/os-release` means no report. On Windows it
+//! is the app's Start-menu and desktop shortcuts ([`crate::shortcut`]).
 //!
 //! Everything that reads the machine is best effort: a tool that is not
 //! installed produces a warning, never a panic and never a crash. The one
@@ -73,6 +73,13 @@ const PACMAN_PACKAGES: [&str; 9] = [
     "jq",
 ];
 
+/// What `--features desktop` builds against - the webview, the tray and
+/// its menu (WebKitGTK, an appindicator, libxdo) - per package manager.
+/// Installed only on a graphical session: a server has no window to open.
+const APT_DESKTOP: [&str; 3] = ["libwebkit2gtk-4.1-dev", "libayatana-appindicator3-dev", "libxdo-dev"];
+const DNF_DESKTOP: [&str; 3] = ["webkit2gtk4.1-devel", "libappindicator-gtk3-devel", "libxdo-devel"];
+const PACMAN_DESKTOP: [&str; 3] = ["webkit2gtk-4.1", "libayatana-appindicator", "xdotool"];
+
 /// Where the report looks for `libcuda.so`, in order.
 const SEARCH_PATHS: [&str; 6] = [
     "/usr/lib",
@@ -96,6 +103,11 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
     if let Err(message) = parse_args(args) {
         eprintln!("[ERROR] {message}");
         return 1;
+    }
+    // Windows has no package to install and no distribution to report on:
+    // getting it ready is the app's shortcuts.
+    if cfg!(windows) {
+        return crate::shortcut::create(&mut std::io::stdout());
     }
 
     let logs_dir = home.join("logs");
@@ -265,6 +277,13 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
 
     // ---- 9. build dependencies ------------------------------------------
     report.section("9. BUILD DEPENDENCIES");
+    let graphical = crate::desktop::graphical_session();
+    let desktop = |packages: &'static [&'static str]| -> &'static [&'static str] {
+        if graphical { packages } else { &[] }
+    };
+    if graphical {
+        report.info("Graphical session: the app's window and tray libraries too.");
+    }
     match package_manager(which("apt-get"), which("dnf"), which("pacman")) {
         Some(Manager::Apt) => {
             report.info("Debian/Ubuntu package manager detected.");
@@ -273,19 +292,23 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
             install
                 .args(["apt-get", "install", "-y"])
                 .args(APT_PACKAGES)
+                .args(desktop(&APT_DESKTOP))
                 .env("DEBIAN_FRONTEND", "noninteractive");
             report.run_visible(&mut install, "apt-get install");
         }
         Some(Manager::Dnf) => {
             report.info("DNF package manager detected.");
             let mut install = Command::new("sudo");
-            install.args(["dnf", "install", "-y"]).args(DNF_PACKAGES);
+            install.args(["dnf", "install", "-y"]).args(DNF_PACKAGES).args(desktop(&DNF_DESKTOP));
             report.run_visible(&mut install, "dnf install");
         }
         Some(Manager::Pacman) => {
             report.info("Pacman package manager detected.");
             let mut install = Command::new("sudo");
-            install.args(["pacman", "-Sy", "--needed", "--noconfirm"]).args(PACMAN_PACKAGES);
+            install
+                .args(["pacman", "-Sy", "--needed", "--noconfirm"])
+                .args(PACMAN_PACKAGES)
+                .args(desktop(&PACMAN_DESKTOP));
             report.run_visible(&mut install, "pacman -Sy");
         }
         None => {
@@ -391,6 +414,14 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
     if !home.join("golem.toml").is_file() {
         report.warn("No golem.toml yet - the binary writes one beside itself on first run:");
         report.line("    golem up   (or golem install, which only fetches the engine)");
+    }
+    // A desktop gets the app in its applications menu.
+    if graphical {
+        let mut made = Vec::new();
+        crate::shortcut::create(&mut made);
+        for line in String::from_utf8_lossy(&made).lines() {
+            report.line(line);
+        }
     }
 
     // ---- 15. git ---------------------------------------------------------

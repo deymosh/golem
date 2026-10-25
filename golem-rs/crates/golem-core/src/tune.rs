@@ -56,6 +56,59 @@ pub fn between(fits: u32, spills: u32) -> Option<u32> {
     Some(fits - (fits - spills) / 2)
 }
 
+/// A tune's stages, in the order it spends model loads on them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Frontier,
+    Refine,
+    Context,
+    Gate,
+}
+
+impl Phase {
+    /// The stage as a progress bar names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Phase::Frontier => "split frontier",
+            Phase::Refine => "refine",
+            Phase::Context => "context",
+            Phase::Gate => "gate",
+        }
+    }
+
+    /// The loads the stage typically spends (docs/tuning.md's budget: three
+    /// to five, one or two, two or three, and one).
+    fn typical_loads(self) -> u32 {
+        match self {
+            Phase::Frontier => 4,
+            Phase::Refine => 2,
+            Phase::Context => 3,
+            Phase::Gate => 1,
+        }
+    }
+
+    fn later(self) -> &'static [Phase] {
+        match self {
+            Phase::Frontier => &[Phase::Refine, Phase::Context, Phase::Gate],
+            Phase::Refine => &[Phase::Context, Phase::Gate],
+            Phase::Context => &[Phase::Gate],
+            Phase::Gate => &[],
+        }
+    }
+}
+
+/// The loads a run still expects to spend, the one starting now included:
+/// what is left of this stage's typical count - at least this load - and
+/// every later stage's. `in_phase` is the loads this stage has already spent.
+///
+/// An estimate by construction - the search stops when it has its answer -
+/// so a progress bar built on it grows its total when a stage runs long
+/// rather than claiming a finish it cannot know.
+pub fn loads_left(phase: Phase, in_phase: u32) -> u32 {
+    let here = phase.typical_loads().saturating_sub(in_phase).max(1);
+    here + phase.later().iter().map(|p| p.typical_loads()).sum::<u32>()
+}
+
 /// One measured sweep point.
 #[derive(Debug, Clone)]
 pub struct Point {
@@ -430,13 +483,21 @@ impl ContextSearch {
     }
 }
 
-/// The largest context the fit allows, capped by `limit` and only worth
-/// growing to when it beats what already fit.
+/// What a predicted context is rounded down to.
+///
+/// Two loads of one context read a few MiB apart (9 MiB measured on the
+/// 35B), and near the wall that is several hundred tokens' worth: a
+/// prediction finer than this re-fits the line through the noise and spends
+/// a load per wobble, each a full model read, for a gain no session notices.
+pub const CONTEXT_STEP: u64 = 1024;
+
+/// The largest context the fit allows, on a [`CONTEXT_STEP`], capped by
+/// `limit` and only worth growing to when it beats what already fit.
 fn predict(fit: Option<Fit>, current: u64, wall_mib: u64, limit: u64) -> Rung {
     let Some(predicted) = fit.and_then(|f| f.context_under(wall_mib)) else {
         return Rung::Stop;
     };
-    let target = predicted.min(limit);
+    let target = (predicted / CONTEXT_STEP * CONTEXT_STEP).min(limit);
     if target > current {
         Rung::Grow(target)
     } else {
@@ -885,6 +946,31 @@ mod tests {
         let (best, loads) = search_on_card(8192, 11264, 262144, vram_at);
         assert!(best * 100 >= true_ceiling * 98, "{best}");
         assert!(loads <= 4, "{loads} loads");
+    }
+
+    #[test]
+    fn the_load_estimate_is_the_documented_budget_and_never_runs_out() {
+        // A fresh run expects about ten loads.
+        assert_eq!(loads_left(Phase::Frontier, 0), 10);
+        // A frontier that took six loads still owes the one starting now.
+        assert_eq!(loads_left(Phase::Frontier, 6), 1 + 2 + 3 + 1);
+        assert_eq!(loads_left(Phase::Context, 1), 2 + 1);
+        assert_eq!(loads_left(Phase::Gate, 0), 1);
+        assert_eq!(loads_left(Phase::Gate, 3), 1, "a gate after a failed one");
+    }
+
+    #[test]
+    fn the_search_does_not_chase_the_noise_in_a_reading() {
+        // The 35B's own readings at n-cpu-moe 35: the seed fits, the trained
+        // context goes over, and the re-prediction from that point lands on
+        // a step under the wall. A second reading a few MiB off the line then
+        // predicts a few hundred tokens more, which is not worth a load.
+        let mut search = ContextSearch::new(236544, 11037, 11264, 262144);
+        assert_eq!(search.next(), Rung::Grow(262144));
+        search.record(262144, 11606, false);
+        assert_eq!(search.next(), Rung::Grow(245760));
+        assert_eq!(search.record(245760, 11242, false), Probe::Fits);
+        assert_eq!(search.next(), Rung::Stop);
     }
 
     #[test]

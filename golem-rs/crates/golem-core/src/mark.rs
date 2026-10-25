@@ -112,6 +112,34 @@ pub fn ico(sizes: &[u32], spark: Spark) -> Vec<u8> {
     out
 }
 
+/// The mark as an SVG document: one rectangle per filled cell, each cell
+/// ten units wide and sixteen tall, the proportions [`rgba`] draws.
+///
+/// The icon a Linux launcher shows: freedesktop menus take a scalable icon,
+/// which needs no encoder and is sharp at every size.
+pub fn svg(spark: Spark) -> String {
+    let hex = |[r, g, b]: [u8; 3]| format!("#{r:02x}{g:02x}{b:02x}");
+    let mut out = String::from(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 60 64\" shape-rendering=\"crispEdges\">",
+    );
+    for (r, row) in GRID.iter().enumerate() {
+        for (c, cell) in row.bytes().enumerate() {
+            let fill = match cell {
+                b'1' => hex(CLAY),
+                b'2' => hex(spark.rgb()),
+                _ => continue,
+            };
+            out.push_str(&format!(
+                "<rect x=\"{}\" y=\"{}\" width=\"10\" height=\"16\" fill=\"{fill}\"/>",
+                c * 10,
+                r * 16
+            ));
+        }
+    }
+    out.push_str("</svg>\n");
+    out
+}
+
 /// One icon image: a BITMAPINFOHEADER, the colour pixels and the mask.
 fn bitmap(size: u32, spark: Spark) -> Vec<u8> {
     let px = rgba(size, spark);
@@ -152,6 +180,18 @@ mod tests {
     fn pixel(px: &[u8], size: u32, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * size + x) * 4) as usize;
         [px[i], px[i + 1], px[i + 2], px[i + 3]]
+    }
+
+    #[test]
+    fn the_svg_is_the_grid_cell_for_cell() {
+        let svg = svg(Spark::Lit);
+        let filled = GRID.iter().flat_map(|row| row.bytes()).filter(|&b| b != b'0').count();
+        assert_eq!(svg.matches("<rect ").count(), filled);
+        // The spark row in amber, the body in clay, nothing for an empty cell.
+        assert_eq!(svg.matches("fill=\"#e3a33b\"").count(), 4);
+        assert!(svg.contains("<rect x=\"10\" y=\"0\" width=\"10\" height=\"16\" fill=\"#7a8883\"/>"), "{svg}");
+        assert!(!svg.contains("x=\"0\" y=\"0\""), "the top-left cell is empty");
+        assert!(svg.starts_with("<svg ") && svg.ends_with("</svg>\n"));
     }
 
     #[test]

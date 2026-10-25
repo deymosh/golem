@@ -16,11 +16,12 @@
 //! [`crate::engine`]), so a system proxy cannot be picked up by accident,
 //! and the long-context bodies are built in memory.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::time::Duration;
 
 use golem_core::json::{self, Value};
+use golem_core::progress::Progress;
 
 use crate::config;
 use crate::engine::{self, Base};
@@ -102,8 +103,15 @@ const DEPTH_QUESTION: &str =
 const CHARS_PER_TOKEN: f64 = 4.7;
 
 /// `golem eval [--long TOKENS]`: 0 when the run completed (the verdicts are
-/// in its lines), 1 when it could not.
+/// in its lines), 1 when it could not. Its `PROGRESS` lines are written when
+/// stdout is not a terminal ([`Steps`]).
 pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
+    run_with(home, args, out, !std::io::stdout().is_terminal())
+}
+
+/// [`run`], with whether to write `PROGRESS` lines said rather than read off
+/// the terminal.
+pub fn run_with(home: &Path, args: &[String], out: &mut dyn Write, progress: bool) -> i32 {
     // The command line first: a bad argument is refused before anything is
     // printed or any request is made.
     let long = match parse_args(args) {
@@ -133,12 +141,14 @@ pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
         .unwrap_or_else(|| DEFAULT_ALIAS.to_string());
     let temperature = setting(home, "TEMPERATURE", DEFAULT_TEMPERATURE);
     let top_p = setting(home, "TOP_P", DEFAULT_TOP_P);
+    let mut steps = Steps::new(long.is_some(), progress);
 
     // ------------------------------------------------------------
     // 1. HEALTH + IDENTITY
     // ------------------------------------------------------------
 
     section(out, "1. HEALTH + IDENTITY");
+    steps.next(out, "health");
 
     // An unhappy status is the same answer as no server at all.
     match engine::get_json(&base, "/health", HEALTH_TIMEOUT) {
@@ -170,6 +180,7 @@ pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
     // ------------------------------------------------------------
 
     section(out, "2. WARMUP + ARITHMETIC SANITY");
+    steps.next(out, "warmup and sanity");
 
     let _ = writeln!(out, "warmup request (first hit may compile CUDA graphs, be patient)...");
     // A failed warmup is a warning, not a failure: every later request would
@@ -198,6 +209,7 @@ pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
     // ------------------------------------------------------------
 
     section(out, "3. TOOL CALLING");
+    steps.next(out, "tool calling");
 
     let mut raw = post_body(&base, &tool_body(&model, false), REQUEST_TIMEOUT);
     // Some templates only emit tool calls with thinking disabled, so an
@@ -224,6 +236,7 @@ pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
     let body = review_body(&model, &temperature, &top_p);
     let mut speeds: Vec<Option<String>> = Vec::with_capacity(3);
     for i in 1..=3 {
+        steps.next(out, &format!("throughput run {i} of 3"));
         // Any status: a body that came back unhappy is still read for its
         // timings.
         let Some(reply) = engine::post_json(&base, "/v1/chat/completions", &body, RUN_TIMEOUT)
@@ -243,7 +256,7 @@ pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
     // ------------------------------------------------------------
 
     if let Some(long) = long {
-        long_context(out, &base, &model, &long);
+        long_context(out, &base, &model, &long, &mut steps);
     }
 
     // ------------------------------------------------------------
@@ -255,6 +268,36 @@ pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
     let _ = writeln!(out, " EVAL COMPLETE - {model}");
     let _ = writeln!(out, "============================================================");
     0
+}
+
+// ---------------------------------------------------------------
+// Progress
+// ---------------------------------------------------------------
+
+/// The run's requests as `PROGRESS` steps: health, warmup, tools, three
+/// timed runs, and with `--long` the needle and the depth request.
+///
+/// Written when stdout is not a terminal - the console's job log, the
+/// tuner's gate file - because on a terminal the sections are the progress.
+/// The recorder reads `RESULT` lines and the two named ones, never these.
+struct Steps {
+    on: bool,
+    done: u64,
+    total: u64,
+}
+
+impl Steps {
+    fn new(long: bool, on: bool) -> Steps {
+        Steps { on, done: 0, total: if long { 8 } else { 6 } }
+    }
+
+    /// The request about to run.
+    fn next(&mut self, out: &mut dyn Write, what: &str) {
+        if self.on {
+            let _ = writeln!(out, "{}", Progress::steps(self.done, self.total, format!("eval: {what}")).line());
+        }
+        self.done += 1;
+    }
 }
 
 // ---------------------------------------------------------------
@@ -687,7 +730,7 @@ fn best_of(speeds: &[Option<String>]) -> String {
 /// and a gate that asks for 200K while sending 165K is testing something
 /// else. One correction pass against the measured count is enough - the
 /// ratio is linear enough that a second is noise.
-fn long_context(out: &mut dyn Write, base: &Base, model: &str, long: &str) {
+fn long_context(out: &mut dyn Write, base: &Base, model: &str, long: &str, steps: &mut Steps) {
     section(out, &format!("5. NEEDLE-IN-HAYSTACK (~{long} tokens) + DECODE AT DEPTH"));
 
     let target: f64 = long.trim().parse().unwrap_or(0.0);
@@ -713,6 +756,7 @@ fn long_context(out: &mut dyn Write, base: &Base, model: &str, long: &str) {
     // The needle first, the depth request second: the follow-up shares the
     // whole haystack as a cached prefix, which is how an agent turn looks -
     // long history, short new tail.
+    steps.next(out, &format!("the {long}-token needle (minutes of prefill)"));
     let needle = parse_body(&post_body_ok(base, &bodies.needle, NEEDLE_TIMEOUT));
     let mut answer = message_content_of(&needle);
     if answer.is_empty() {
@@ -722,6 +766,7 @@ fn long_context(out: &mut dyn Write, base: &Base, model: &str, long: &str) {
     let prompt_n = number_of(&needle, "prompt_n").unwrap_or_else(|| "0".to_string());
     let _ = writeln!(out, "needle : prompt={prompt_n} tok @ {prompt_tps:.0} t/s; answer: {answer}");
 
+    steps.next(out, "decode at depth");
     let depth = parse_body(&post_body_ok(base, &bodies.depth, NEEDLE_TIMEOUT));
     let depth_tps = timing(&depth, "predicted_per_second").unwrap_or(0.0);
     let _ = writeln!(out, "depth  : {} (prefix from cache)", timings_line(&depth));
@@ -840,8 +885,12 @@ mod tests {
     }
 
     fn run_out(dir: &Path, list: &[&str]) -> (i32, String) {
+        run_progress(dir, list, false)
+    }
+
+    fn run_progress(dir: &Path, list: &[&str], progress: bool) -> (i32, String) {
         let mut out: Vec<u8> = Vec::new();
-        let status = run(dir, &args(list), &mut out);
+        let status = run_with(dir, &args(list), &mut out, progress);
         (status, String::from_utf8(out).expect("utf-8"))
     }
 
@@ -968,6 +1017,33 @@ mod tests {
     // -----------------------------------------------------------
     // The whole run
     // -----------------------------------------------------------
+
+    #[test]
+    fn in_a_job_log_each_request_is_a_progress_step_and_the_contract_is_untouched() {
+        let port = serve(short_run("391", tool_reply("Munich")));
+        let dir = home("progress", port);
+        let (status, text) = run_progress(&dir, &[], true);
+        assert_eq!(status, 0);
+        let steps: Vec<&str> = text.lines().filter(|l| l.starts_with("PROGRESS ")).collect();
+        assert_eq!(
+            steps,
+            [
+                "PROGRESS 0/6 steps eval: health",
+                "PROGRESS 1/6 steps eval: warmup and sanity",
+                "PROGRESS 2/6 steps eval: tool calling",
+                "PROGRESS 3/6 steps eval: throughput run 1 of 3",
+                "PROGRESS 4/6 steps eval: throughput run 2 of 3",
+                "PROGRESS 5/6 steps eval: throughput run 3 of 3",
+            ]
+        );
+        // Without them, the run is the same bytes the recorder has always read.
+        let port = serve(short_run("391", tool_reply("Munich")));
+        let plain_dir = home("progress-plain", port);
+        let plain = run_out(&plain_dir, &[]).1;
+        assert_eq!(golem_core::progress::strip(&text) + "\n", plain);
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&plain_dir).ok();
+    }
 
     #[test]
     fn the_whole_run_prints_the_contract_line_for_line() {

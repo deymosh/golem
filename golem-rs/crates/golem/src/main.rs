@@ -41,7 +41,7 @@ Serving:
 Models and engines:
   pull [preset]    Download a preset's GGUF files from Hugging Face
   install          Put the pinned engine build on this machine
-  setup            Inspect the machine and scaffold the home
+  setup            Inspect the machine and scaffold the home (Windows: the app's shortcuts)
 
 Measuring:
   bench [--runs N] [--prefill N]   Speed: decode + prefill tok/s
@@ -166,7 +166,8 @@ fn cmd_driver(action: &str, rest: &[String]) -> ExitCode {
 
     if matches!(action, "up" | "start" | "restart") {
         let verb = if action == "restart" { "restart" } else { "up" };
-        return match service::request(&home, verb, &overrides, &mut std::io::stdout()) {
+        // `up` may fetch a model first, and its progress is a bar here.
+        return match service::request(&home, verb, &overrides, &mut golem::progress::stdout()) {
             Ok(exit) => code(exit),
             Err(e) => {
                 eprintln!("[FAIL] {e}");
@@ -236,6 +237,28 @@ async fn cmd_tui() -> ExitCode {
             Ok(url) => format!("console on {url}"),
             Err(e) => format!("console: {e}"),
         },
+        // The model and engine edits are the console's own, answered in
+        // process: no engine verb, nothing for the service to run.
+        tui::Action::SetDefault => match golem::state::apply(&act_home, "alias", &arg) {
+            Ok("applied") => format!("{arg} is the default - it serves from the next start"),
+            Ok(_) => format!("{arg} is not a preset"),
+            Err(e) => format!("cannot set the default: {e}"),
+        },
+        tui::Action::SetEngine => match golem::state::apply(&act_home, "engine", &arg) {
+            Ok("applied") => format!("engine {arg} - used from the next start"),
+            Ok(_) => format!("{arg} is not an installed engine"),
+            Err(e) => format!("cannot set the engine: {e}"),
+        },
+        tui::Action::DeleteFile => match golem::models::delete_file(&act_home, &arg) {
+            Ok("deleted") => format!("deleted the model file of {arg}"),
+            Ok(_) => format!("{arg}'s file was not deleted (the default's file stays)"),
+            Err(e) => format!("cannot delete: {e}"),
+        },
+        tui::Action::RemovePreset => match golem::models::delete_preset(&act_home, &arg) {
+            Ok("removed") => format!("removed the preset {arg}"),
+            Ok(_) => format!("{arg} was not removed (the default stays)"),
+            Err(e) => format!("cannot remove: {e}"),
+        },
         other => match verb_of(other) {
             Some(verb) => describe(verb, runner::run(&act_home, verb, &arg, &log)),
             None => format!("{other:?} has no action"),
@@ -264,7 +287,11 @@ fn verb_of(action: tui::Action) -> Option<&'static str> {
         tui::Action::Tune => Some("tune"),
         tui::Action::Report => Some("report"),
         tui::Action::Pull => Some("pull"),
-        tui::Action::Console => None,
+        tui::Action::Console
+        | tui::Action::SetDefault
+        | tui::Action::SetEngine
+        | tui::Action::DeleteFile
+        | tui::Action::RemovePreset => None,
     }
 }
 

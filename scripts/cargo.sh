@@ -46,7 +46,13 @@ cargo "${sub}" --manifest-path "${ROOT_DIR}/golem-rs/Cargo.toml" "$@"
 # data/ it uses. paths::home picks the directory holding the binary when it
 # has a bench/ beside it, so ./golem.exe works on the checkout's own files -
 # and the same code finds its folders in a fresh release directory.
-if [[ "${sub}" == "build" || "${sub}" == "test" ]]; then
+#
+# A test run builds without features, so it only puts a binary there when
+# there is none: replacing one would swap a desktop build for one with no
+# app window, and golemw.exe would open the browser instead.
+root_bin="${ROOT_DIR}/golem-bin"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) root_bin="${ROOT_DIR}/golem.exe" ;; esac
+if [[ "${sub}" == "build" || ( "${sub}" == "test" && ! -f "${root_bin}" ) ]]; then
     profile="debug"
     case " $* " in *" --release "*) profile="release" ;; esac
     # The binary inside target/ is always `golem` (`golem.exe` on Windows);

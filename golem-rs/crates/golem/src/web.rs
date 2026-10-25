@@ -243,7 +243,8 @@ async fn api_state(State(app): State<Arc<App>>) -> Response {
         StatusCode::OK,
         format!(
             "{{\"up\": {}, \"vram\": {}, \"alias\": {}, \"engine\": {}, \"presets\": [{}], \
-             \"engines\": [{}], \"job_running\": {}, \"job_action\": {}, \"job_tail\": {}}}",
+             \"engines\": [{}], \"job_running\": {}, \"job_action\": {}, \"job_tail\": {}, \
+             \"job_progress\": {}}}",
             snapshot.up,
             vram,
             json::quote(&snapshot.alias),
@@ -253,6 +254,7 @@ async fn api_state(State(app): State<Arc<App>>) -> Response {
             snapshot.job_running,
             json::quote(&snapshot.job_action),
             json::quote(&snapshot.job_tail),
+            snapshot.job_progress.as_ref().map_or_else(|| "null".to_string(), |p| p.to_json()),
         ),
     )
 }

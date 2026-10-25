@@ -86,10 +86,9 @@ Why a long-lived owner rather than an `up` that spawns and exits:
   container with it.
 - **A client that spawns nothing cannot leak handles.** On Windows `std` spawns with
   `bInheritHandles = TRUE`, so an engine started by `golem up | tail` held the caller's
-  pipe for the engine's lifetime. Only the first `up` after a boot, which starts the
-  service itself, can still do that; clearing the inherit flag on our stdout before that
-  one spawn would close it, at the cost of one `unsafe` block the workspace currently
-  forbids.
+  pipe for the engine's lifetime. The one spawn a client makes - the service, on the first
+  verb after a boot - goes through PowerShell's `Start-Process`, whose `ShellExecuteEx`
+  hands the service no handles; PowerShell holds the pipe for the half-second it runs.
 
 **Protocol.** One JSON object per line over loopback TCP. The service binds an ephemeral
 port and writes it, with a per-run token, to `.local/golem-service.json`; loopback is
@@ -105,6 +104,23 @@ the engine.
 Lines stream as they happen - a first `up` installs an engine and downloads 20 GB, and
 silence for ten minutes reads as a hang - and `done` is the acknowledgement a client waits
 for before it reports anything.
+
+**Progress.** A long step says how far it has got in its own output, as lines a reader
+draws rather than shows (`golem_core::progress`):
+
+```text
+PROGRESS 4194304/20971520 bytes pull: Ornith-1.5-35B-Q4_K_M.gguf
+PROGRESS 6/10 steps tune: context, load 7
+PROGRESS -
+```
+
+A download counts its bytes against the size the Hub reports, the tuner its model loads
+against what it still expects to spend (the budget in [tuning.md](tuning.md#the-search)),
+and eval its requests. They are written only when stdout is not a terminal, where curl's
+meter and the narration already say it. The runner opens and closes every job with the
+clear; the console's state carries the newest line as `job_progress` and leaves them all
+out of the job tail; the screen draws it on its bottom line; and `golem up`/`restart` on
+a terminal draws the lines the service streams as one bar redrawn in place.
 
 **Concurrency.** Each connection is served on its own thread. One *start* (`up`,
 `restart`) runs at a time and a second is refused; `down` and `status` are answered while

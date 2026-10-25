@@ -26,6 +26,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # The app's window and tray on Linux: WebKitGTK, an appindicator and
+      # libxdo (the tray menu). Windows and macOS use the system webview.
+      - name: Desktop libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev
       - uses: actions/cache@v4
         with:
           path: golem-rs/target
@@ -35,11 +42,19 @@ jobs:
         run: cargo test --workspace --manifest-path golem-rs/Cargo.toml
       - name: Build (release)
         run: cargo build --release --manifest-path golem-rs/Cargo.toml
-      # The app window and tray: the system webview on Windows and macOS.
-      # Linux would need WebKitGTK on the runner, so it builds without it.
+      # The app window and tray, on every platform - on Windows with the C
+      # runtime linked in, as the release is.
       - name: Build (release, desktop)
-        if: runner.os != 'Linux'
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
         run: cargo build --release --features desktop --manifest-path golem-rs/Cargo.toml
+      # The release's plain Linux binary: static, against musl.
+      - name: Build (release, static musl)
+        if: runner.os == 'Linux'
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --target x86_64-unknown-linux-musl --manifest-path golem-rs/Cargo.toml
+          file golem-rs/target/x86_64-unknown-linux-musl/release/golem | grep -q 'static'
       - name: Smoke
         run: ./golem-rs/target/release/golem --version
         shell: bash
@@ -54,24 +69,47 @@ jobs:
       matrix:
         include:
           # A zip: golemw.exe (the windowed launcher) finds golem.exe by
-          # name beside it, so neither can be renamed.
+          # name beside it, so neither can be renamed. The WebView2 loader
+          # is linked in on MSVC, and the C runtime with it (crt-static), so
+          # the two files are the whole install.
           - os: windows-latest
+            target: x86_64-pc-windows-msvc
             asset: golem-windows-x86_64.zip
             features: --features desktop
+          # Two on Linux. The plain one is static (musl): one file that runs
+          # on any distribution, a server and a container included. The
+          # desktop one links the system's WebKitGTK, which a static build
+          # cannot carry, and will not start where it is missing.
           - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
             asset: golem-linux-x86_64
             features: ""
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: golem-linux-x86_64-desktop
+            features: --features desktop
+          # macOS links only its own system frameworks.
           - os: macos-latest
+            target: aarch64-apple-darwin
             asset: golem-macos-arm64
             features: --features desktop
+    env:
+      RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C target-feature=+crt-static' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release ${{ matrix.features }} --manifest-path golem-rs/Cargo.toml
+        with:
+          targets: ${{ matrix.target }}
+      - name: Desktop libraries (Linux)
+        if: runner.os == 'Linux' && matrix.features != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev
+      - run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }} --manifest-path golem-rs/Cargo.toml
       - name: Package
         shell: bash
         run: |
-          src=golem-rs/target/release/golem
+          src=golem-rs/target/${{ matrix.target }}/release/golem
           if [[ "${{ runner.os }}" == Windows ]]; then
             7z a "${{ matrix.asset }}" "${src}.exe" "${src}w.exe"
           else

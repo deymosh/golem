@@ -911,6 +911,11 @@ fn which(name: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The server's file name as this platform spells it ([`server_name`]).
+    fn server() -> String {
+        format!("llama-server{}", std::env::consts::EXE_SUFFIX)
+    }
+
     fn home(tag: &str) -> PathBuf {
         // Per process: two test binaries compile these tests, and on Windows a
         // directory a child just left can still be mid-delete for the next.
@@ -990,7 +995,7 @@ mod tests {
              MODELS_PRESET = \"config/models.ini\"\n",
         );
         let plan = plan(&dir, &Overrides::default()).expect("plan");
-        assert!(plan.program.ends_with("engines/llama.cpp/b11379-cuda/llama-server.exe"), "{:?}", plan.program);
+        assert!(plan.program.ends_with(format!("engines/llama.cpp/b11379-cuda/{}", server())), "{:?}", plan.program);
         assert!(plan.args.iter().any(|a| a == "--models-preset"), "{:?}", plan.args);
         assert!(plan.args.iter().any(|a| a == "--models-max"), "one model resident at a time");
         assert!(plan.args.contains(&"--port".to_string()), "{:?}", plan.args);
@@ -1040,20 +1045,20 @@ mod tests {
     fn the_build_pin_is_engine_build_else_the_adapters() {
         let dir = engine_home("plan-build", "", "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\n");
         // The adapter's build; a stray `LLAMA_WIN_BUILD` key is not read.
-        assert!(plan(&dir, &Overrides::default()).expect("plan").program.ends_with("b11379-cuda/llama-server.exe"));
+        assert!(plan(&dir, &Overrides::default()).expect("plan").program.ends_with(format!("b11379-cuda/{}", server())));
         std::fs::write(
             dir.join("golem.toml"),
             "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\nLLAMA_WIN_BUILD = \"b11755\"\n",
         )
         .expect("config");
-        assert!(plan(&dir, &Overrides::default()).expect("plan").program.ends_with("b11379-cuda/llama-server.exe"));
+        assert!(plan(&dir, &Overrides::default()).expect("plan").program.ends_with(format!("b11379-cuda/{}", server())));
         // ENGINE_BUILD is the configuration's word over the adapter's.
         std::fs::write(
             dir.join("golem.toml"),
             "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\nENGINE_BUILD = \"b9\"\n",
         )
         .expect("config");
-        assert!(plan(&dir, &Overrides::default()).expect("plan").program.ends_with("b9-cuda/llama-server.exe"));
+        assert!(plan(&dir, &Overrides::default()).expect("plan").program.ends_with(format!("b9-cuda/{}", server())));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1190,7 +1195,7 @@ mod tests {
         // The root, not the directory: `latest` is only a tag once GitHub has
         // been asked, so the leaf is named inside `release::ensure`.
         assert_eq!(pinned.root, dir.join(".local/engines/llama.cpp"));
-        assert_eq!(pinned.server, "llama-server.exe");
+        assert_eq!(pinned.server, server());
         std::fs::remove_dir_all(&dir).ok();
     }
 

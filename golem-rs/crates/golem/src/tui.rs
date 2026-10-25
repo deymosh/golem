@@ -1,12 +1,19 @@
 //! The full-screen screen (`golem tui`, and `golem` typed in a terminal).
 //!
-//! The look follows the console: the two-line mark in its amber with the
-//! machine's state beside it, the actions as a compact grid, the model list
-//! as the main area - the default marked, its speed in the serving colour,
-//! each model's role and best decode on this machine - the engine's log
-//! under it, and one line at the bottom for the hint, the last result, or
-//! the pull prompt. The screen is a list of styled lines, and ratatui does
-//! the drawing.
+//! The look follows the console: the mark - the icon's own grid, drawn with
+//! half blocks so the body and the spark each keep their colour, the spark
+//! green while the engine serves - with the machine's state beside it, the
+//! actions as a compact grid, the model list as the main area - the default
+//! marked, its speed in the serving colour, each model's role and best
+//! decode on this machine - the engine's log under it, and one line at the
+//! bottom for the keys, the last result, a question, or the pull prompt.
+//!
+//! Everything the console does, the screen does: Tab moves between the
+//! actions and the model list; on a model, Enter makes it the default (or
+//! downloads it), `t` tunes it, `x` deletes its file and Del removes the
+//! preset, the last two after a yes; `e` switches the engine and `p` pulls a
+//! model. The screen is a list of styled lines, and ratatui does the
+//! drawing.
 //!
 //! The split that makes it testable: [`screen`] builds the lines from
 //! `&App` and touches no I/O, so a test renders it and reads the text back.
@@ -39,6 +46,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::{Frame, Terminal};
 
 use golem_core::mark::{self, Spark};
+use golem_core::progress::Progress;
 use golem_core::results::{self, Kind};
 
 use crate::config;
@@ -59,8 +67,32 @@ pub enum Action {
     Eval,
     Tune,
     Report,
-    /// Fetch a model; the argument is what the pull prompt was given.
+    /// Fetch a model; the argument is what the pull prompt was given, or the
+    /// selected model's name.
     Pull,
+    /// Make the argument the default model.
+    SetDefault,
+    /// Delete the argument's model file.
+    DeleteFile,
+    /// Remove the argument's preset.
+    RemovePreset,
+    /// Use the argument as the engine.
+    SetEngine,
+}
+
+/// Which part of the screen the arrows and Enter act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Actions,
+    Models,
+}
+
+/// A question on the bottom line, and what a yes does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Confirm {
+    question: String,
+    action: Action,
+    arg: String,
 }
 
 /// The action grid, row by row: the engine and the console on the first,
@@ -73,8 +105,10 @@ const COLS: usize = 4;
 /// One grid cell's width: the marker, the longest label, and a gap.
 const CELL: usize = 11;
 
-/// The bottom line before anything has run.
-const HINT: &str = "arrows choose   enter run   p pull   w console   r refresh   q quit";
+/// The bottom line on the actions: what the keys do there.
+const HINT: &str = "arrows choose   enter run   tab models   p pull   e engine   w console   q quit";
+/// The bottom line on the model list.
+const HINT_MODELS: &str = "enter make default   t tune   x delete file   del remove   tab actions   p pull   q quit";
 
 /// The selection marker.
 const POINTER: &str = "\u{25b8}"; // ▸
@@ -92,6 +126,9 @@ const LOG_MAX: usize = LOG_TAIL;
 /// blocking in `event::read()` would only notice it when the user pressed
 /// something. Short enough that a finished action is on screen at once.
 const POLL: Duration = Duration::from_millis(80);
+
+/// How often a running action's bar is re-read from its log.
+const PROGRESS_POLL: Duration = Duration::from_millis(500);
 
 /// How long a machine reading the header shows is reused.
 ///
@@ -154,11 +191,22 @@ pub struct ModelRow {
 /// says, the pull prompt when it is open, and everything the panes show.
 pub struct App {
     selected: usize,
+    focus: Focus,
+    /// The model the marker is on, when the list has the focus.
+    model: usize,
     message: String,
     /// The pull prompt's text while it is open.
     input: Option<String>,
+    /// A question waiting for y or n.
+    confirm: Option<Confirm>,
+    /// An action is running: the serving green leaves the mark meanwhile.
+    busy: bool,
+    /// The running action's bar, from its log's newest `PROGRESS` line.
+    progress: Option<Progress>,
     facts: Facts,
     models: Vec<ModelRow>,
+    /// The installed engines, for `e`.
+    engines: Vec<String>,
     log: Vec<String>,
     /// When the expensive machine readings in `facts` were taken, so a
     /// redraw does not pay for them again. See [`FACTS_TTL`].
@@ -178,10 +226,16 @@ impl App {
     pub fn new() -> App {
         App {
             selected: 0,
+            focus: Focus::Actions,
+            model: 0,
             message: HINT.to_string(),
             input: None,
+            confirm: None,
+            busy: false,
+            progress: None,
             facts: Facts::default(),
             models: Vec::new(),
+            engines: Vec::new(),
             log: Vec::new(),
             read_at: None,
         }
@@ -235,6 +289,86 @@ impl App {
     /// Replace the bottom line with the result of the last action.
     pub fn set_message(&mut self, message: impl Into<String>) {
         self.message = message.into();
+    }
+
+    /// Which part has the focus.
+    pub fn focus(&self) -> Focus {
+        self.focus
+    }
+
+    /// Move the focus between the actions and the model list; the bottom
+    /// line says what the keys do there.
+    pub fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::Actions if !self.models.is_empty() => Focus::Models,
+            _ => Focus::Actions,
+        };
+        self.message = match self.focus {
+            Focus::Actions => HINT,
+            Focus::Models => HINT_MODELS,
+        }
+        .to_string();
+    }
+
+    /// Move down the model list, and stop at the last.
+    pub fn model_next(&mut self) {
+        if self.model + 1 < self.models.len() {
+            self.model += 1;
+        }
+    }
+
+    /// Move up the model list, and stop at the first.
+    pub fn model_previous(&mut self) {
+        self.model = self.model.saturating_sub(1);
+    }
+
+    /// The model the marker is on.
+    pub fn selected_model(&self) -> Option<&ModelRow> {
+        self.models.get(self.model)
+    }
+
+    /// Put a question on the bottom line; a yes runs `action` on `arg`.
+    pub fn ask(&mut self, question: impl Into<String>, action: Action, arg: impl Into<String>) {
+        self.confirm = Some(Confirm { question: question.into(), action, arg: arg.into() });
+    }
+
+    /// The question waiting for an answer.
+    pub fn question(&self) -> Option<&str> {
+        self.confirm.as_ref().map(|c| c.question.as_str())
+    }
+
+    /// Answer the question: on a yes, what to run.
+    pub fn answer(&mut self, yes: bool) -> Option<(Action, String)> {
+        let confirm = self.confirm.take()?;
+        yes.then_some((confirm.action, confirm.arg))
+    }
+
+    /// The engine after the current one in the installed list, wrapping.
+    pub fn next_engine(&self) -> Option<String> {
+        if self.engines.len() < 2 {
+            return None;
+        }
+        let at = self.engines.iter().position(|e| *e == self.facts.engine).map_or(0, |i| i + 1);
+        Some(self.engines[at % self.engines.len()].clone())
+    }
+
+    /// Set the installed engines, for a test.
+    pub fn set_engines(&mut self, engines: Vec<String>) {
+        self.engines = engines;
+    }
+
+    /// An action started or finished: the mark's spark shows it.
+    pub fn set_busy(&mut self, busy: bool) {
+        self.busy = busy;
+        if !busy {
+            self.progress = None;
+        }
+    }
+
+    /// How far the running action has got; the bottom line draws it as a
+    /// bar until the action ends.
+    pub fn set_progress(&mut self, progress: Option<Progress>) {
+        self.progress = progress;
     }
 
     /// Open the pull prompt.
@@ -316,6 +450,8 @@ impl App {
             self.read_at = Some(Instant::now());
         }
         self.models = model_rows(home);
+        self.model = self.model.min(self.models.len().saturating_sub(1));
+        self.engines = state::engines(home);
         self.log = log_lines(home);
     }
 }
@@ -414,17 +550,40 @@ fn screen(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
 
     if bottom_rows > 0 {
         out.push(rule(w));
-        out.push(match &app.input {
-            Some(text) => Line::from(vec![
+        out.push(match (&app.confirm, &app.input) {
+            (Some(confirm), _) => Line::from(vec![
+                Span::styled(format!("  {}", confirm.question), Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled("   y yes   any other key no", dim()),
+            ]),
+            (None, Some(text)) => Line::from(vec![
                 Span::styled("  pull ", Style::default().fg(PATINA).add_modifier(Modifier::BOLD)),
                 Span::raw(text.clone()),
                 Span::styled("\u{2588}", Style::default().fg(PATINA)),
                 Span::styled("   owner/repo[:quant] or a library name, enter to pull, esc to cancel", dim()),
             ]),
-            None => Line::from(Span::styled(format!("  {}", app.message), dim())),
+            (None, None) => match app.progress.as_ref().filter(|_| app.busy) {
+                Some(progress) => bar_line(progress, w),
+                None => Line::from(Span::styled(format!("  {}", app.message), dim())),
+            },
         });
     }
     out
+}
+
+/// A running action's bar: its label, the bar in the accent on a dim track,
+/// the percent and the amount. The bar takes what the words leave, between
+/// 8 and 32 cells.
+fn bar_line(progress: &Progress, width: usize) -> Line<'static> {
+    let label = format!("  {}  ", progress.label);
+    let tail = format!(" {:>3}%  {}", progress.percent(), progress.amount());
+    let room = width.saturating_sub(label.chars().count() + tail.chars().count() + 2);
+    let (filled, rest) = progress.cells(room.clamp(8, 32));
+    Line::from(vec![
+        Span::styled(label, Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("\u{2501}".repeat(filled), Style::default().fg(PATINA)),
+        Span::styled("\u{2500}".repeat(rest), dim()),
+        Span::styled(tail, dim()),
+    ])
 }
 
 /// The action grid, `per` cells to a line, the selected one marked.
@@ -434,7 +593,7 @@ fn grid_lines(app: &App, per: usize) -> Vec<Line<'static>> {
         .map(|chunk| {
             let mut spans = vec![Span::raw("  ")];
             for (i, label) in chunk {
-                if *i == app.selected {
+                if *i == app.selected && app.focus == Focus::Actions {
                     spans.push(Span::styled(
                         format!("{POINTER} {label:<width$}", width = CELL - 2),
                         Style::default().fg(PATINA).add_modifier(Modifier::BOLD),
@@ -455,10 +614,15 @@ fn models(app: &App, rows: usize) -> Vec<Line<'static>> {
     if app.models.is_empty() {
         return vec![Line::from(Span::styled("  no models yet - p pulls one", dim()))];
     }
+    // Windowed round the marker, so the selected model is always shown.
+    let first = (app.model + 1).saturating_sub(rows).min(app.models.len().saturating_sub(rows));
     app.models
         .iter()
+        .enumerate()
+        .skip(first)
         .take(rows)
-        .map(|m| {
+        .map(|(i, m)| {
+            let marked = app.focus == Focus::Models && i == app.model;
             let name: String = m.name.chars().take(26).collect();
             let speed = m.best.as_ref().map_or_else(|| "-".to_string(), |b| format!("{b} t/s"));
             let (dot, speed_style) = if m.default {
@@ -467,9 +631,20 @@ fn models(app: &App, rows: usize) -> Vec<Line<'static>> {
                 (Span::raw("  "), Style::default())
             };
             let mut spans = vec![
-                Span::raw("  "),
+                if marked {
+                    Span::styled(format!("{POINTER} "), Style::default().fg(PATINA).add_modifier(Modifier::BOLD))
+                } else {
+                    Span::raw("  ")
+                },
                 dot,
-                Span::styled(format!("{name:<26}"), Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{name:<26}"),
+                    if marked {
+                        Style::default().fg(PATINA).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    },
+                ),
                 Span::styled(format!("{speed:>11}"), speed_style),
                 Span::styled(format!("   {:<9}", m.role), dim()),
             ];
@@ -514,11 +689,35 @@ fn dim() -> Style {
     Style::default().add_modifier(Modifier::DIM)
 }
 
-/// The mark's colour in the terminal: the spark's amber, the colour the mark
-/// has wherever it shows no state.
-fn amber() -> Style {
-    let [r, g, b] = Spark::Lit.rgb();
-    Style::default().fg(Color::Rgb(r, g, b))
+/// The mark as two terminal lines: the icon's grid (`golem_core::mark`),
+/// one column per cell and two rows per line in half blocks, so the clay
+/// body and the spark keep their own colours.
+///
+/// `▀` takes the upper cell's colour as its foreground and the lower one's
+/// as its background; an empty half is the terminal's own background.
+pub fn mark_lines(spark: Spark) -> [Vec<Span<'static>>; 2] {
+    let colour = |cell: u8| -> Option<Color> {
+        let [r, g, b] = match cell {
+            b'1' => mark::CLAY,
+            b'2' => spark.rgb(),
+            _ => return None,
+        };
+        Some(Color::Rgb(r, g, b))
+    };
+    let line = |upper: &str, lower: &str| -> Vec<Span<'static>> {
+        upper
+            .bytes()
+            .zip(lower.bytes())
+            .map(|(u, l)| match (colour(u), colour(l)) {
+                (Some(u), Some(l)) if u == l => Span::styled("\u{2588}", Style::default().fg(u)),
+                (Some(u), Some(l)) => Span::styled("\u{2580}", Style::default().fg(u).bg(l)),
+                (Some(u), None) => Span::styled("\u{2580}", Style::default().fg(u)),
+                (None, Some(l)) => Span::styled("\u{2584}", Style::default().fg(l)),
+                (None, None) => Span::raw(" "),
+            })
+            .collect()
+    };
+    [line(mark::GRID[0], mark::GRID[1]), line(mark::GRID[2], mark::GRID[3])]
 }
 
 /// The two header lines: the mark, and what the machine is doing beside it.
@@ -529,10 +728,14 @@ fn amber() -> Style {
 /// there, never cut mid-word.
 fn header(app: &App, width: usize) -> Vec<Line<'static>> {
     let facts = &app.facts;
-    let mut first: Vec<(String, Style)> = vec![
-        (mark::GLYPHS[0].to_string(), amber()),
-        (" GOLEM".to_string(), Style::default().add_modifier(Modifier::BOLD)),
-    ];
+    // Green while the engine serves; otherwise the icon's own amber - the
+    // words beside it already say "stopped", and a grey spark on a dark
+    // terminal reads as a smudge rather than a state.
+    let spark = if facts.up && !app.busy { Spark::Serving } else { Spark::Lit };
+    let [mark_top, mark_bottom] = mark_lines(spark);
+    let mark_width = mark::GRID[0].len();
+    let mut first: Vec<(String, Style)> =
+        vec![(" GOLEM".to_string(), Style::default().add_modifier(Modifier::BOLD))];
     first.push(if facts.up {
         ("   \u{25cf} serving".to_string(), Style::default().fg(SERVING))
     } else {
@@ -549,7 +752,7 @@ fn header(app: &App, width: usize) -> Vec<Line<'static>> {
     }
     first.push((format!("   [{}]", facts.engine), dim()));
 
-    let mut second: Vec<(String, Style)> = vec![(mark::GLYPHS[1].to_string(), amber())];
+    let mut second: Vec<(String, Style)> = Vec::new();
     second.push(if facts.web_up {
         (format!(" console :{}", facts.console_port), dim())
     } else {
@@ -558,13 +761,14 @@ fn header(app: &App, width: usize) -> Vec<Line<'static>> {
     if let Some(ram) = facts.ram_free_gb {
         second.push((format!("   {ram:.1} GB free"), dim()));
     }
-    vec![fit(first, width), fit(second, width)]
+    vec![fit(mark_top, mark_width, first, width), fit(mark_bottom, mark_width, second, width)]
 }
 
-/// The segments that fit in `width` after the two-column indent, whole.
-fn fit(segments: Vec<(String, Style)>, width: usize) -> Line<'static> {
-    let mut used = 2;
+/// The mark, then the segments that fit in `width` after it, whole.
+fn fit(mark: Vec<Span<'static>>, mark_width: usize, segments: Vec<(String, Style)>, width: usize) -> Line<'static> {
+    let mut used = 2 + mark_width;
     let mut spans = vec![Span::raw("  ")];
+    spans.extend(mark);
     for (text, style) in segments {
         let len = text.chars().count();
         if used + len > width {
@@ -608,6 +812,18 @@ impl Drop for RawTerminal {
     }
 }
 
+/// What the bottom line calls an action while it runs.
+fn label_of(action: Action) -> &'static str {
+    match action {
+        Action::DeleteFile => "delete",
+        Action::RemovePreset => "remove",
+        Action::SetDefault => "default",
+        Action::SetEngine => "engine",
+        Action::Pull => "pull",
+        _ => "action",
+    }
+}
+
 /// The one action allowed to run, and how to start it.
 struct Job<'a, F> {
     act: &'a Arc<F>,
@@ -624,6 +840,7 @@ impl<F: Fn(Action, String) -> String + Send + Sync + 'static> Job<'_, F> {
         }
         let (tx, act) = (self.tx.clone(), Arc::clone(self.act));
         *self.running = Some(label);
+        app.set_busy(true);
         app.set_message(format!("{label}: running..."));
         std::thread::spawn(move || {
             let _ = tx.send(act(action, arg));
@@ -663,6 +880,7 @@ pub fn run(
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     let mut running: Option<&'static str> = None;
     let mut job = Job { act: &act, tx: &tx, running: &mut running };
+    let mut progress_read = Instant::now();
 
     loop {
         // Every turn of the loop draws, which is also what makes a resize
@@ -719,30 +937,88 @@ pub fn run(
                 continue;
             }
 
-            match key.code {
-                KeyCode::Left | KeyCode::Char('h') => app.previous(),
-                KeyCode::Right | KeyCode::Char('l') => app.next(),
-                KeyCode::Up | KeyCode::Char('k') => app.up(),
-                KeyCode::Down | KeyCode::Char('j') => app.down(),
+            // A question takes the next key: y runs it, anything else is a no.
+            if app.question().is_some() {
+                let yes = matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
+                match app.answer(yes) {
+                    Some((action, arg)) => job.start(&mut app, action, label_of(action), arg),
+                    None => app.set_message("cancelled"),
+                }
+                continue;
+            }
+
+            match (app.focus(), key.code) {
+                (_, KeyCode::Tab | KeyCode::BackTab) => app.toggle_focus(),
                 // The facts are read at start-up and after an action; a machine
                 // that changed under the screen - a game started, a download
                 // ended - is what this is for. `r` re-reads the expensive ones
                 // too, which the automatic refresh leaves alone for a while.
-                KeyCode::Char('r') => app.refresh(home, true),
-                KeyCode::Char('p') => app.open_prompt(),
-                KeyCode::Char('w') => job.start(&mut app, Action::Console, "Console", String::new()),
-                KeyCode::Enter => {
+                (_, KeyCode::Char('r')) => app.refresh(home, true),
+                (_, KeyCode::Char('p')) => app.open_prompt(),
+                (_, KeyCode::Char('w')) => job.start(&mut app, Action::Console, "Console", String::new()),
+                (_, KeyCode::Char('e')) => match app.next_engine() {
+                    Some(engine) => job.start(&mut app, Action::SetEngine, "engine", engine),
+                    None => app.set_message("one engine installed - nothing to switch to"),
+                },
+                (_, KeyCode::Char('q') | KeyCode::Esc) => break,
+
+                (Focus::Actions, KeyCode::Left | KeyCode::Char('h')) => app.previous(),
+                (Focus::Actions, KeyCode::Right | KeyCode::Char('l')) => app.next(),
+                (Focus::Actions, KeyCode::Up | KeyCode::Char('k')) => app.up(),
+                (Focus::Actions, KeyCode::Down | KeyCode::Char('j')) => app.down(),
+                (Focus::Actions, KeyCode::Enter) => {
                     let (action, label) = (app.selected(), app.selected_label());
                     job.start(&mut app, action, label, String::new());
                 }
-                KeyCode::Char('q') | KeyCode::Esc => break,
+
+                (Focus::Models, KeyCode::Up | KeyCode::Char('k')) => app.model_previous(),
+                (Focus::Models, KeyCode::Down | KeyCode::Char('j')) => app.model_next(),
+                (Focus::Models, code) => {
+                    let Some(model) = app.selected_model().cloned() else { continue };
+                    match code {
+                        KeyCode::Enter if !model.present => {
+                            job.start(&mut app, Action::Pull, "pull", model.name)
+                        }
+                        KeyCode::Enter if model.default => {
+                            app.set_message(format!("{} is already the default", model.name))
+                        }
+                        KeyCode::Enter => job.start(&mut app, Action::SetDefault, "default", model.name),
+                        KeyCode::Char('t') if model.present => job.start(&mut app, Action::Tune, "Tune", model.name),
+                        KeyCode::Char('x') if model.default => {
+                            app.set_message("the default's file stays - make another the default first")
+                        }
+                        KeyCode::Char('x') if model.present => app.ask(
+                            format!("delete the model file of {}? it can be downloaded again", model.name),
+                            Action::DeleteFile,
+                            model.name,
+                        ),
+                        KeyCode::Delete if model.default => {
+                            app.set_message("the default cannot be removed - make another the default first")
+                        }
+                        KeyCode::Delete => app.ask(
+                            format!("remove the preset {}? its file stays on disk", model.name),
+                            Action::RemovePreset,
+                            model.name,
+                        ),
+                        KeyCode::Char('t' | 'x') => app.set_message(format!("{} is not downloaded", model.name)),
+                        _ => {}
+                    }
+                }
                 _ => {}
             }
+        }
+
+        // The running action's bar, from the end of its log - read on a
+        // slower beat than the keys, since it is a file read.
+        if job.running.is_some() && progress_read.elapsed() >= PROGRESS_POLL {
+            app.set_progress(state::job_progress(home));
+            progress_read = Instant::now();
         }
 
         // The action's answer, whenever it arrives.
         if let Ok(message) = rx.try_recv() {
             *job.running = None;
+            app.set_busy(false);
             app.set_message(message);
             app.refresh(home, false); // the action changed things
         }

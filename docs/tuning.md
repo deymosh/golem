@@ -68,7 +68,8 @@ and put back after the run on the configuration as it then stands.
 5. **Grow the context, by prediction.** VRAM is a straight line in the context at a fixed
    split. The winner's own point is the line's first point; one doubling (capped at the
    trained context) gives the second; from there the largest context under the wall is
-   arithmetic, and one load confirms it. Two to three loads where the doubling ladder took
+   arithmetic, rounded down to 1024 tokens so a re-fit does not chase a reading's few MiB
+   of noise, and one load confirms it. Two to three loads where the doubling ladder took
    four or five. `TUNE_CTX_POLICY = "ladder"` or `--ctx-ladder` keeps the old ladder for a
    paired comparison; `--ctx N` pins a context.
 6. **Gate once**, in the serving configuration: the preset's own load mode (sweep points
@@ -107,7 +108,9 @@ file) with every gated overlay for this machine merged in. A tune never starts f
 effective file, so one tune's answers never become the next one's assumptions.
 
 `--adopt` then backs up `golem.toml` and sets `ENGINE` and `MODELS_PRESET` to the
-effective preset. `data/tuned/<host>/winner.txt` records the verdict and every point, and
+effective preset, and an engine that was up comes back on it. The console's and the
+screen's Tune is `tune <model> --adopt`: it always gates, so a tune started there serves
+its verdict once the gate passes. `data/tuned/<host>/winner.txt` records the verdict and every point, and
 every point is also a row in `bench/results.jsonl`.
 
 ## `--auto`
@@ -148,6 +151,20 @@ three benches of three runs each.
 Decode is a tie and `ub2048` prefills 55-58% faster, but at the trained context it reads
 400-550 MiB over the wall, so the tuner was right to refuse it there. Two rules changed
 with it: the spill check compares within one `ubatch-size` (against `ub2048`'s 889,
-`ub1024`'s 564 read as a spill), and a decode tie goes to prefill. Whether `ub2048` at
-the largest context under the wall beats `ub1024` at the trained one is the next tune's
-question.
+`ub1024`'s 564 read as a spill), and a decode tie goes to prefill.
+
+`golem tune ornith-1.5-35b` under those rules, 2026-10-25, quiet desktop, from the console:
+
+| Step | Loads | Points |
+|---|---|---|
+| split frontier | 4 | n31 spills (11965 MiB), n33 spills (11903), **n35 fits** (11037), n34 over the wall (11533) |
+| refine | 2 | `ub1024` 63.8 t/s decode, 534 prefill, 9902 MiB; MTP off 50.8 t/s |
+| context | 7 | 262144 over the wall (11606), then 246757, 246623, 246238, 246367, 246286, **246256** (11260) |
+| gate | 1 | 200K needle **PASS**, 672 t/s prefill and 36.2 t/s decode at depth |
+
+`ub1024` and `ub2048` tie on decode (63.8 against 63.0) and `ub2048` wins on prefill (839
+against 534), so the verdict is `ub2048` at 246256 tokens - 94% of the trained context for
+57% more prefill than `ub1024` at all of it. The context search spent five of its loads on
+the last 500 tokens: readings of one context differ by up to 9 MiB, so each re-fit through
+them predicted a few hundred tokens more. With predictions rounded down to 1024 tokens
+(`CONTEXT_STEP`), the same readings stop the search after two loads, at 245760.

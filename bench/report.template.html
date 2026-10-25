@@ -122,6 +122,12 @@ select, input[type=text] { background: var(--raised); border: 1px solid var(--ha
 .strip label { color: var(--soft); font-size: 13px; }
 pre.log { margin: 0; padding: 12px 14px; font: 12px/1.55 var(--code); color: var(--soft); white-space: pre-wrap; overflow-y: auto; }
 #c-log { border-top: 1px solid var(--hair); max-height: 240px; }
+.progress { padding: 10px 14px 12px; border-top: 1px solid var(--hair); }
+.progress .head { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--soft); font-variant-numeric: tabular-nums; }
+.progress .head b { color: var(--ink); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.progress .track { height: 4px; margin-top: 7px; border-radius: 99px; overflow: hidden; background: color-mix(in srgb, var(--patina) 15%, transparent); }
+.progress .track i { display: block; height: 100%; width: 0; border-radius: inherit; background: var(--patina); }
+@media (prefers-reduced-motion: no-preference) { .progress .track i { transition: width .5s ease-out; } }
 
 /* pull */
 .pull { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 10px 12px; }
@@ -217,6 +223,10 @@ tr.classrow td { color: var(--soft); font-size: 12px; font-weight: 600; padding-
           <select id="c-engine"></select>
           <button class="btn quiet" data-apply="c-engine">Use</button>
         </div>
+      </div>
+      <div class="progress" id="c-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" hidden>
+        <div class="head"><b id="c-progress-label"></b><span id="c-progress-amount"></span></div>
+        <div class="track"><i id="c-progress-fill"></i></div>
       </div>
       <pre class="log" id="c-log" hidden></pre>
     </div>
@@ -561,7 +571,7 @@ function renderModels(models, state) {
       m.Present
         ? (m.Default ? "" : `<button class="btn" data-alias="${esc(m.Name)}">Make default</button>`)
         : `<button class="btn" data-pull="${esc(m.Name)}">Download</button>`,
-      m.Present ? `<button class="btn" data-tune="${esc(m.Name)}" title="Find the split and context for this machine, then gate it">Tune</button>` : "",
+      m.Present ? `<button class="btn" data-tune="${esc(m.Name)}" title="Find the split and context for this machine, gate it, and serve it">Tune</button>` : "",
       m.Present ? `<button class="btn quiet danger" data-delmodel="${esc(m.Name)}">Delete file</button>` : "",
       m.Default ? "" : `<button class="btn quiet danger" data-delpreset="${esc(m.Name)}">Remove</button>`,
     ].join("");
@@ -592,11 +602,21 @@ function renderModels(models, state) {
 function renderState(s) {
   const busy = s.job_running;
   $("c-state").className = "state " + (busy ? "busy" : s.up ? "up" : "");
-  $("c-state-text").innerHTML = busy ? `<b>${esc(s.job_action)}</b> running`
+  const p = busy ? s.job_progress : null;
+  $("c-state-text").innerHTML = busy ? `<b>${esc(s.job_action)}</b> running${p ? `, ${p.percent}%` : ""}`
     : s.up ? `Serving <b>${esc(s.alias)}</b>${s.vram ? `, ${(s.vram / 1024).toFixed(1)} GB VRAM` : ""}`
     : `Stopped, default <b>${esc(s.alias || "none")}</b>`;
   drawMark(busy ? "busy" : s.up ? "up" : "down");
   $("c-engine").innerHTML = (s.engines || []).map((v) => `<option${v === s.engine ? " selected" : ""}>${esc(v)}</option>`).join("");
+  const bar = $("c-progress");
+  bar.hidden = !p;
+  if (p) {
+    $("c-progress-label").textContent = p.label;
+    $("c-progress-amount").textContent = `${p.amount} · ${p.percent}%`;
+    $("c-progress-fill").style.width = `${p.percent}%`;
+    bar.setAttribute("aria-valuenow", p.percent);
+    bar.setAttribute("aria-label", p.label);
+  }
   const log = $("c-log");
   log.hidden = !s.job_tail;
   if (s.job_tail) { log.textContent = s.job_tail; log.scrollTop = log.scrollHeight; }

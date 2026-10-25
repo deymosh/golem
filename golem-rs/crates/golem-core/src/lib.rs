@@ -56,6 +56,10 @@ pub mod hub;
 /// vendor scores `tune --auto` ranks by.
 pub mod library;
 
+/// The `PROGRESS` lines a long step writes into a job's log, and the bar the
+/// console and the screen draw from the newest one.
+pub mod progress;
+
 /// The mark: one grid for the terminal glyphs, the icon's pixels and its
 /// `.ico` file.
 pub mod mark;
