@@ -212,6 +212,9 @@ pub fn status(home: &Path, out: &mut dyn Write) -> i32 {
 
     if !status.up {
         let _ = writeln!(out, "[ .. ] engine down - no answer on http://127.0.0.1:{}", endpoint.port);
+        if let Ok(why) = std::fs::read_to_string(paths::load_failure(home)) {
+            let _ = writeln!(out, "        {}", why.trim());
+        }
         match status.pid {
             // A pid file that outlived its process is worth saying out loud:
             // it is what leaves an engine looking running when it is not.
@@ -380,6 +383,8 @@ fn start(home: &Path, plan: &Startup, endpoint: &engine::Endpoint, out: &mut dyn
         .spawn()
         .map_err(|e| format!("cannot start {}: {e}", plan.program.display()))?;
     let pid = child.id();
+    // A new engine is a new chance to load: the last one's failure is history.
+    let _ = std::fs::remove_file(paths::load_failure(home));
 
     if let Some(dir) = plan.pid_file.parent() {
         let _ = std::fs::create_dir_all(dir);

@@ -62,8 +62,11 @@ and put back after the run on the configuration as it then stands.
    lever; the collapse test catches a bad one). A thread count only when decode is within
    25% of the floor - the knob moves decode by a few percent and costs a whole load. MTP
    off, only when the model has a head.
-4. **Rank** what is not excluded by decode, and take the best. Decodes within 3% of the
-   best (`DECODE_TIE`) are a tie, and the tie goes to the faster prefill: a gap that small
+4. **Rank** what is not excluded by decode, and take the best. A point over the wall is
+   excluded however fast it ran: the splits the bisection measured past the frontier
+   decode faster precisely because they hold more than the card can spare. Decodes
+   within 3% of the best (`DECODE_TIE`) are a tie, and the tie goes to the faster
+   prefill: a gap that small
    is run-to-run noise, and prefill is paid on every first prompt.
 5. **Grow the context, by prediction.** VRAM is a straight line in the context at a fixed
    split. The winner's own point is the line's first point; one doubling (capped at the
@@ -75,7 +78,9 @@ and put back after the run on the configuration as it then stands.
 6. **Gate once**, in the serving configuration: the preset's own load mode (sweep points
    load with mmap so a 32 GB box survives the restarts; the gate keeps `mlock`), a needle
    at 90% of the tuned context capped at `GATE_TOKENS`, tool calls, and decode at depth
-   against its floor. A failed gate moves to the next-ranked candidate.
+   against its floor. A failed gate moves to the next-ranked candidate - except a gate
+   whose model did not load at all: the next candidate loads the same way, so the run
+   stops there and names the load mode as the suspect.
 
 Budget for the default coder: about ten loads - three to five for the frontier, one or two
 refine probes, two or three for the context, and the gate - against the seventeen the
@@ -168,3 +173,18 @@ against 534), so the verdict is `ub2048` at 246256 tokens - 94% of the trained c
 the last 500 tokens: readings of one context differ by up to 9 MiB, so each re-fit through
 them predicted a few hundred tokens more. With predictions rounded down to 1024 tokens
 (`CONTEXT_STEP`), the same readings stop the search after two loads, at 245760.
+
+The same tune with `CONTEXT_STEP` in and the wall applied to the ranking, 2026-10-25 late,
+quiet desktop:
+
+| Step | Loads | Points |
+|---|---|---|
+| split frontier | 4 | n31 (11919 MiB), n33 (11845), n34 (11477) over the wall; **n35 fits** (10985) |
+| refine | 2 | `ub1024` 64.1 t/s decode, 561 prefill; MTP off 51.1 t/s |
+| context | 2 | 262144 over the wall (11543), **248832** (11249) |
+| gate | 1 | 200K needle **PASS**, 671 t/s prefill and 35.9 t/s decode at depth |
+
+Nine loads, and the verdict is the earlier one's split and `ubatch-size` at 248832 tokens:
+63.5 t/s decode, 846 prefill. The wall had to move into the ranking first. On b11879 the
+splits the bisection had measured past the frontier stayed rankable, and n34 - 60.3 t/s
+at 11473 MiB - beat the frontier's 56.6 on decode and went to the gate over the wall.

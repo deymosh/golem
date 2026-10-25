@@ -202,7 +202,9 @@ pub fn ensure(home: &Path, pinned: &Pinned, out: &mut dyn Write) -> Result<Insta
         chosen.push(runtime);
     }
 
-    // The downloads stay in the temp dir after a success; the OS cleans it.
+    // The downloads are removed after a success - Windows never empties its
+    // temp folder, and a CUDA build leaves half a gigabyte there - and kept
+    // after a failure, where they are what to look at.
     let tmp = std::env::temp_dir().join(format!("golem-{}-{tag}", pinned.engine));
     std::fs::create_dir_all(&tmp).map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
 
@@ -220,6 +222,7 @@ pub fn ensure(home: &Path, pinned: &Pinned, out: &mut dyn Write) -> Result<Insta
     // The marker is written last: a killed install leaves the exe without it,
     // and that half-state must reinstall, not run.
     write_marker(&dir, &tag, &pinned.backend)?;
+    let _ = std::fs::remove_dir_all(&tmp);
 
     let _ = writeln!(
         out,

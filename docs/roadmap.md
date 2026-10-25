@@ -57,9 +57,20 @@ fresh clone has no binary until then and builds one with `./scripts/cargo.sh bui
 
 ## 4. Candidates, when the GPU is free
 
-From [engines-and-models.md](engines-and-models.md): the everyday-slot pair (Ornith-1.5-9B,
-Gemma 4 12B QAT), a paired retest of llama.cpp b11755, and Strata's 0.2.x engine line
-against the 200K requirement. Each is a preset or an adapter, a paired bench and the eval.
+Every preset was re-tuned and gated on b11379 on 2026-10-25, and the defaults held (the
+numbers are in [models.md](models.md#every-preset-re-tuned-2026-10-25)). What is still
+open, from [engines-and-models.md](engines-and-models.md):
+
+- **The next llama.cpp build.** b11879 decodes ~11% slower than b11379 and cannot load
+  under `mlock`; b11755 loads but decodes slower at depth. Each new release gets the same
+  tune and gate, and the adapter's `build` moves when one wins. Where between b11755 and
+  b11879 the `mlock` load started failing is worth pinning down for an upstream report;
+  each probe is one load that may reset the display driver, so it waits for a free desktop.
+- **The everyday slot's quality.** Qwen3.5-9B wins on every speed and holds 200K;
+  Ornith-1.5-9B has the better vendor coding scores but its Q6_K stops at 156672 tokens.
+  A smaller Ornith quant that reaches 200K is the one candidate left there.
+- Strata 0.2.6 passes 200K with its Coder at half llama.cpp's decode, and stays a measured
+  alternative rather than an engine golem runs.
 
 ## Smaller items
 

@@ -564,10 +564,19 @@ fn curl_download(
     }
 }
 
-/// `sha256sum <path>`, whose one output line becomes the `.sha256` file.
+/// `sha256sum <file>`, run in the file's folder, whose one output line
+/// becomes the `.sha256` file.
+///
+/// The bare name keeps the line portable - `<hash>  <file>`, checkable with
+/// `sha256sum -c` from that folder - where a Windows path would make GNU
+/// sha256sum escape every backslash and prefix the line with one.
 fn sha256sum(path: &Path) -> Result<String, String> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(format!("{} is not a file path", path.display()));
+    };
     let out = Command::new("sha256sum")
-        .arg(path)
+        .current_dir(dir)
+        .arg(name)
         .stdin(Stdio::null())
         .output()
         .map_err(|e| e.to_string())?;

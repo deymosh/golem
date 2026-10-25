@@ -114,6 +114,12 @@ pub fn pid_file(home: &Path) -> PathBuf {
     home.join(".local").join("llama-server.pid")
 }
 
+/// Why the service stopped the engine after a model failed to load, for
+/// `status` to say until the next start clears it.
+pub fn load_failure(home: &Path) -> PathBuf {
+    home.join(".local").join("load-failure.txt")
+}
+
 
 #[cfg(test)]
 mod tests {

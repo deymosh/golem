@@ -26,6 +26,9 @@ pub mod report;
 
 pub mod tune;
 
+/// The router's `/models` listing: which models failed to load.
+pub mod router;
+
 /// The engine adapter's contract: a preset's flags become the arguments the
 /// engine is started with.
 pub mod adapter;

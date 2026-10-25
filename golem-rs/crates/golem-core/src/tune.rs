@@ -3,8 +3,10 @@
 //! binary's `tune.rs` measures; this module decides. The floors, the wall
 //! and the reasoning behind them are in `docs/tuning.md`.
 //!
-//! Three rules travel together and must not be conflated:
+//! Four rules travel together and must not be conflated:
 //!
+//! * the **wall** is the card's size less the desktop's headroom, and a point
+//!   whose whole-card reading is over it does not fit, however fast it ran;
 //! * the **spill** check is *relative* - a point's prefill against the best
 //!   prefill its own engine reached at the same `ubatch-size` - and catches
 //!   the Windows driver silently spilling VRAM to system memory;
@@ -120,6 +122,8 @@ pub struct Point {
     /// The `ubatch-size` it ran with, 0 for the engine's default. Prefill
     /// moves with it by design, so the spill check compares within it.
     pub ubatch: u32,
+    /// The bench's whole-card VRAM reading, MiB.
+    pub vram_mib: f64,
     /// Result of the eval gate for this point, when it was gated.
     pub passed_gate: Option<bool>,
     /// Decode at full depth, from the gate's own measurement.
@@ -129,6 +133,8 @@ pub struct Point {
 /// Why a point is out of the ranking, or `None` when it is in.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Exclusion {
+    /// The whole-card reading is over the wall: the setup does not fit.
+    OverWall { vram_mib: f64, wall_mib: u64 },
     /// Prefill collapsed against the best the same engine reached: the
     /// driver spilled to system memory.
     Spilling { prefill: f64, engine_best: f64 },
@@ -147,10 +153,19 @@ pub enum Exclusion {
 /// ub2048 prefills ~870), so comparing across them would call an honestly
 /// slower setup "spilling". `rank` computes that best and passes it in.
 ///
-/// The order: spilling first, then the decode floor, then the prefill
-/// floor. Every comparison is strict, so a point exactly on a
-/// floor is kept.
-pub fn exclusion(point: &Point, engine_best_prefill: f64, floor: &Floor) -> Option<Exclusion> {
+/// `wall_mib` is the whole-card ceiling (`Machine::wall_mib` in the binary).
+/// The split search already refuses a split over it, but the refine probes
+/// and the splits the bisection measured on its way are ranked too, and a
+/// split one layer below the frontier can decode faster precisely because
+/// it holds more than the card can spare.
+///
+/// The order: the wall first, then spilling, then the decode floor, then the
+/// prefill floor. Every comparison is strict, so a point exactly on the wall
+/// or a floor is kept.
+pub fn exclusion(point: &Point, engine_best_prefill: f64, floor: &Floor, wall_mib: u64) -> Option<Exclusion> {
+    if point.vram_mib > wall_mib as f64 {
+        return Some(Exclusion::OverWall { vram_mib: point.vram_mib, wall_mib });
+    }
     // With no measurement to compare against, nothing can be "far under" it.
     if engine_best_prefill > 0.0 && point.prefill < 0.75 * engine_best_prefill {
         return Some(Exclusion::Spilling {
@@ -208,10 +223,10 @@ fn best_of(best: &[(&str, u32, f64)], point: &Point) -> f64 {
 /// decode alone decides. The depth floor is deliberately *not* applied: a
 /// point is ranked before it is gated (see [`winner`]). Exact ties keep input
 /// order, so the sweep's own order decides.
-pub fn rank(points: &[Point], floor: &Floor) -> Vec<usize> {
+pub fn rank(points: &[Point], floor: &Floor, wall_mib: u64) -> Vec<usize> {
     let best = best_prefill(points);
     let mut kept: Vec<usize> = (0..points.len())
-        .filter(|&i| exclusion(&points[i], best_of(&best, &points[i]), floor).is_none())
+        .filter(|&i| exclusion(&points[i], best_of(&best, &points[i]), floor, wall_mib).is_none())
         .collect();
     let desc = |x: f64, y: f64| y.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal);
     // Stable sorts: equal values stay in the order they were measured.
@@ -223,14 +238,21 @@ pub fn rank(points: &[Point], floor: &Floor) -> Vec<usize> {
     kept
 }
 
+/// Why `points[i]` is out of [`rank`], judged against the same per-engine
+/// bests `rank` uses, or `None` when it is ranked.
+pub fn excluded(points: &[Point], i: usize, floor: &Floor, wall_mib: u64) -> Option<Exclusion> {
+    let best = best_prefill(points);
+    exclusion(&points[i], best_of(&best, &points[i]), floor, wall_mib)
+}
+
 /// The point to adopt: the first of [`rank`] that passed the gate and whose
 /// depth decode meets the floor. `None` when nothing qualifies.
 ///
 /// A context you cannot use at depth is a fake win, so the depth floor
 /// applies here rather than in `rank`. Only a *measured* depth under the
 /// floor disqualifies a point: an unmeasured depth is not a violation.
-pub fn winner(points: &[Point], floor: &Floor) -> Option<usize> {
-    rank(points, floor).into_iter().find(|&i| {
+pub fn winner(points: &[Point], floor: &Floor, wall_mib: u64) -> Option<usize> {
+    rank(points, floor, wall_mib).into_iter().find(|&i| {
         let p = &points[i];
         p.passed_gate == Some(true)
             && !matches!(p.depth_decode, Some(d) if d > 0.0 && d < floor.depth_decode)
@@ -520,6 +542,9 @@ fn grow(current: u64, ceiling: u64) -> Rung {
 mod tests {
     use super::*;
 
+    /// The reference box's wall: 12288 MiB less the default 1024 of headroom.
+    const WALL: u64 = 11264;
+
     fn point(engine: &str, label: &str, decode: f64, prefill: f64, ctx: u64) -> Point {
         Point {
             engine: engine.into(),
@@ -528,6 +553,7 @@ mod tests {
             prefill,
             ctx,
             ubatch: 0,
+            vram_mib: 10000.0,
             passed_gate: None,
             depth_decode: None,
         }
@@ -536,6 +562,34 @@ mod tests {
     fn at_ubatch(mut p: Point, ubatch: u32) -> Point {
         p.ubatch = ubatch;
         p
+    }
+
+    fn reading(mut p: Point, vram_mib: f64) -> Point {
+        p.vram_mib = vram_mib;
+        p
+    }
+
+    #[test]
+    fn a_split_over_the_wall_is_not_ranked_however_fast() {
+        // The b11879 frontier on the reference box, 2026-10-25: the splits
+        // below the frontier decode faster because they hold more than the
+        // card can spare, and the search had already called both too big.
+        let floor = Floor::default();
+        let points = vec![
+            reading(point("llama.cpp", "n33", 61.8, 689.0, 236544), 11813.0),
+            reading(point("llama.cpp", "n35", 56.6, 879.0, 236544), 10975.0),
+            reading(point("llama.cpp", "n34", 60.3, 898.0, 236544), 11473.0),
+        ];
+        assert_eq!(rank(&points, &floor, WALL), vec![1]);
+        assert_eq!(
+            excluded(&points, 2, &floor, WALL),
+            Some(Exclusion::OverWall { vram_mib: 11473.0, wall_mib: WALL })
+        );
+        assert_eq!(excluded(&points, 1, &floor, WALL), None);
+
+        // Exactly on the wall is a fit: the comparison is strict.
+        let on = reading(point("llama.cpp", "edge", 60.0, 800.0, 236544), WALL as f64);
+        assert_eq!(exclusion(&on, 800.0, &floor, WALL), None);
     }
 
     #[test]
@@ -547,13 +601,13 @@ mod tests {
             at_ubatch(point("llama.cpp", "ub2048", 63.6, 889.0, 4096), 2048),
             at_ubatch(point("llama.cpp", "ub1024", 63.9, 564.0, 4096), 1024),
         ];
-        let ranked = rank(&points, &floor);
+        let ranked = rank(&points, &floor, WALL);
         assert!(ranked.contains(&1), "ub1024 is ranked, not excluded: {ranked:?}");
 
         // A collapse within one ubatch is still a spill.
         let mut spilled = points.clone();
         spilled.push(at_ubatch(point("llama.cpp", "n33-ub1024", 66.0, 380.0, 4096), 1024));
-        assert!(!rank(&spilled, &floor).contains(&2));
+        assert!(!rank(&spilled, &floor, WALL).contains(&2));
     }
 
     #[test]
@@ -566,7 +620,7 @@ mod tests {
             // 9% under the best: not a tie, whatever its prefill.
             at_ubatch(point("llama.cpp", "slow", 58.0, 900.0, 4096), 2048),
         ];
-        assert_eq!(rank(&points, &floor), vec![1, 0, 2]);
+        assert_eq!(rank(&points, &floor, WALL), vec![1, 0, 2]);
     }
 
     #[test]
@@ -581,24 +635,24 @@ mod tests {
         // Exactly on both floors, and its engine's own best prefill: kept,
         // because every comparison is strict.
         let on = point("llama.cpp", "n0", 25.0, 350.0, 4096);
-        assert_eq!(exclusion(&on, 350.0, &floor), None);
+        assert_eq!(exclusion(&on, 350.0, &floor, WALL), None);
 
         // A hair under either floor: excluded, and named for which one.
         let low_decode = point("llama.cpp", "n1", 24.9, 800.0, 4096);
         assert_eq!(
-            exclusion(&low_decode, 800.0, &floor),
+            exclusion(&low_decode, 800.0, &floor, WALL),
             Some(Exclusion::BelowDecodeFloor { decode: 24.9 })
         );
         let low_prefill = point("llama.cpp", "n2", 40.0, 349.9, 4096);
         assert_eq!(
-            exclusion(&low_prefill, 349.9, &floor),
+            exclusion(&low_prefill, 349.9, &floor, WALL),
             Some(Exclusion::BelowPrefillFloor { prefill: 349.9 })
         );
 
         // Spilling is reported first when a point is both spilling and slow.
         let both = point("llama.cpp", "n3", 10.0, 480.0, 4096);
         assert_eq!(
-            exclusion(&both, 830.0, &floor),
+            exclusion(&both, 830.0, &floor, WALL),
             Some(Exclusion::Spilling { prefill: 480.0, engine_best: 830.0 })
         );
     }
@@ -609,14 +663,14 @@ mod tests {
         // Engines differ in prefill by design: ik_llama.cpp prefills ~480
         // where llama.cpp prefills ~830. Each on its own best is fine.
         let ik = point("ik_llama.cpp", "n0", 30.0, 480.0, 4096);
-        assert_eq!(exclusion(&ik, 480.0, &floor), None);
+        assert_eq!(exclusion(&ik, 480.0, &floor, WALL), None);
         let llama_fast = point("llama.cpp", "n0", 60.0, 830.0, 4096);
-        assert_eq!(exclusion(&llama_fast, 830.0, &floor), None);
+        assert_eq!(exclusion(&llama_fast, 830.0, &floor, WALL), None);
 
         // Within one engine, 480 against 830 is the sysmem cliff.
         let llama_slow = point("llama.cpp", "n9", 70.0, 480.0, 4096);
         assert_eq!(
-            exclusion(&llama_slow, 830.0, &floor),
+            exclusion(&llama_slow, 830.0, &floor, WALL),
             Some(Exclusion::Spilling { prefill: 480.0, engine_best: 830.0 })
         );
 
@@ -627,7 +681,7 @@ mod tests {
             point("llama.cpp", "spill", 70.0, 480.0, 4096),
             point("ik_llama.cpp", "slow", 30.0, 480.0, 4096),
         ];
-        assert_eq!(rank(&points, &floor), vec![0, 2]);
+        assert_eq!(rank(&points, &floor, WALL), vec![0, 2]);
     }
 
     #[test]
@@ -639,7 +693,7 @@ mod tests {
             point("llama.cpp", "c", 40.0, 800.0, 4096), // ties with a: a first
             point("llama.cpp", "d", 30.0, 800.0, 4096),
         ];
-        assert_eq!(rank(&points, &floor), vec![1, 0, 2, 3]);
+        assert_eq!(rank(&points, &floor, WALL), vec![1, 0, 2, 3]);
     }
 
     #[test]
@@ -657,7 +711,7 @@ mod tests {
         points[2].passed_gate = Some(true);
         points[2].depth_decode = Some(30.0);
         points[3].depth_decode = Some(50.0); // no gate verdict: not a winner
-        assert_eq!(winner(&points, &floor), Some(2));
+        assert_eq!(winner(&points, &floor, WALL), Some(2));
     }
 
     #[test]
@@ -666,12 +720,12 @@ mod tests {
         // Only a point whose depth was measured *and* shallow is skipped.
         let mut points = vec![point("llama.cpp", "x", 50.0, 800.0, 4096)];
         points[0].passed_gate = Some(true);
-        assert_eq!(winner(&points, &floor), Some(0));
+        assert_eq!(winner(&points, &floor, WALL), Some(0));
 
         // Nothing qualifies when every point fails the gate.
         let mut failed = vec![point("llama.cpp", "y", 50.0, 800.0, 4096)];
         failed[0].passed_gate = Some(false);
-        assert_eq!(winner(&failed, &floor), None);
+        assert_eq!(winner(&failed, &floor, WALL), None);
     }
 
     #[test]

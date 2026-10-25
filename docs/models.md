@@ -59,6 +59,35 @@ The sweep also shows why the split has to be measured: `ub1024` decoded at 62.3 
 prefilled at 560 against its own engine's 878 - the sysmem cliff, caught by the prefill
 collapse rather than by a VRAM number.
 
+### Every preset, re-tuned 2026-10-25
+
+`golem tune <preset>` for each, one at a time, on llama.cpp b11379, quiet desktop, wall
+11264 MiB. Decode and prefill are the tuner's (median of three, 8K prompt); the gate is
+the needle at 90% of the tuned context, capped at 200000 tokens. The rows are in
+`bench/results.jsonl`, tagged with the round.
+
+| Preset | Split | Context | Decode | Prefill | VRAM | Gate | Needle prefill | At depth |
+|---|---|---|---|---|---|---|---|---|
+| **`ornith-1.5-35b`** | n-cpu-moe 35 | 248832 | 63.5 t/s | 846 | 11249 MiB | 200K PASS | 671 t/s | 35.9 t/s |
+| `qwen3.6-35b-a3b` | n-cpu-moe 37 | 253952 | 60.8 t/s | 493 | 11246 MiB | 200K PASS | 655 t/s | 36.8 t/s |
+| `nemotron-3.5-lightning-30b` | n-cpu-moe 41 | 344064 | 44.7 t/s | 930 | 11262 MiB | 200K PASS | 1134 t/s | 22.6 t/s |
+| **`qwen3.5-9b`** | all on the card | 258048 | 52.1 t/s | 1659 | 11250 MiB | 200K PASS | 941 t/s | 21.9 t/s |
+| `ornith-1.5-9b` | all on the card | 156672 | 42.3 t/s | 1540 | 11257 MiB | 141K PASS | 1039 t/s | 23.8 t/s |
+| `gemma-4-12b-it-qat-q4_0` | all on the card | 262144 | 40.0 t/s | 1244 | 10674 MiB | 200K PASS | 476 t/s | 19.5 t/s |
+| `qwen2.5-0.5b-instruct` | all on the card | 32768 | 340.1 t/s | 19452 | 1286 MiB | 29K PASS | 11395 t/s | 179.3 t/s |
+
+Reading:
+
+- The coder stays Ornith-1.5-35B: the fastest decode, and prefill well ahead of Qwen3.6,
+  which only matches it at depth.
+- The everyday slot stays Qwen3.5-9B. Its tuned context grew from the preset's 65536 to
+  258048 - a dense 9B at Q4 holds far more than the ~100K the memory math below assumed.
+  Ornith-1.5-9B at Q6_K fills the card at 156672, so it cannot be gated at 200K here.
+- Nemotron's hand-set preset (`n-cpu-moe 30`) spilled, which is where its old 25 t/s came
+  from; at the tuned split it is a real long-context option, the only one past 262144.
+- llama.cpp b11879 was tuned the same night and is not adopted
+  ([engines-and-models.md](engines-and-models.md#builds)).
+
 ## How golem picks a model
 
 Two keys in `golem.toml` name it, and `golem pull` (or the `up` that finds it missing)
@@ -89,8 +118,9 @@ in router mode the preset file carries a section's own flags instead.
 ## Memory math, two regimes
 
 **Dense models (all in VRAM)** — OS/display overhead (~1.5 GB on a desktop GPU) leaves
-~10.5 GB usable on a 12 GB card. Weights + KV (q8, virtual growth) must fit; a 9B Q4 caps
-near ~100K context.
+~10.5 GB usable on a 12 GB card. Weights + KV (q8, virtual growth) must fit, and how far
+the context goes depends on the attention as much as the weights: Qwen3.5-9B at Q4
+(5.6 GB, hybrid attention) holds 258048 tokens, Ornith-1.5-9B at Q6_K (7.0 GB) 156672.
 
 **MoE models (the default setup)** — `--cpu-moe` keeps expert FFN weights in system RAM.
 (Under Docker Desktop the WSL2 VM needs that headroom too: `memory=24GB` in
@@ -286,13 +316,13 @@ Windows build of b11149 also passes; that regression is Linux-build-specific).
 
 The wider landscape — engines and models checked against this box's constraints — lives
 in [engines-and-models.md](engines-and-models.md) (updated on each research pass). The
-short version: nothing measured beats the current defaults in their class; the open
-candidates are an Ornith-1.5-9B everyday-coder preset and Gemma 4 12B QAT in the same
-slot, each pending a quiet-desktop bench and the eval gate.
+short version: nothing measured beats the current defaults in their class. Ornith-1.5-9B
+and Gemma 4 12B QAT were tuned and gated for the everyday slot on 2026-10-25 and neither
+beats Qwen3.5-9B; llama.cpp b11879 does not beat b11379.
 
 ## Client pairing
 
-- **Claude Code** (200K assumed): needs a server ctx ≥ 200K — the default coder serves 249344.
+- **Claude Code** (200K assumed): needs a server ctx ≥ 200K — the default coder serves 248832.
   `golem env` prints the exports.
 - **OpenCode** (context declared per model in `opencode.json` via
   `limit: { context, output }`, auto-compact honours it): pair it with the Gemma 12B

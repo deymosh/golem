@@ -183,12 +183,16 @@ pub fn run_with(home: &Path, args: &[String], out: &mut dyn Write, progress: boo
     steps.next(out, "warmup and sanity");
 
     let _ = writeln!(out, "warmup request (first hit may compile CUDA graphs, be patient)...");
-    // A failed warmup is a warning, not a failure: every later request would
-    // say the same thing anyway.
+    // A failed warmup ends the eval. A router loads the model on the request
+    // that names it and tries again on the next, so every later step would
+    // be another load - and a load that dies on the card resets the display
+    // driver each time.
     match engine::post_json(&base, "/v1/chat/completions", &warmup_body(&model), RUN_TIMEOUT) {
         Some(reply) if reply.ok() => {}
-        _ => {
-            let _ = writeln!(out, "[WARN] warmup request failed (continuing)");
+        reply => {
+            let said = reply.map_or_else(|| "no answer".to_string(), |r| error_message(&r));
+            let _ = writeln!(out, "[FAIL] warmup request failed: {said}");
+            return 1;
         }
     }
     let _ = writeln!(out, "[ OK ] warmup done");
@@ -467,6 +471,15 @@ fn compact(value: &Value) -> String {
 // ---------------------------------------------------------------
 // The request bodies
 // ---------------------------------------------------------------
+
+/// What an unhappy reply says about itself: the engine's `error.message`
+/// (the router's "model name=... failed to load"), else the status code.
+fn error_message(reply: &engine::Reply) -> String {
+    json::parse(&reply.body)
+        .ok()
+        .and_then(|v| v.get("error")?.get("message")?.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("HTTP {}", reply.status))
+}
 
 /// The warmup body: eight tokens of `"hi"`.
 fn warmup_body(model: &str) -> String {
@@ -834,7 +847,8 @@ mod tests {
         dir
     }
 
-    /// A fake engine that answers `replies` in order, one connection each.
+    /// A fake engine that answers `replies` in order, one connection each: a
+    /// body under `200 OK`, or a reply that is already a whole response.
     fn serve(replies: Vec<String>) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
@@ -842,7 +856,11 @@ mod tests {
             for reply in replies {
                 let Ok((mut stream, _)) = listener.accept() else { return };
                 read_request(&mut stream);
-                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", reply.len());
+                let head = if reply.starts_with("HTTP/1.1 ") {
+                    String::new()
+                } else {
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", reply.len())
+                };
                 let _ = stream.write_all(head.as_bytes());
                 let _ = stream.write_all(reply.as_bytes());
                 let _ = stream.flush();
@@ -1324,6 +1342,27 @@ mod tests {
             ),
             "{row}"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_model_that_will_not_load_ends_the_eval_at_the_warmup() {
+        // The router's answer when the load died; every later step would be
+        // another load, so none is asked for.
+        let failed = "{\"error\":{\"code\":500,\"message\":\"model name=m failed to load\",\"type\":\"server_error\"}}";
+        let replies = vec![
+            "{}".to_string(),
+            props_reply(),
+            format!("HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\n\r\n{failed}", failed.len()),
+        ];
+        let port = serve(replies);
+        let dir = home("no-load", port);
+        let (status, text) = run_out(&dir, &["--long", "100"]);
+        assert_eq!(status, 1);
+        assert!(text.contains("[FAIL] warmup request failed: model name=m failed to load\n"), "{text}");
+        assert!(!text.contains("TOOL CALLING"), "{text}");
+        let eval = evalparse::Eval::parse(text.lines());
+        assert!(eval.needle.is_none(), "no needle was run");
         std::fs::remove_dir_all(&dir).ok();
     }
 

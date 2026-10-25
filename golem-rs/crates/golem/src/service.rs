@@ -3,7 +3,7 @@
 //!
 //! ## Why there is a service at all
 //!
-//! Three things want the same answer, and this is it:
+//! Four things want the same answer, and this is it:
 //!
 //! - **Nothing the CLI starts should inherit the CLI's handles.** On Windows
 //!   `std` spawns with `bInheritHandles = TRUE`, so an engine started by `up`
@@ -16,6 +16,10 @@
 //!   service, so it goes when the service goes. A `tune` killed mid-sweep once
 //!   left a 35B resident - 11.7 GB of VRAM that nothing could see, because the
 //!   pid file had gone with it.
+//! - **A model that failed to load must not be loaded again.** The router
+//!   retries a failed load on every request that names the model, and on
+//!   Windows a load that dies on the card resets the display driver, so the
+//!   service watches for one and stops the engine ([`guard_loads`]).
 //! - **A container needs a PID 1.** `ENTRYPOINT ["golem", "up"]` exits the
 //!   moment the engine is healthy; the entrypoint has to be a process that
 //!   owns the engine and stays.
@@ -67,6 +71,7 @@ use golem_core::json;
 use crate::config::Overrides;
 use crate::engine;
 use crate::launch;
+use crate::paths;
 
 /// How long a client waits for the service to answer a connection.
 ///
@@ -88,6 +93,15 @@ const START_POLL: Duration = Duration::from_millis(100);
 /// The listener is non-blocking so that Ctrl+C is noticed while nothing is
 /// asking for anything, which is most of a service's life.
 const ACCEPT_POLL: Duration = Duration::from_millis(100);
+
+/// How often the load guard asks the router whether a model failed to load.
+///
+/// A load that dies on the card does so twenty seconds or more into it (a
+/// 35B's CUDA abort, measured), and only then does the router answer the
+/// request that asked for it, so two seconds stops the engine before a
+/// client's retry has got far. `/models` does not count as
+/// activity for `SLEEP_IDLE_SECONDS`, so the poll keeps nothing awake.
+const LOAD_GUARD_POLL: Duration = Duration::from_secs(2);
 
 /// Where the service is, as the file it writes and the client reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -508,6 +522,14 @@ fn serve(home: &Path, start_now: bool) -> i32 {
     // which is what lets a hung or unwanted start be stopped: the start's own
     // health wait sees its child go and reports it.
     let busy = Arc::new(AtomicBool::new(false));
+    // Held by a start for its whole run and by the load guard while it acts,
+    // so the guard never stops an engine it did not inspect. `down` does not
+    // take it: stopping a start has to stay possible.
+    let starting = Arc::new(Mutex::new(()));
+    {
+        let (home, starting) = (home.to_path_buf(), Arc::clone(&starting));
+        std::thread::spawn(move || guard_loads(&home, &starting));
+    }
     // A `shutdown` request's exit code, once its thread has stopped the engine.
     let shutdown: Arc<Mutex<Option<i32>>> = Arc::new(Mutex::new(None));
     let code = loop {
@@ -529,16 +551,52 @@ fn serve(home: &Path, start_now: bool) -> i32 {
             }
         };
         let (home, token) = (home.to_path_buf(), endpoint.token.clone());
-        let (busy, shutdown) = (Arc::clone(&busy), Arc::clone(&shutdown));
-        std::thread::spawn(move || serve_one(&home, &token, stream, &busy, &shutdown));
+        let (busy, starting, shutdown) = (Arc::clone(&busy), Arc::clone(&starting), Arc::clone(&shutdown));
+        std::thread::spawn(move || serve_one(&home, &token, stream, &busy, &starting, &shutdown));
     };
     Endpoint::remove(home);
     println!("[ OK ] golem service stopped");
     code
 }
 
+/// Stop the engine once a model has failed to load, for as long as the
+/// service runs.
+///
+/// The router loads a model on the request that names it and tries again on
+/// the next one. A load that dies on the card resets the display driver on
+/// Windows - the screen goes black for a moment - so a client that retries
+/// (Claude Code does, and so does every step of an eval) turns one bad load
+/// into a black screen every half minute. Stopping the engine makes the
+/// retry a refused connection instead, and `status` says why
+/// (`paths::load_failure`) until the next start.
+fn guard_loads(home: &Path, starting: &Mutex<()>) {
+    loop {
+        std::thread::sleep(LOAD_GUARD_POLL);
+        if engine::pid(home).is_none() {
+            continue;
+        }
+        // A start in progress owns the engine; the next poll looks again.
+        let Ok(_held) = starting.try_lock() else { continue };
+        let failed = engine::failed_loads(&engine::Endpoint::from_home(home));
+        if failed.is_empty() {
+            continue;
+        }
+        let reason = golem_core::router::stop_reason(&failed);
+        println!("[WARN] {reason}");
+        let _ = std::fs::write(paths::load_failure(home), format!("{reason}\n"));
+        launch::down(home, &mut std::io::stdout());
+    }
+}
+
 /// One connection: read the request, run the verb, answer `done`.
-fn serve_one(home: &Path, token: &str, mut stream: TcpStream, busy: &AtomicBool, shutdown: &Mutex<Option<i32>>) {
+fn serve_one(
+    home: &Path,
+    token: &str,
+    mut stream: TcpStream,
+    busy: &AtomicBool,
+    starting: &Mutex<()>,
+    shutdown: &Mutex<Option<i32>>,
+) {
     let _ = stream.set_nonblocking(false);
     let (verb, overrides) = match read_request(&mut stream, token) {
         Ok(request) => request,
@@ -572,9 +630,12 @@ fn serve_one(home: &Path, token: &str, mut stream: TcpStream, busy: &AtomicBool,
     // service, and a request that does not mention it (the tuner putting the
     // engine back, a button on the page) must not bind the loopback.
     let overrides = Overrides::from_env().under(&overrides);
-    dispatch(home, &verb, &overrides, &mut stream);
     if starts {
+        let _held = starting.lock().unwrap_or_else(|e| e.into_inner());
+        dispatch(home, &verb, &overrides, &mut stream);
         busy.store(false, Ordering::SeqCst);
+    } else {
+        dispatch(home, &verb, &overrides, &mut stream);
     }
 }
 

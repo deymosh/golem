@@ -89,6 +89,13 @@ Why a long-lived owner rather than an `up` that spawns and exits:
   pipe for the engine's lifetime. The one spawn a client makes - the service, on the first
   verb after a boot - goes through PowerShell's `Start-Process`, whose `ShellExecuteEx`
   hands the service no handles; PowerShell holds the pipe for the half-second it runs.
+- **A model that failed to load must not be loaded again.** The router loads a model on
+  the request that names it and retries a failed load on the next one, and on Windows a
+  load that dies on the card (a CUDA out-of-memory) resets the display driver - the
+  screen goes black for a moment. A client that retries turned one bad load into a reset
+  every half minute. The service asks the router's `/models` every two seconds and stops
+  the engine once a model there is marked failed; the retry is then a refused
+  connection, and `golem status` says why until the next start.
 
 **Protocol.** One JSON object per line over loopback TCP. The service binds an ephemeral
 port and writes it, with a per-run token, to `.local/golem-service.json`; loopback is
@@ -125,7 +132,8 @@ a terminal draws the lines the service streams as one bar redrawn in place.
 **Concurrency.** Each connection is served on its own thread. One *start* (`up`,
 `restart`) runs at a time and a second is refused; `down` and `status` are answered while
 a start runs, so a start that hangs can be stopped (its health wait sees the child go and
-reports it). Ctrl+C or SIGTERM stops the engine and then the service - a Linux PID 1 with
+reports it). The load guard acts only between starts, so it never stops an engine it did
+not inspect. Ctrl+C or SIGTERM stops the engine and then the service - a Linux PID 1 with
 no SIGTERM handler would ignore `docker stop`.
 
 **Overrides.** A request may carry `GOLEM_<KEY>` values for ENGINE, MODELS_PRESET,

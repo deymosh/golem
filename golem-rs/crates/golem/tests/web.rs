@@ -63,12 +63,29 @@ fn the_page_keeps_the_data_marker_the_generator_replaces() {
 // ---- end to end over a real socket -------------------------------------
 
 /// A fresh, empty directory under the system temp dir, unique per process and
-/// per tag so parallel tests cannot collide.
-fn temp_dir(tag: &str) -> PathBuf {
+/// per tag so parallel tests cannot collide, and removed when the test that
+/// made it ends - pass or fail, since a failed assertion unwinds through it.
+fn temp_dir(tag: &str) -> TempDir {
     let dir = std::env::temp_dir().join(format!("golem-web-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
-    dir
+    TempDir(dir)
+}
+
+/// A test's directory, deleted on drop.
+struct TempDir(PathBuf);
+
+impl std::ops::Deref for TempDir {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Bind the router to an ephemeral port on a background thread and hand back
@@ -107,7 +124,7 @@ fn request(addr: SocketAddr, path: &str) -> String {
 const RECORDS: &str = "{\"model\": \"a\", \"note\": \"x</script>\"}\n\n{\"model\": \"b\"}\n";
 const TEMPLATE: &str = "<html><script id=\"golem-data\">/*GOLEM_DATA*/</script></html>";
 
-fn fixture(tag: &str) -> (PathBuf, Config) {
+fn fixture(tag: &str) -> (TempDir, Config) {
     let dir = temp_dir(tag);
     let results = dir.join("results.jsonl");
     let template = dir.join("report.template.html");
@@ -342,7 +359,7 @@ ctx-size = 8192
 
 /// A home with the preset file and a `golem.toml`, and no engine installed:
 /// the Models tab reads and edits files, so it has to work without one.
-fn models_fixture(tag: &str) -> (PathBuf, Config) {
+fn models_fixture(tag: &str) -> (TempDir, Config) {
     let (dir, cfg) = fixture(tag);
     std::fs::create_dir_all(dir.join("config")).expect("config");
     std::fs::create_dir_all(dir.join("data/models")).expect("models");

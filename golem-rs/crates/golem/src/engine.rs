@@ -122,6 +122,15 @@ pub fn models(endpoint: &Endpoint) -> Vec<String> {
     }
 }
 
+/// The models the router marks as failed to load (`GET /models`). Nothing
+/// when the engine is down, is not a router, or answers anything else.
+pub fn failed_loads(endpoint: &Endpoint) -> Vec<golem_core::router::FailedLoad> {
+    match get(endpoint, "/models") {
+        Some((200, body)) => golem_core::router::failed_loads(&body),
+        _ => Vec::new(),
+    }
+}
+
 // ---------------------------------------------------------------
 // The measurement client
 // ---------------------------------------------------------------

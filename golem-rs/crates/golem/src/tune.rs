@@ -39,7 +39,7 @@ use golem_core::gguf;
 use golem_core::ini::{self, Entry};
 use golem_core::progress::Progress;
 use golem_core::time;
-use golem_core::tune::{self, ContextSearch, Floor, Phase, Point, Probe, Rung, RungOutcome};
+use golem_core::tune::{self, ContextSearch, Exclusion, Floor, Phase, Point, Probe, Rung, RungOutcome};
 
 use crate::config::{self, Overrides};
 use crate::engine;
@@ -369,6 +369,7 @@ impl Measured {
             prefill: self.prefill,
             ctx: self.ctx,
             ubatch: self.ubatch,
+            vram_mib: self.vram_mib,
             passed_gate: self.passed_gate,
             depth_decode: self.depth_decode,
         }
@@ -882,11 +883,13 @@ impl<'a> Tuner<'a> {
         Some(point.prefill >= self.opts.floor.prefill && point.vram_mib <= wall)
     }
 
-    /// The measured split with the best decode on `engine`, if any.
+    /// The measured split under the wall with the best decode on `engine`,
+    /// if any.
     fn best_measured(&self, engine: &str) -> Option<(u32, f64)> {
+        let wall = self.machine.wall_mib(self.opts.headroom_mib) as f64;
         self.points
             .iter()
-            .filter(|p| p.engine == engine)
+            .filter(|p| p.engine == engine && p.vram_mib <= wall)
             .filter_map(|p| p.n_cpu_moe.parse::<u32>().ok().map(|n| (n, p.decode)))
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
     }
@@ -1240,6 +1243,18 @@ impl<'a> Tuner<'a> {
         }
     }
 
+    /// Why the engine's model failed to load, when it did: the router's own
+    /// listing while it is still up, else the note the service's load guard
+    /// left when it stopped it.
+    fn load_failed(&self) -> Option<String> {
+        let endpoint = engine::Endpoint { port: self.port, ..engine::Endpoint::from_home(self.home) };
+        let failed = engine::failed_loads(&endpoint);
+        if !failed.is_empty() {
+            return Some(golem_core::router::stop_reason(&failed));
+        }
+        std::fs::read_to_string(paths::load_failure(self.home)).ok().map(|s| s.trim().to_string())
+    }
+
     /// Wait for the engine to answer `/health` with a success - a loading
     /// engine answers 503, and benching it then measures the load.
     fn wait_healthy(&self) -> bool {
@@ -1266,11 +1281,12 @@ impl<'a> Tuner<'a> {
     /// function, for callers that already know every verdict.
     fn pick_winner(&mut self) -> Result<Verdict, String> {
         let floor = self.opts.floor;
-        let ranked: Vec<usize> = tune::rank(&self.points.iter().map(Measured::point).collect::<Vec<_>>(), &floor);
+        let wall = self.machine.wall_mib(self.opts.headroom_mib);
         let points: Vec<Point> = self.points.iter().map(Measured::point).collect();
+        let ranked: Vec<usize> = tune::rank(&points, &floor, wall);
         self.emit(format_args!(""));
         self.emit(format_args!(
-            "  ranked (best decode that is not spilling; within {:.0}% of it, best prefill):",
+            "  ranked (best decode that fits and is not spilling; within {:.0}% of it, best prefill):",
             tune::DECODE_TIE * 100.0
         ));
         for &i in &ranked {
@@ -1284,18 +1300,27 @@ impl<'a> Tuner<'a> {
         // Say which points lost and why they are not in the ranking above:
         // an excluded setup that is simply absent reads as a bug.
         for (i, point) in points.iter().enumerate() {
-            if ranked.contains(&i) {
-                continue;
-            }
-            self.emit(format_args!(
-                "  {} {}: excluded - {:.1} t/s decode, {:.0} t/s prefill",
-                point.engine, point.label, point.decode, point.prefill
-            ));
+            let Some(why) = tune::excluded(&points, i, &floor, wall) else { continue };
+            let why = match why {
+                Exclusion::OverWall { vram_mib, wall_mib } => {
+                    format!("{vram_mib:.0} MiB is over the {wall_mib} MiB wall")
+                }
+                Exclusion::Spilling { prefill, engine_best } => {
+                    format!("spilling, {prefill:.0} t/s prefill against {engine_best:.0}")
+                }
+                Exclusion::BelowDecodeFloor { decode } => {
+                    format!("{decode:.1} t/s decode is under the {} floor", floor.decode)
+                }
+                Exclusion::BelowPrefillFloor { prefill } => {
+                    format!("{prefill:.0} t/s prefill is under the {} floor", floor.prefill)
+                }
+            };
+            self.emit(format_args!("  {} {}: excluded - {why}", point.engine, point.label));
         }
         if ranked.is_empty() {
             return Err(format!(
-                "every candidate was excluded (spilling, or under the floors decode >= {} / prefill >= {} t/s) - \
-                 lower them with --min-decode/--min-prefill",
+                "every candidate was excluded (over the {wall} MiB wall, spilling, or under the floors \
+                 decode >= {} / prefill >= {} t/s) - lower them with --min-decode/--min-prefill",
                 floor.decode, floor.prefill
             ));
         }
@@ -1335,7 +1360,20 @@ impl<'a> Tuner<'a> {
                 self.say_launcher_tail(GATE_LOG, 6);
                 continue;
             }
-            let Some(eval) = self.gate(&engine, &staged, gate_tokens) else {
+            let eval = self.gate(&engine, &staged, gate_tokens);
+            // A gate whose model did not load says nothing about the
+            // candidate's needle, and the next candidate loads the same way:
+            // the sweep loaded every point with mmap, the gate with the
+            // preset's own mode. Another load is another driver reset on
+            // Windows, so the run stops here and says why.
+            if let Some(why) = self.load_failed() {
+                return Err(format!(
+                    "the model did not load in its serving configuration for the gate ({why}); \
+                     every sweep point loaded with mmap, so the gate's load mode is the suspect - \
+                     nothing adopted"
+                ));
+            }
+            let Some(eval) = eval else {
                 self.emit(format_args!("  [WARN] the eval produced no result - trying the next candidate"));
                 continue;
             };
