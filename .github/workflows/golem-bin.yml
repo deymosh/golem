@@ -28,7 +28,7 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       # The app's window and tray on Linux: WebKitGTK, an appindicator and
       # libxdo (the tray menu). Windows and macOS use the system webview.
@@ -37,7 +37,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: golem-rs/target
           key: cargo-${{ runner.os }}-${{ hashFiles('golem-rs/**/Cargo.lock') }}
@@ -103,7 +103,7 @@ jobs:
     env:
       RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C target-feature=+crt-static' || '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -122,6 +122,6 @@ jobs:
           else
             cp "${src}" "${{ matrix.asset }}"
           fi
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: ${{ matrix.asset }}
