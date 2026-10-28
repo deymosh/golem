@@ -160,11 +160,15 @@ adapter and the preset, and spawns nothing - `golem up --dry-run` prints it.
   which reads zip) - the `tar` on PATH under Git for Windows is GNU tar and cannot.
   Releases only, on purpose: the pin is the artifact the 200K gate adopted, and a source
   build of today's upstream is a different binary.
-- **Router mode** (`MODELS_PRESET` set, adapter `router = true`): `--models-preset <file>
-  --models-max 1`, and the preset carries every per-model flag. A named preset that is not
-  on disk is refused - serving the single-model keys instead would load a different model.
-  **Single-model mode** builds the line from `MODEL_FILE`, `CONTEXT_SIZE`, `GPU_LAYERS`,
-  the cache types, `LOAD_MODE`, `SPEC_TYPE`, `DRAFT_FILE`, then `EXTRA_ARGS` verbatim.
+- **Router mode, always.** The models are a preset file (`MODELS_PRESET`, else the shipped
+  `config/models.ini`), and an adapter with `router = true` starts the server with
+  `--models-preset <file> --models-max 1`: the preset carries every per-model flag, and
+  golem.toml only the shared ones (host, port, key, threads, parallel, the sleep timer). A
+  preset that is not on disk is refused. An adapter without a router (`router = false`)
+  is started on the default section's flags, translated.
+- **The process name.** On Windows the server is started through a hard link beside it
+  named `Golem engine (<engine>).exe`, so the engine and the per-model processes a router
+  starts from its own path show as golem's in Task Manager.
 - **Models** the default section names (`; Download: <repo> -> <file>` comments) are
   fetched before the start; other sections' missing files are a warning naming
   `golem pull <section>`.

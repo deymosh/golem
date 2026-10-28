@@ -21,8 +21,8 @@ Linux / macOS / WSL2:
 ```bash
 export ANTHROPIC_BASE_URL="http://<golem-host>:8000"   # llama-server, Anthropic-native
 export ANTHROPIC_AUTH_TOKEN="<LOCAL_AI_API_KEY from golem.toml>"
-export ANTHROPIC_MODEL="local-model"                   # = MODEL_ALIAS
-export ANTHROPIC_SMALL_FAST_MODEL="local-model"
+export ANTHROPIC_MODEL="ornith-1.5-35b"                # = MODEL_ALIAS
+export ANTHROPIC_SMALL_FAST_MODEL="ornith-1.5-35b"
 claude
 ```
 
@@ -31,8 +31,8 @@ Windows PowerShell:
 ```powershell
 $env:ANTHROPIC_BASE_URL = "http://<golem-host>:8000"
 $env:ANTHROPIC_AUTH_TOKEN = "<LOCAL_AI_API_KEY from golem.toml>"
-$env:ANTHROPIC_MODEL = "local-model"
-$env:ANTHROPIC_SMALL_FAST_MODEL = "local-model"
+$env:ANTHROPIC_MODEL = "ornith-1.5-35b"
+$env:ANTHROPIC_SMALL_FAST_MODEL = "ornith-1.5-35b"
 claude
 ```
 

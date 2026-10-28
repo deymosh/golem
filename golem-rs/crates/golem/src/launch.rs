@@ -64,16 +64,6 @@ const HEALTH_INTERVAL: Duration = Duration::from_secs(3);
 /// those lines.
 const LOG_TAIL: usize = 15;
 
-/// The model an unconfigured `MODEL_FILE` falls back to - the same file
-/// `golem.toml.example` names.
-const DEFAULT_MODEL_FILE: &str = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
-
-/// One `KEY` from the configuration, or `default` when it is
-/// unset or empty: an empty assignment counts as unset.
-fn setting(home: &Path, key: &str, default: &str) -> String {
-    config::get(home, key).filter(|value| !value.is_empty()).unwrap_or_else(|| default.to_string())
-}
-
 /// `golem down`: stop the engine and wait for the memory.
 pub fn down(home: &Path, out: &mut dyn Write) -> i32 {
     let Some(pid) = engine::pid(home) else {
@@ -132,9 +122,8 @@ pub fn up(home: &Path, overrides: &Overrides, dry_run: bool, out: &mut dyn Write
     let mut plan = plan(home, overrides)?;
 
     // Said before a single model is started rather than a router, in a dry
-    // run too: it changes what the start means. Only the shape with a preset
-    // gets it - with no preset there is no section to name.
-    if plan.preset.is_some() && !plan.router {
+    // run too: it changes what the start means.
+    if !plan.router {
         let _ = writeln!(out, "[ .. ] {} has no router mode: serving only [{}]", plan.engine, plan.served);
     }
 
@@ -265,14 +254,7 @@ pub fn status(home: &Path, out: &mut dyn Write) -> i32 {
 /// below be tested without a 20 GB file.
 fn model_jobs(home: &Path, plan: &Startup, out: &mut dyn Write) -> Result<Vec<(String, String)>, String> {
     let models = home.join("data/models");
-    let Some(preset_rel) = &plan.preset else {
-        // No preset: golem.toml names the model, and `pull`'s no-argument
-        // list is what is fetched (`HF_REPO` + `MODEL_FILE`, plus the draft).
-        return Ok(pull::default_jobs(home)
-            .into_iter()
-            .filter(|(_, file)| !models.join(file).is_file())
-            .collect());
-    };
+    let preset_rel = &plan.preset;
     let path = home.join(preset_rel);
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -358,7 +340,7 @@ fn ensure_models(home: &Path, plan: &Startup, out: &mut dyn Write) -> Result<(),
 
 /// Spawn the server, record its pid, and wait for it to answer.
 fn start(home: &Path, plan: &Startup, endpoint: &engine::Endpoint, out: &mut dyn Write) -> Result<(), String> {
-    let mut command = Command::new(&plan.program);
+    let mut command = Command::new(engine_program(plan));
     command
         .args(&plan.args)
         .current_dir(&plan.workdir)
@@ -433,15 +415,15 @@ fn start(home: &Path, plan: &Startup, endpoint: &engine::Endpoint, out: &mut dyn
 
     // The closing line, one per mode: a router loads its
     // models on demand, so what is healthy is the router and not a model.
-    match &plan.preset {
-        Some(preset) => {
+    match plan.router {
+        true => {
             let _ = writeln!(
                 out,
-                "[ OK ] router healthy on http://{}:{} (presets: {preset}; models load on first request)",
-                plan.host, endpoint.port
+                "[ OK ] router healthy on http://{}:{} (presets: {}; models load on first request)",
+                plan.host, endpoint.port, plan.preset
             );
         }
-        None => {
+        false => {
             let _ = writeln!(
                 out,
                 "[ OK ] healthy on http://{}:{} (model: {})",
@@ -463,6 +445,30 @@ fn start(home: &Path, plan: &Startup, endpoint: &engine::Endpoint, out: &mut dyn
         }
     );
     Ok(())
+}
+
+/// What the engine is started as. On Windows, a hard link beside the
+/// server named for golem - `Golem engine (llama.cpp).exe` - so Task Manager
+/// lists the engine (and the model processes a router starts from its own
+/// path) as golem's rather than as a bare `llama-server`. The link is made
+/// afresh each start, so a reinstalled build never runs through a stale one,
+/// and where it cannot be made (another volume, a link held open by a
+/// running engine) the server itself is started.
+fn engine_program(plan: &Startup) -> PathBuf {
+    if !cfg!(windows) {
+        return plan.program.clone();
+    }
+    let link = plan.bin.join(engine_link_name(&plan.engine));
+    let _ = std::fs::remove_file(&link);
+    match std::fs::hard_link(&plan.program, &link) {
+        Ok(()) => link,
+        Err(_) => plan.program.clone(),
+    }
+}
+
+/// The engine's name in the process list, from the adapter's name.
+fn engine_link_name(engine: &str) -> String {
+    format!("Golem engine ({engine}){}", std::env::consts::EXE_SUFFIX)
 }
 
 /// Poll `/health` until it answers, until the child exits, or until the
@@ -634,7 +640,7 @@ pub struct Startup {
     pub host: String,
     /// The preset, in router mode: what the closing line names as the thing
     /// that was served. `None` means a single model, and `served` names it.
-    pub preset: Option<String>,
+    pub preset: String,
     /// Whether `--models-preset` is on the command line. The three shapes are
     /// distinguishable only here and in `preset`: a router serves every
     /// section, a single-model engine serves one section of a preset, and
@@ -712,26 +718,23 @@ pub fn plan(home: &Path, overrides: &Overrides) -> Result<Startup, String> {
         .unwrap_or_else(|| "local-model".to_string());
     let sleep_idle = config::get(home, "SLEEP_IDLE_SECONDS").unwrap_or_default();
 
-    // The preset decides the mode, and the adapter says whether the engine can
-    // read one at all: `router = true` means it understands `--models-preset`.
-    let preset_rel = overrides.get(home, "MODELS_PRESET")
-        .unwrap_or_default();
+    // The models are always a preset file, and the adapter says whether the
+    // engine can read one itself: `router = true` means it understands
+    // `--models-preset`; an engine without one is started on the default
+    // section's flags.
+    let preset_rel = config::models_preset(home, overrides);
     let preset_path = home.join(&preset_rel);
-    // A preset that is named but not there is a failure, not a fallback.
-    // Serving the single-model configuration instead would be serving a
-    // different model than the configuration names - and the eager load is
-    // gigabytes before anyone notices. A container with an unmounted volume
-    // is exactly how this happens (measured 2026-10-20: a 20 GB load in a
-    // container whose preset file was not mounted).
-    if !preset_rel.is_empty() && !preset_path.is_file() {
+    // A preset that is not there is a failure, not a fallback: a container
+    // whose preset volume was not mounted is exactly how this happens.
+    if !preset_path.is_file() {
         return Err(format!(
             "MODELS_PRESET names {} and there is no such file under {} - \
-             serving it would start a different model than the configuration asks for",
+             there is nothing to serve",
             preset_rel,
             home.display()
         ));
     }
-    let router = adapter.global("router").as_deref() != Some("false") && preset_path.is_file();
+    let router = adapter.global("router").as_deref() != Some("false");
 
     let mut flags: Vec<(String, String)> = vec![
         ("host".to_string(), host.clone()),
@@ -766,7 +769,7 @@ pub fn plan(home: &Path, overrides: &Overrides) -> Result<Startup, String> {
         flags.push(("models-max".to_string(), "1".to_string()));
         served = format!("router ({})", preset_path.strip_prefix(home).unwrap_or(&preset_path).display());
         workdir = home.join("data/models");
-    } else if preset_path.is_file() {
+    } else {
         let text = std::fs::read_to_string(&preset_path).unwrap_or_default();
         // A server with no model on it is refused here, naming the section
         // it wanted, rather than started and found empty at the first request.
@@ -795,56 +798,9 @@ pub fn plan(home: &Path, overrides: &Overrides) -> Result<Startup, String> {
         }
         served = alias.clone();
         workdir = home.join("data/models");
-    } else {
-        // No preset at all: golem.toml is the configuration, which is the
-        // shape a fresh clone has (`golem.toml.example` ships `MODELS_PRESET`
-        // commented out). The order below is behaviour - the last flag wins
-        // in llama.cpp.
-        let model_dir = home.join("data/models");
-        let model_file = setting(home, "MODEL_FILE", DEFAULT_MODEL_FILE);
-        flags.push((
-            "model".to_string(),
-            model_dir.join(&model_file).to_string_lossy().into_owned(),
-        ));
-        flags.push(("alias".to_string(), alias.clone()));
-        flags.push(("ctx-size".to_string(), setting(home, "CONTEXT_SIZE", "32768")));
-        flags.push(("n-gpu-layers".to_string(), setting(home, "GPU_LAYERS", "99")));
-        flags.push(("jinja".to_string(), "true".to_string()));
-        flags.push(("flash-attn".to_string(), "on".to_string()));
-        flags.push(("cache-type-k".to_string(), setting(home, "CACHE_TYPE_K", "q8_0")));
-        flags.push(("cache-type-v".to_string(), setting(home, "CACHE_TYPE_V", "q8_0")));
-        flags.push(("load-mode".to_string(), setting(home, "LOAD_MODE", "mlock")));
-        // Speculative decoding: an unset key contributes nothing at all
-        // rather than an empty flag.
-        if let Some(spec) = config::get(home, "SPEC_TYPE").filter(|v| !v.is_empty()) {
-            flags.push(("spec-type".to_string(), spec));
-        }
-        if let Some(draft) = config::get(home, "DRAFT_FILE").filter(|v| !v.is_empty()) {
-            flags.push((
-                "spec-draft-model".to_string(),
-                model_dir.join(&draft).to_string_lossy().into_owned(),
-            ));
-        }
-        // `served` is the file here and the alias when a preset chose the
-        // model; the closing banner prints it.
-        served = model_file;
-        workdir = model_dir;
     }
 
-    // `EXTRA_ARGS` are passed verbatim - they are already in the engine's own
-    // syntax, which is why the adapter never translates them - and only when
-    // there is no preset at all.
-    let extra: Vec<String> = if preset_path.is_file() {
-        Vec::new()
-    } else {
-        config::get(home, "EXTRA_ARGS")
-            .filter(|value| !value.is_empty())
-            .map(|value| value.split_whitespace().map(str::to_string).collect())
-            .unwrap_or_default()
-    };
-
-    let mut line = adapter::translate(&flags, &adapter);
-    line.args.extend(extra);
+    let line = adapter::translate(&flags, &adapter);
     Ok(Startup {
         program: bin.join(&server),
         args: line.args,
@@ -859,7 +815,7 @@ pub fn plan(home: &Path, overrides: &Overrides) -> Result<Startup, String> {
         bin,
         server,
         host,
-        preset: router.then(|| preset_rel.clone()),
+        preset: preset_rel.clone(),
         router,
         alias,
     })
@@ -1209,11 +1165,11 @@ mod tests {
             .with("MODEL_ALIAS", "model-b")
             .with("LOCAL_AI_HOST", "0.0.0.0");
         let candidate = plan(&dir, &overrides).expect("plan");
-        assert_eq!(candidate.preset.as_deref(), Some("config/other.ini"));
+        assert_eq!(candidate.preset, "config/other.ini");
         assert_eq!(candidate.alias, "model-b");
         assert_eq!(candidate.host, "0.0.0.0");
         let configured = plan(&dir, &Overrides::default()).expect("plan");
-        assert_eq!(configured.preset.as_deref(), Some("config/models.ini"));
+        assert_eq!(configured.preset, "config/models.ini");
         assert_eq!(configured.host, "127.0.0.1");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1237,7 +1193,7 @@ mod tests {
         let dir = up_home("plan-banner", "1");
         let plan = plan(&dir, &Overrides::default()).expect("plan");
         assert_eq!(plan.host, "127.0.0.1");
-        assert_eq!(plan.preset.as_deref(), Some("config/models.ini"));
+        assert_eq!(plan.preset, "config/models.ini");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1342,82 +1298,20 @@ mod tests {
         assert!(err.ends_with("d.gguf"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
-
     #[test]
-    fn without_a_preset_the_command_line_is_the_config_flag_set() {
-        // The shape a fresh clone has. golem.toml is the configuration here,
-        // and the order is behaviour, because the last flag wins.
-        let dir = engine_home(
-            "plan-env-flags",
-            "[model-a]\nmodel = a.gguf\n",
-            "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\nMODEL_FILE = \"m.gguf\"\n\
-             CONTEXT_SIZE = \"4096\"\nGPU_LAYERS = \"12\"\nCACHE_TYPE_K = \"q4_0\"\n\
-             LOAD_MODE = \"mmap\"\nSPEC_TYPE = \"draft-mtp\"\nDRAFT_FILE = \"d.gguf\"\n\
-             EXTRA_ARGS = \"--rope-freq-base 10000 --no-warmup\"\n",
-        );
-        let plan = plan(&dir, &Overrides::default()).expect("plan");
-        let models = dir.join("data/models");
-        let model = models.join("m.gguf").to_string_lossy().into_owned();
-        let draft = models.join("d.gguf").to_string_lossy().into_owned();
-
-        assert!(!plan.router);
-        assert_eq!(plan.served, "m.gguf", "a no-preset start names the file, not the alias");
-        // Everything from `--model` on: the shared flags come first and are
-        // covered by the router tests.
-        let at = plan.args.iter().position(|a| a == "--model").expect("--model");
-        assert_eq!(
-            plan.args[at..],
-            [
-                "--model", &model, "--alias", "local-model", "--ctx-size", "4096",
-                "--n-gpu-layers", "12", "--jinja", "--flash-attn", "on",
-                "--cache-type-k", "q4_0", "--cache-type-v", "q8_0", "--load-mode", "mmap",
-                "--spec-type", "draft-mtp", "--spec-draft-model", &draft,
-                // EXTRA_ARGS are verbatim, and last: the adapter never
-                // translates them, and they are appended as given.
-                "--rope-freq-base", "10000", "--no-warmup",
-            ]
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn an_unset_spec_or_draft_contributes_nothing_at_all() {
-        // Not an empty flag and not a default: llama.cpp would take
-        // `--spec-type ""` as a value.
-        let dir = engine_home(
-            "plan-env-bare",
-            "",
-            "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\nMODEL_FILE = \"m.gguf\"\n",
-        );
-        let plan = plan(&dir, &Overrides::default()).expect("plan");
-        assert!(!plan.args.iter().any(|a| a == "--spec-type"), "{:?}", plan.args);
-        assert!(!plan.args.iter().any(|a| a == "--spec-draft-model"), "{:?}", plan.args);
-        // The no-preset defaults: a 32K context and every layer on the GPU.
-        for (key, value) in [("--ctx-size", "32768"), ("--n-gpu-layers", "99")] {
-            let at = plan.args.iter().position(|a| a == key).unwrap_or_else(|| panic!("{key}"));
-            assert_eq!(plan.args[at + 1], value, "{key}");
-        }
-        // `load-mode`'s default goes through the adapter like any other flag:
-        // this fixture renames `mlock` to a bare `--mlock`, which is exactly
-        // what the map keys are for.
-        assert!(plan.args.contains(&"--mlock".to_string()), "{:?}", plan.args);
-        assert!(!plan.args.contains(&"--load-mode".to_string()), "{:?}", plan.args);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn with_no_preset_the_job_is_the_configured_models_own() {
-        // golem.toml names the model in this shape, so `pull`'s no-argument list
-        // is what is fetched - not a preset section's.
+    fn with_no_preset_named_the_shipped_presets_are_served() {
+        // MODELS_PRESET unset or empty resolves to config/models.ini, and the
+        // default section's downloads are the fetch list.
         let dir = engine_home(
             "jobs-none",
-            "[model-a]\nmodel = a.gguf\n",
-            "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\nMODEL_FILE = \"only.gguf\"\n",
+            "; Download: org/a -> only.gguf\n[model-a]\nmodel = only.gguf\n",
+            "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\nMODEL_ALIAS = \"model-a\"\n",
         );
         let resolved = plan(&dir, &Overrides::default()).expect("plan");
+        assert_eq!(resolved.preset, "config/models.ini");
         assert_eq!(
             model_jobs(&dir, &resolved, &mut std::io::sink()).expect("jobs"),
-            vec![("unsloth/Qwen3.6-35B-A3B-GGUF".to_string(), "only.gguf".to_string())]
+            vec![("org/a".to_string(), "only.gguf".to_string())]
         );
         // And the file being there takes it off the list.
         std::fs::create_dir_all(dir.join("data/models")).expect("models");
@@ -1444,7 +1338,7 @@ mod tests {
             bin: dir.join(".local/engines/fake/b0-cuda"),
             server: "fake.exe".to_string(),
             host: "127.0.0.1".to_string(),
-            preset: None,
+            preset: "config/models.ini".to_string(),
             router: false,
             alias: "fake".to_string(),
         }
@@ -1466,6 +1360,14 @@ mod tests {
         // The pid file was written before the wait and goes with the server.
         assert!(!dir.join(".local/llama-server.pid").exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_engine_is_named_for_golem() {
+        assert_eq!(
+            engine_link_name("llama.cpp"),
+            format!("Golem engine (llama.cpp){}", std::env::consts::EXE_SUFFIX)
+        );
     }
 
     #[test]

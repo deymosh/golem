@@ -236,12 +236,27 @@ pub fn send(home: &Path, verb: &str, overrides: &Overrides, out: &mut dyn Write)
 /// closed rather than inherited - its output goes to the client that asked for
 /// the work, not to whoever happened to start it.
 pub fn ensure_running(home: &Path, out: &mut dyn Write) -> Result<(), String> {
+    start(home, false, out)
+}
+
+/// [`ensure_running`], with the service started as this process's child.
+///
+/// For the Golem window: it holds no console and no pipe a service could
+/// inherit, and a service started under it (with the engine under that) is
+/// what lets Task Manager list the three as one app, Golem, rather than the
+/// engine as a program of its own. The service still outlives the window.
+pub fn ensure_running_as_child(home: &Path, out: &mut dyn Write) -> Result<(), String> {
+    start(home, true, out)
+}
+
+fn start(home: &Path, as_child: bool, out: &mut dyn Write) -> Result<(), String> {
     if running(home) {
         return Ok(());
     }
     let exe = std::env::current_exe()
         .map_err(|e| format!("cannot find this binary to start the service: {e}"))?;
-    let pid = match start_without_handles(&exe, home) {
+    let detached = if as_child { None } else { start_without_handles(&exe, home) };
+    let pid = match detached {
         Some(pid) => pid,
         None => spawn_command(&exe, home)
             .spawn()

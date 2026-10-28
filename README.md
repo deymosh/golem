@@ -22,11 +22,16 @@ plugs straight in.
   └───────────────────┘
 ```
 
-Default configuration: a **MoE model (35B total / 3B active)** served at **244K context** with
-most expert weights offloaded to system RAM and MTP speculative decoding — quality of a
-30B-class model on a 12 GB GPU at ~62 tok/s, with headroom for Claude Code's 200K window.
-Dense models that fit entirely in VRAM are a one-line swap. See
-[docs/models.md](docs/models.md) for measured numbers per setup.
+Two models out of the box, both holding Claude Code's **200K window** on a 12 GB GPU with
+32 GB of RAM, both reading images:
+
+- **The coder, `ornith-1.5-35b`** — a 35B mixture of experts (3B active) served at 248K
+  context, most experts in system RAM, MTP speculative decoding: ~63 tok/s.
+- **The everyday model, `ornith-1.5-9b`** — a dense 9B entirely on the card, served at
+  262K context: ~54 tok/s, and the desktop stays usable.
+
+Any other GGUF on Hugging Face is one `golem pull` away, and `golem tune` fits it to the
+machine. Measured numbers: [docs/models.md](docs/models.md).
 
 ---
 
@@ -102,7 +107,7 @@ commands.
 |---|---|
 | `setup` | Linux: machine report, build deps, directory scaffold, and on a desktop the app's libraries and applications-menu entry; Windows: the app's Start-menu and desktop shortcuts |
 | `install` | put the pinned engine build on this machine (~600 MB, no compiler needed) |
-| `pull [preset \| name \| owner/repo[:quant]]` | fetch a preset's files, a library model, or any GGUF repo on Hugging Face (picks the quant, writes the preset); with no argument `MODEL_FILE` from `HF_REPO` (`up` fetches anything missing itself) |
+| `pull [preset \| name \| owner/repo[:quant]]` | fetch a preset's files, a library model, or any GGUF repo on Hugging Face (picks the quant, writes the preset); with no argument the default model's files (`up` fetches anything missing itself) |
 | `up` / `down` / `restart` | start / stop / cycle the engine, through the service that owns it |
 | `status` | health of inference, and whether a service owns it |
 | `service [--up\|stop]` | run the engine owner, and the console it hosts, in the foreground (a container's PID 1), or stop it |
@@ -128,8 +133,8 @@ Code talks to it without any translation layer:
 ```bash
 export ANTHROPIC_BASE_URL="http://<golem-host>:8000"
 export ANTHROPIC_AUTH_TOKEN="<LOCAL_AI_API_KEY from golem.toml>"
-export ANTHROPIC_MODEL="local-model"
-export ANTHROPIC_SMALL_FAST_MODEL="local-model"
+export ANTHROPIC_MODEL="ornith-1.5-35b"             # = MODEL_ALIAS
+export ANTHROPIC_SMALL_FAST_MODEL="ornith-1.5-35b"
 claude
 ```
 
@@ -138,44 +143,32 @@ On the Golem machine itself: `golem claude` does all of this. See
 
 ### Anything OpenAI (OpenCode, Aider, scripts)
 
-Base URL `http://<golem-host>:8000/v1`, model `local-model`, Bearer = `LOCAL_AI_API_KEY`.
+Base URL `http://<golem-host>:8000/v1`, model `ornith-1.5-35b` (or `ornith-1.5-9b`),
+Bearer = `LOCAL_AI_API_KEY`.
 OpenCode and Aider have much smaller per-turn overheads than Claude Code (~6-10K tokens vs
 15-20K) — on a constrained context window that meaningfully increases the usable working
 context. See [docs/models.md](docs/models.md).
 
 ---
 
-## The model
+## The models
 
-Any GGUF that [llama.cpp](https://github.com/ggml-org/llama.cpp) can serve works. The default
-(`HF_REPO` / `MODEL_FILE` in `golem.toml`) is a MoE 35B/3B-active quant at 231K context with most
-experts in RAM (`--n-cpu-moe`), 2048-token ubatches for fast prefill and MTP speculative
-decoding (`SPEC_TYPE` / `DRAFT_FILE`); dense alternatives are listed in the same file and in
-[docs/models.md](docs/models.md).
+The engine always runs as a **router**: one endpoint, every model in the preset file, each
+loaded on its first request and swapped out when a client asks for another (one resident
+at a time). The request's `model` field picks the [config/models.ini](config/models.ini)
+section, which carries that model's own flags; `MODEL_ALIAS` in `golem.toml` is the one
+clients get when they name none.
 
-To swap: edit `HF_REPO` / `MODEL_FILE` in `golem.toml`, `golem pull`, `golem restart`, then
-`golem eval --long 200000` before trusting it.
-Keep `MODEL_ALIAS=local-model` so clients never change. VRAM math, memory regimes and measured
-benchmarks per setup: [docs/models.md](docs/models.md).
-
-### Several models, loaded on demand
-
-Set `MODELS_PRESET = "config/models.ini"` (or the tuned `data/tuned/models.effective.ini`) in `golem.toml` and llama-server runs as a **router**: one endpoint,
-several models, each loaded on its first request and swapped out when a client asks for another
-(one resident at a time). The request's `model` field picks the
-[config/models.ini](config/models.ini) section, which carries that model's own flags:
-
-| `model` | Use | Footprint (RTX 3060 12 GB) |
+| `model` | Use | On an RTX 3060 12 GB + 32 GB RAM |
 |---|---|---|
-| `ornith-1.5-35b` | Coding (Claude Code, OpenCode) — router default | ~11.3 GB VRAM + ~20 GB RAM, 244K ctx (tuned), ~62 tok/s |
-| `qwen3.6-35b-a3b` | Coding — previous default, fallback | 11.8 GB VRAM + ~20 GB RAM, 231K ctx, ~60 tok/s |
-| `qwen3.5-9b` | Everyday: summaries, curl/shell one-liners, quick questions, tool calls | ~6.6 GB VRAM, 64K ctx, ~49 tok/s, thinking off |
+| `ornith-1.5-35b` | Coding (Claude Code, OpenCode) — the default | ~11.2 GB VRAM + ~14 GB RAM, 248K ctx, ~63 tok/s, images |
+| `ornith-1.5-9b` | Everyday: summaries, shell one-liners, quick questions and code | ~11.2 GB VRAM, 262K ctx, ~54 tok/s, images |
 
-Set `MODEL_ALIAS` to the section clients should use by default. Add `SLEEP_IDLE_SECONDS` to
-unload the model after that long without requests, so the GPU and RAM are free between
-sessions; the next request reloads it (~27 s for the coder, a few seconds for the 9B once its
-file is cached). Speed is unchanged
-from single-model serving (measured: 62.6 tok/s decode, 840 tok/s prefill on the coder).
+To add one: `golem pull owner/repo[:quant]` writes its section, `golem tune <preset>
+--adopt` fits it to the machine and gates it at 200K. `SLEEP_IDLE_SECONDS` unloads the
+model after that long without requests, so the GPU and RAM are free between sessions; the
+next request reloads it (~27 s for the coder). VRAM math, memory regimes and measured
+benchmarks: [docs/models.md](docs/models.md).
 
 ---
 
@@ -214,7 +207,7 @@ plus the `golem.toml` it writes beside itself; a checkout builds it with
 
 | Symptom | Fix |
 |---|---|
-| `llama-server` exits / OOM | Lower `CONTEXT_SIZE` (KV ≈ 75 KB/token at q8_0) or use a smaller quant |
+| The engine exits / OOM on load | `golem tune <preset>` fits the split and context to the card; by hand, lower the section's `ctx-size` or raise `n-cpu-moe` |
 | MoE model slow or OOM under WSL2 | Give the WSL2 VM more RAM: `memory=24GB` in `%USERPROFILE%\.wslconfig` |
 | Claude Code still hits api.anthropic.com | Export the four `ANTHROPIC_*` vars (`golem env`); use `ANTHROPIC_AUTH_TOKEN`, not `ANTHROPIC_API_KEY` |
 | Slow first answer | Prompt cache is cold; prefill runs ~800 tok/s on a 12 GB GPU (Claude Code's ~27K first prompt ≈ 35 s) and caches after |

@@ -170,7 +170,7 @@ pub fn run(home: &Path) -> Result<(), String> {
     if wake_running(home) {
         return Ok(());
     }
-    service::ensure_running(home, &mut std::io::sink())?;
+    service::ensure_running_as_child(home, &mut std::io::sink())?;
     // `?app` tells the page it draws this window's title bar.
     let url = format!("{}?app", desktop::console_url(home));
 

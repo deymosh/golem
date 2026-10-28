@@ -160,44 +160,20 @@ fn a_section_the_alias_names_is_refused_rather_than_served_empty() {
 }
 
 #[test]
-fn no_preset_resolves_the_single_model_flag_set() {
-    // With no `MODELS_PRESET` the single-model keys of `golem.toml` are the
-    // configuration - `MODEL_FILE`, `CONTEXT_SIZE`, `GPU_LAYERS`, the cache
-    // types, `LOAD_MODE`, `SPEC_TYPE`, `DRAFT_FILE`, `EXTRA_ARGS` - and this is
-    // that list as a command line.
+fn with_no_preset_named_the_shipped_one_is_served() {
+    // `MODELS_PRESET` unset or empty resolves to config/models.ini: the
+    // engine always runs as a router.
     let dir = home("no-preset");
     std::fs::write(
         dir.join("golem.toml"),
-        "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\n\
-         LOCAL_AI_PORT = \"1\"\nMODEL_FILE = \"m.gguf\"\nCONTEXT_SIZE = \"4096\"\n\
-         GPU_LAYERS = \"12\"\nCACHE_TYPE_K = \"q4_0\"\nLOAD_MODE = \"mmap\"\n\
-         SPEC_TYPE = \"draft-mtp\"\nDRAFT_FILE = \"d.gguf\"\n\
-         EXTRA_ARGS = \"--rope-freq-base 10000\"\n",
+        "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\nLOCAL_AI_PORT = \"1\"\n",
     )
     .expect("config");
     let out = dry_run(&dir, &[]);
 
-    assert!(!out.contains("--models-preset"), "no preset means no router: {out}");
-    for flag in [
-        "--model ",
-        "--alias local-model",
-        "--ctx-size 4096",
-        "--n-gpu-layers 12",
-        "--jinja",
-        "--flash-attn on",
-        "--cache-type-k q4_0",
-        "--cache-type-v q8_0",
-        "--load-mode mmap",
-        "--spec-type draft-mtp",
-        "--spec-draft-model ",
-        // EXTRA_ARGS verbatim, and last.
-        "--rope-freq-base 10000",
-    ] {
-        assert!(out.contains(flag), "{flag} missing from {out}");
-    }
-    assert!(out.contains("m.gguf"), "the model is on the line: {out}");
-    assert!(out.contains("d.gguf"), "and so is the draft: {out}");
-    assert!(out.contains("serving: m.gguf"), "the file is what it serves: {out}");
+    assert!(out.contains("--models-preset"), "the shipped preset is served: {out}");
+    assert!(out.contains("config/models.ini"), "{out}");
+    // The single-model keys are not read for serving.
+    assert!(!out.contains("--rope-freq-base"), "{out}");
     std::fs::remove_dir_all(&dir).ok();
 }
-

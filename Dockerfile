@@ -58,18 +58,16 @@ COPY --from=build /src/golem-rs/target/release/golem /usr/local/bin/golem
 COPY engines/llama.cpp /golem/engines/llama.cpp
 COPY config /golem/config
 
-# The container's configuration: the template, with the four keys a
+# The container's configuration: the template, with the two keys a
 # container has to differ on. The engine binds 0.0.0.0 because the port is
-# published rather than loopback, the backend is a build decision rather
-# than a detection because no card exists at build time, and the preset
-# mode points the engine at the image's own presets. compose.yml mounts the
-# host's golem.toml over this; a bare `docker run` is served by it.
+# published rather than loopback, and the backend is a build decision rather
+# than a detection because no card exists at build time. The template
+# already serves the image's own presets. compose.yml mounts the host's
+# golem.toml over this; a bare `docker run` is served by it.
 COPY golem.toml.example /golem/golem.toml
 RUN sed -i \
       -e 's|^LOCAL_AI_HOST = "127.0.0.1"|LOCAL_AI_HOST = "0.0.0.0"|' \
       -e "s|^GPU_BACKEND = \"auto\"|GPU_BACKEND = \"$GPU_BACKEND\"|" \
-      -e 's|^#MODELS_PRESET = "config/models.ini"|MODELS_PRESET = "config/models.ini"|' \
-      -e 's|^MODEL_ALIAS = "local-model"|MODEL_ALIAS = "ornith-1.5-35b"|' \
       /golem/golem.toml \
     && grep -q '^MODELS_PRESET' /golem/golem.toml \
     && grep -q "^GPU_BACKEND = \"$GPU_BACKEND\"" /golem/golem.toml

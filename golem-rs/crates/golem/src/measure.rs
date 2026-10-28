@@ -152,8 +152,7 @@ fn resolved(home: &Path) -> (String, String, String) {
         .or_else(|| process_var("GOLEM_MODEL_ALIAS"))
         .or_else(|| config::get(home, "MODEL_ALIAS"))
         .unwrap_or_else(|| "local-model".to_string());
-    let preset_rel =
-        config::resolved(home, "MODELS_PRESET").unwrap_or_default();
+    let preset_rel = config::models_preset(home, &config::Overrides::from_env());
     (engine, model, preset_rel)
 }
 

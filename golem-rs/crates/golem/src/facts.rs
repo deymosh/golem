@@ -48,22 +48,24 @@ pub fn collect(
         .and_then(|body| props_string(body, "model_path"))
         .map(|path| basename(&path).to_string())
         .filter(|file| !file.is_empty())
-        .or_else(|| config::get(home, "MODEL_FILE"))
+        .or_else(|| {
+            preset_text(home, preset_rel)
+                .and_then(|text| golem_core::ini::parse(&text).value(model, "model").map(str::to_string))
+        })
         .unwrap_or_default();
 
     // The preset the run actually served, when it names a file that is there.
     let preset_text = preset_text(home, preset_rel);
-    let ctx: Option<u64> = preset_text
-        .as_deref()
-        .and_then(|text| record::ctx_of(text, model))
-        .or_else(|| env_parse(home, "CONTEXT_SIZE"));
+    let ctx: Option<u64> = preset_text.as_deref().and_then(|text| record::ctx_of(text, model));
     let threads: Option<u32> = preset_text
         .as_deref()
         .and_then(|text| record::threads_of(text, model))
         .or_else(|| env_parse(home, "CPU_THREADS"));
+    // A server golem does not start (LOCAL_AI_BASE_URL elsewhere) has no
+    // preset section, and no flags golem could know.
     let flags = match &preset_text {
         Some(text) => record::flags_of(text, model),
-        None => env_flags(home),
+        None => Vec::new(),
     };
 
     // The GGUF's own facts, when the file can be found under the home.
@@ -241,19 +243,6 @@ fn env_parse<T: std::str::FromStr>(home: &Path, key: &str) -> Option<T> {
     config::get(home, key).and_then(|value| value.parse().ok())
 }
 
-/// The single-model flags, from `golem.toml`: the context and the extra arguments.
-///
-/// The row gets `{"ctx-size": <CONTEXT_SIZE or null>, "extra": "..."}`: an
-/// absent `CONTEXT_SIZE` is the bare `null` and `extra` is quoted however
-/// numeric it looks - neither is the preset branch's numeric-or-quoted rule,
-/// and rows already recorded have this shape. That is what the two
-/// [`FlagValue`] variants are for.
-fn env_flags(home: &Path) -> Vec<Flag> {
-    let ctx = FlagValue::Number(config::get(home, "CONTEXT_SIZE").unwrap_or_default());
-    let extra = config::get(home, "EXTRA_ARGS").unwrap_or_default();
-    vec![("ctx-size".to_string(), ctx), ("extra".to_string(), FlagValue::Text(extra))]
-}
-
 /// The GGUF the run served, when it is under `data/models/`.
 fn model_path(home: &Path, model_file: &str) -> Option<PathBuf> {
     let path = paths::models_dir(home).join(model_file);
@@ -412,53 +401,6 @@ mod tests {
             machine::host_slug("NVIDIA GeForce RTX 4090", 24564, 64, "AMD Ryzen 9 5950X"),
             "rtx-4090_23g_64g_ryzen-9-5950x"
         );
-    }
-
-    #[test]
-    fn with_no_preset_the_flags_are_the_env_fallback() {
-        let dir = home("env-flags");
-        std::fs::write(
-            dir.join("golem.toml"),
-            "CONTEXT_SIZE=\"249344\"\nEXTRA_ARGS=\"-fa on --no-mmap\"\n",
-        )
-        .expect("write");
-        let flags = env_flags(&dir);
-        assert_eq!(
-            flags,
-            vec![
-                ("ctx-size".to_string(), FlagValue::Number("249344".to_string())),
-                ("extra".to_string(), FlagValue::Text("-fa on --no-mmap".to_string())),
-            ]
-        );
-        // And the row renders them as recorded rows have them: a bare
-        // number, a quoted string.
-        let facts = Facts { flags, ..Facts::default() };
-        let line = record::row(&facts, "RESULT decode_best=1\n").expect("record");
-        assert!(
-            line.contains(r#""flags": {"ctx-size": 249344, "extra": "-fa on --no-mmap"}"#),
-            "{line}"
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn the_env_fallback_keeps_the_keys_when_the_env_is_bare() {
-        let dir = home("env-flags-missing");
-        // Both keys are still there rather than absent: an unset
-        // `CONTEXT_SIZE` is a bare `null`, and `extra` is quoted even though
-        // it is empty.
-        let flags = env_flags(&dir);
-        assert_eq!(
-            flags,
-            vec![
-                ("ctx-size".to_string(), FlagValue::Number(String::new())),
-                ("extra".to_string(), FlagValue::Text(String::new())),
-            ]
-        );
-        let facts = Facts { flags, ..Facts::default() };
-        let line = record::row(&facts, "RESULT decode_best=1\n").expect("record");
-        assert!(line.contains(r#""flags": {"ctx-size": null, "extra": ""}"#), "{line}");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -41,6 +41,17 @@ pub fn set(home: &Path, key: &str, value: &str) -> std::io::Result<()> {
     std::fs::write(path, document.text())
 }
 
+/// The preset file the engine serves, relative to the home: the run's
+/// `MODELS_PRESET`, else golem.toml's, else the shipped `config/models.ini`.
+/// The engine always runs as a router over a preset file, so there is always
+/// one.
+pub fn models_preset(home: &Path, overrides: &Overrides) -> String {
+    overrides
+        .get(home, "MODELS_PRESET")
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| crate::paths::BASE_PRESET.to_string())
+}
+
 /// The keys a single run may point elsewhere: which engine, which preset
 /// file, which section of it, and which address the engine binds.
 pub const OVERRIDABLE: [&str; 4] = ["ENGINE", "MODELS_PRESET", "MODEL_ALIAS", "LOCAL_AI_HOST"];

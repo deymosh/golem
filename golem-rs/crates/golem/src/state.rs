@@ -17,7 +17,7 @@ use crate::paths;
 /// The preset file the engine serves from: `MODELS_PRESET`, or the
 /// repository's own `config/models.ini` when the configuration names none.
 pub fn preset_path(home: &Path) -> PathBuf {
-    home.join(config::get(home, "MODELS_PRESET").unwrap_or_else(|| paths::BASE_PRESET.to_string()))
+    home.join(config::models_preset(home, &config::Overrides::default()))
 }
 
 /// The preset sections, in file order, without the shared `[*]` one.

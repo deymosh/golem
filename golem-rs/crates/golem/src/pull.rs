@@ -5,10 +5,10 @@
 //! macOS this repository supports, so the binary needs no TLS or HTTP crate
 //! for an HTTPS-only host.
 //!
-//! Three shapes. With no argument it fetches what golem.toml names
-//! (`HF_REPO` + `MODEL_FILE`, plus `DRAFT_FILE`). With a preset name it walks
-//! the preset file's `; Download:` comments and fetches the files of that one
-//! section that `data/models` is missing; a library name that is not a
+//! Three shapes. With a preset name - or none, which is the default model
+//! (`MODEL_ALIAS`) - it walks the preset file's `; Download:` comments and
+//! fetches the files of that one section that `data/models` is missing; a
+//! library name that is not a
 //! preset yet is pulled from its repository. With a repository it asks the Hub
 //! what is there, picks the quant this machine can hold (or the one named),
 //! fetches it with its vision projector, and writes the preset section - the
@@ -38,10 +38,6 @@ const FLOOR_FALLBACK: u64 = 1;
 
 /// How often a download in a job's log says how far it has got.
 const PROGRESS_EVERY: Duration = Duration::from_secs(2);
-
-/// The model fetched when golem.toml names none.
-const DEFAULT_REPO: &str = "unsloth/Qwen3.6-35B-A3B-GGUF";
-const DEFAULT_MODEL: &str = "Qwen3.6-35B-A3B-UD-Q3_K_M.gguf";
 
 /// `golem pull [preset | owner/repo[:quant]]`.
 pub fn run(home: &Path, args: &[String]) -> i32 {
@@ -88,7 +84,7 @@ fn is_preset(home: &Path, name: &str) -> bool {
         .is_ok_and(|doc| doc.preset_names().iter().any(|n| n == name))
 }
 
-/// The preset, library model or repository to pull, or `None` for the golem.toml model. More
+/// The preset, library model or repository to pull, or `None` for the default model. More
 /// than one argument (or a flag) is a usage error.
 fn parse_args(args: &[String]) -> Result<Option<String>, String> {
     match args {
@@ -124,10 +120,10 @@ fn run_inner(home: &Path, preset: Option<&str>, log: &mut Log) -> Result<(), Str
 
     let token = config::get(home, "HF_TOKEN");
 
-    let jobs = match preset {
-        Some(name) => preset_jobs(home, name)?,
-        None => default_jobs(home),
-    };
+    // No name is the default model: the section clients get when they name
+    // none.
+    let alias = config::get(home, "MODEL_ALIAS").unwrap_or_default();
+    let jobs = preset_jobs(home, preset.unwrap_or(&alias))?;
 
     for (repo, file) in &jobs {
         hf_get(log, &models_dir, repo, file, token.as_deref())?;
@@ -343,36 +339,12 @@ pub fn fetch_all(home: &Path, jobs: &[(String, String)], out: &mut dyn Write) ->
     Ok(())
 }
 
-/// The `(repo, file)` pairs `pull` fetches with no argument.
-///
-/// Public because `up` fetches the same pair when there is no preset:
-/// golem.toml names the model there, and the launcher's model section reads
-/// this list.
-///
-/// The draft comes first, and only when `DRAFT_FILE` is
-/// set; its repo is `DRAFT_HF_REPO` when that is set, otherwise the model's.
-pub fn default_jobs(home: &Path) -> Vec<(String, String)> {
-    let repo = config::get(home, "HF_REPO").unwrap_or_else(|| DEFAULT_REPO.to_string());
-    let model = config::get(home, "MODEL_FILE").unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    let mut jobs = Vec::new();
-    if let Some(draft) = config::get(home, "DRAFT_FILE").filter(|f| !f.is_empty()) {
-        let draft_repo = config::get(home, "DRAFT_HF_REPO")
-            .filter(|r| !r.is_empty())
-            .unwrap_or_else(|| repo.clone());
-        jobs.push((draft_repo, draft));
-    }
-    jobs.push((repo, model));
-    jobs
-}
-
 /// The `(repo, file)` pairs for one preset section that `data/models` lacks.
 ///
-/// Router mode only: the preset file is `MODELS_PRESET`, and a section with no
-/// `; Download:` comment at all is an error that names the section.
+/// The preset file is the served one ([`config::models_preset`]), and a
+/// section with no `; Download:` comment at all is an error that names it.
 fn preset_jobs(home: &Path, name: &str) -> Result<Vec<(String, String)>, String> {
-    let preset = config::get(home, "MODELS_PRESET")
-        .filter(|p| !p.is_empty())
-        .ok_or("pull <preset> needs router mode (MODELS_PRESET in golem.toml)")?;
+    let preset = config::models_preset(home, &config::Overrides::default());
     let text = std::fs::read_to_string(home.join(&preset))
         .map_err(|e| format!("cannot read {preset}: {e}"))?;
 
@@ -843,47 +815,6 @@ model = tiny.gguf
     }
 
     #[test]
-    fn the_default_jobs_are_the_env_model_and_its_draft() {
-        let dir = home("jobs");
-        std::fs::write(
-            dir.join("golem.toml"),
-            "HF_REPO=\"org/model-GGUF\"\nMODEL_FILE=\"model.gguf\"\nDRAFT_FILE=\"draft.gguf\"\n",
-        )
-        .expect("write");
-        assert_eq!(
-            default_jobs(&dir),
-            vec![
-                ("org/model-GGUF".to_string(), "draft.gguf".to_string()),
-                ("org/model-GGUF".to_string(), "model.gguf".to_string()),
-            ]
-        );
-
-        // DRAFT_HF_REPO redirects the draft only.
-        std::fs::write(
-            dir.join("golem.toml"),
-            "HF_REPO=\"org/model-GGUF\"\nMODEL_FILE=\"model.gguf\"\n\
-             DRAFT_FILE=\"draft.gguf\"\nDRAFT_HF_REPO=\"other/draft-GGUF\"\n",
-        )
-        .expect("write");
-        assert_eq!(
-            default_jobs(&dir),
-            vec![
-                ("other/draft-GGUF".to_string(), "draft.gguf".to_string()),
-                ("org/model-GGUF".to_string(), "model.gguf".to_string()),
-            ]
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn no_draft_file_means_one_job() {
-        let dir = home("no-draft");
-        std::fs::write(dir.join("golem.toml"), "HF_REPO=\"org/m\"\nMODEL_FILE=\"m.gguf\"\n").expect("write");
-        assert_eq!(default_jobs(&dir), vec![("org/m".to_string(), "m.gguf".to_string())]);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn preset_jobs_are_the_sections_missing_files() {
         let dir = home("preset");
         std::fs::create_dir_all(dir.join("data/models")).expect("mkdir");
@@ -910,11 +841,12 @@ model = tiny.gguf
     }
 
     #[test]
-    fn a_preset_pull_needs_router_mode() {
+    fn with_no_preset_named_the_shipped_one_is_read() {
         let dir = home("no-preset");
         std::fs::write(dir.join("golem.toml"), "").expect("write");
+        // No config/models.ini either: the error names the file it read.
         let err = preset_jobs(&dir, "a").unwrap_err();
-        assert!(err.contains("MODELS_PRESET"), "{err}");
+        assert!(err.contains("config/models.ini"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

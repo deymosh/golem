@@ -1,37 +1,44 @@
 # Choosing and swapping the model
 
-## Default model
+## The two presets
 
-**Qwen3.6-35B-A3B (UD-Q4_K_M)** — `unsloth/Qwen3.6-35B-A3B-GGUF`
-**+ MTP draft head** — `bartowski/Qwen_Qwen3.6-35B-A3B-GGUF` / `mtp-Qwen_Qwen3.6-35B-A3B-Q4_0.gguf`
+Golem serves two models from one router ([config/models.ini](../config/models.ini)), and
+both hold Claude Code's 200K window on a 12 GB card with 32 GB of RAM:
 
-Served at **236544 context** (231K: Claude Code's 200K + slack), `--n-cpu-moe 36` (experts
-of the first 36 of 40 layers in system RAM, the rest + attention + KV on GPU), `-b/-ub 2048`
-(prefill batching), `--spec-type draft-mtp` with the standalone MTP head, 16 CPU threads,
-`--load-mode mlock`, PARALLEL=1, KV q8_0. The unsloth GGUF has no MTP layers; bartowski's
-separate 1.2 GB head loads next to it via `DRAFT_FILE`.
+| Preset | Role | File | Served | Decode | Prefill (8K) | 200K gate | At depth |
+|---|---|---|---|---|---|---|---|
+| **`ornith-1.5-35b`** | coder, the default | Q4_K_M, 21.7 GB, MTP head inside | n-cpu-moe 35, ctx 248832, MTP | 63.5 t/s | 846 | **PASS**, 666 t/s | 34.7 t/s |
+| **`ornith-1.5-9b`** | everyday | Q4_K_M, 5.6 GB, all on the card | ctx 262144, MTP off | 54.3 t/s | 1647 | **PASS**, 937 t/s | 22.3 t/s |
 
-Why Q4_K_M: at ~5.1 bits/weight it is the best quant that fits a 12 GB card, and under MTP
-it decodes as fast as the Q3 quants — the only cost is long-prompt prefill (~35% slower).
+Both read images: the vision projector runs on the CPU (`no-mmproj-offload`), so it costs
+RAM rather than the VRAM the context is sized from, and the eval's picture step passes on
+both ("what colour is the circle" - "Red"). Measured 2026-10-28 on llama.cpp b11379,
+quiet desktop; the coder's split and context are its 2026-10-25 tune, re-gated with the
+projector.
 
-Why a MoE of this class is the sensible default on a 12 GB VRAM / 32 GB RAM box:
+**The coder** is Ornith-1.5-35B-A3B (MIT): a Qwen3.5-MoE skeleton (256 experts, 8 per
+token, 40 layers, 30 linear-attention + 10 full), continued pretraining and
+self-improvement RL. Vendor scores: SWE-bench Verified 79, SWE-bench Pro 59.6,
+Terminal-Bench 2.1 67.8. Most experts stay in system RAM and the card holds attention, the
+remaining experts and the KV cache, which is what leaves room for 248832 tokens.
 
-- 256K native context — served at 231K, Claude Code (assumes 200K) never overflows and
-  auto-compacts.
-- MoE 35B total / 3B active: quality of a 30B-class model at offloaded speeds.
-- Valid OpenAI tool-calls through `--jinja` (verified: name, args, finish_reason).
-- VRAM stays nearly flat as the context grows → headroom for compute buffers.
+**The everyday model** is Ornith-1.5-9B (MIT, dense, Qwen3.5-based), vendor SWE-bench
+Verified 70.6 against Qwen3.5-9B's 53.2 - the model that held this slot until 2026-10-28,
+and which it also beats on speed (54.3 against 52.1 t/s) at the same 262144 context. Its
+GGUF carries an MTP head, and MTP is faster still, but on this card it cannot hold the
+200K gate, so the tuner passes it over ([tuning.md](tuning.md)):
 
-Measured numbers: [Benchmarks by setup](#benchmarks-by-setup) below.
+| Ornith-1.5-9B Q4_K_M | Context | Decode | VRAM | |
+|---|---|---|---|---|
+| MTP on | 209920 (largest under the wall) | 76.4 t/s | 11263 MiB | 189K gate only |
+| MTP on, q4_0 draft cache | 223232 | 75.4 t/s | 11916 MiB | over the 11264 MiB wall |
+| **MTP off** | **262144** | **54.3 t/s** | 11217 MiB | **200K PASS** |
 
-### Router default: Ornith-1.5-35B-A3B (Q4_K_M)
+MTP's draft keeps a KV cache of its own, about 5 KB per token beside the model's ~21.6,
+plus ~0.4 GB of buffers; a q4_0 draft cache halves the per-token part and still does not
+fit.
 
-In router mode (`MODELS_PRESET`) the coder is **Ornith-1.5-35B-A3B** —
-`ornith-ai/Ornith-1.5-35B-A3B-GGUF` / `Ornith-1.5-35B-Q4_K_M.gguf`, preset
-`[ornith-1.5-35b]`. Same `qwen35moe` architecture and footprint as Qwen3.6 (so the same
-tuning applies unchanged), MIT, continued pretraining + self-improvement RL; the vendor
-reports SWE-V 79 vs 73.4, SWE-Pro 59.6 vs 49.5, Terminal-Bench 67.8 vs 52.5. The GGUF
-embeds a trained MTP head (`blk.40.nextn.*`), so `draft-mtp` needs no separate draft file.
+### How the coder was chosen
 
 Adoption gate, 2026-10-19, b11379 Windows native, quiet desktop, paired same session:
 
@@ -41,94 +48,65 @@ Adoption gate, 2026-10-19, b11379 Windows native, quiet desktop, paired same ses
 | **`ornith-1.5-35b`** (official Q4_K_M, 21.7 GB) | **59.5 / 59.3 t/s** | 66% | **832 t/s** | **11.0 GB** | **PASS**, 626 t/s prefill | 30.6 t/s |
 | `ornith-1.5-35b-mtp` (mudler APEX-MTP-Compact, 17.4 GB) | 39.4 / 39.2 t/s | 32% | 1135 t/s | 11.0 GB | PASS, 735 t/s prefill | 21.3 t/s |
 
-Ornith matches Qwen3.6 on speed with 0.8 GB more VRAM headroom (further from the ~11.8 GB
-sysmem-fallback cliff) and better vendor coding scores → adopted. The APEX quant passes the
-gate but its bundled MTP head is weak (32% acceptance) and costs a third of decode; its
-only win is prefill (less of the model in RAM). Qwen3.6 stays in `config/models.ini` as
-the fallback and remains the single-model default below.
-
-**Tuned 2026-10-20** (`golem tune ornith-1.5-35b --adopt`, both engines swept): the
-preset's hand-tuned `n-cpu-moe 36` at 236544 ctx was not the best this card can do. The
-sweep found **`n-cpu-moe 35`** and the context ladder grew it to **249344** - 262144 did
-not fit and the midpoint probe did - for **62.8 t/s decode and 878 t/s prefill** against
-59.5 / 835, with the 200K needle passing at 35.8 t/s at depth. `golem.toml` now names
-`ENGINE = "llama.cpp"` and `MODELS_PRESET = "data/tuned/models.effective.ini"`, so the
-served flags are the overlay in `data/tuned/<host>/`, and `config/models.ini` stays the
-seed.
-The sweep also shows why the split has to be measured: `ub1024` decoded at 62.3 t/s but
-prefilled at 560 against its own engine's 878 - the sysmem cliff, caught by the prefill
-collapse rather than by a VRAM number.
+Ornith matches Qwen3.6 on speed with 0.8 GB more VRAM headroom and better vendor coding
+scores. The APEX quant passes the gate but its bundled MTP head is weak (32% acceptance)
+and costs a third of decode. The tuner then moved the split from the hand-set
+`n-cpu-moe 36` to 35 and the context to 248832.
 
 ### Every preset, re-tuned 2026-10-25
 
 `golem tune <preset>` for each, one at a time, on llama.cpp b11379, quiet desktop, wall
 11264 MiB. Decode and prefill are the tuner's (median of three, 8K prompt); the gate is
 the needle at 90% of the tuned context, capped at 200000 tokens. The rows are in
-`bench/results.jsonl`, tagged with the round.
+`bench/results.jsonl`, tagged with the round. All but the two presets above (and the
+0.5B smoke-test model) have since left `config/models.ini`; `golem pull <name>` brings
+back one the library lists.
 
 | Preset | Split | Context | Decode | Prefill | VRAM | Gate | Needle prefill | At depth |
 |---|---|---|---|---|---|---|---|---|
 | **`ornith-1.5-35b`** | n-cpu-moe 35 | 248832 | 63.5 t/s | 846 | 11249 MiB | 200K PASS | 671 t/s | 35.9 t/s |
 | `qwen3.6-35b-a3b` | n-cpu-moe 37 | 253952 | 60.8 t/s | 493 | 11246 MiB | 200K PASS | 655 t/s | 36.8 t/s |
 | `nemotron-3.5-lightning-30b` | n-cpu-moe 41 | 344064 | 44.7 t/s | 930 | 11262 MiB | 200K PASS | 1134 t/s | 22.6 t/s |
-| **`qwen3.5-9b`** | all on the card | 258048 | 52.1 t/s | 1659 | 11250 MiB | 200K PASS | 941 t/s | 21.9 t/s |
-| `ornith-1.5-9b` | all on the card | 156672 | 42.3 t/s | 1540 | 11257 MiB | 141K PASS | 1039 t/s | 23.8 t/s |
+| `qwen3.5-9b` | all on the card | 258048 | 52.1 t/s | 1659 | 11250 MiB | 200K PASS | 941 t/s | 21.9 t/s |
+| `ornith-1.5-9b` (Q6_K) | all on the card | 156672 | 42.3 t/s | 1540 | 11257 MiB | 141K PASS | 1039 t/s | 23.8 t/s |
 | `gemma-4-12b-it-qat-q4_0` | all on the card | 262144 | 40.0 t/s | 1244 | 10674 MiB | 200K PASS | 476 t/s | 19.5 t/s |
 | `qwen2.5-0.5b-instruct` | all on the card | 32768 | 340.1 t/s | 19452 | 1286 MiB | 29K PASS | 11395 t/s | 179.3 t/s |
 
-Reading:
-
-- The coder stays Ornith-1.5-35B: the fastest decode, and prefill well ahead of Qwen3.6,
-  which only matches it at depth.
-- The everyday slot stays Qwen3.5-9B. Its tuned context grew from the preset's 65536 to
-  258048 - a dense 9B at Q4 holds far more than the ~100K the memory math below assumed.
-  Ornith-1.5-9B at Q6_K fills the card at 156672, so it cannot be gated at 200K here.
-- Nemotron's hand-set preset (`n-cpu-moe 30`) spilled, which is where its old 25 t/s came
-  from; at the tuned split it is a real long-context option, the only one past 262144.
-- llama.cpp b11879 was tuned the same night and is not adopted
-  ([engines-and-models.md](engines-and-models.md#builds)).
+Ornith-1.5-9B at Q6_K fills the card at 156672 tokens; at Q4_K_M (above) it holds 262144.
+Nemotron's hand-set preset (`n-cpu-moe 30`) spilled, which is where its old 25 t/s came
+from; at the tuned split it is the only model here past 262144.
 
 ## How golem picks a model
 
-Two keys in `golem.toml` name it, and `golem pull` (or the `up` that finds it missing)
-fetches exactly those:
-
-```toml
-HF_REPO = "unsloth/Qwen3.6-35B-A3B-GGUF"
-MODEL_FILE = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
-```
-
-The engine serves `data/models/MODEL_FILE` and advertises it under `MODEL_ALIAS`. Extra
-llama-server flags go in `EXTRA_ARGS` (e.g. `--cpu-moe`, `--n-cpu-moe N`, `--mmproj ...`);
-in router mode the preset file carries a section's own flags instead.
-
-**Keep `MODEL_ALIAS` constant** (`local-model`) across swaps: clients keep working untouched.
+The engine is a router over a preset file - `MODELS_PRESET`, the shipped
+`config/models.ini` unless a tune adopted `data/tuned/models.effective.ini` - and each
+section is one model with its own flags. A request's `model` field picks the section;
+`MODEL_ALIAS` in `golem.toml` is the section clients get by default, and the name
+`golem claude` and `golem env` hand them. `golem up` fetches the default section's files
+(its `; Download:` lines) when they are missing.
 
 ## Swapping
 
-1. Pick a GGUF on Hugging Face (`unsloth`, `bartowski`, `lmstudio-community` publish per-quant files).
-2. Set `HF_REPO`, `MODEL_FILE` and `EXTRA_ARGS` in `golem.toml` (MoE → `--cpu-moe`; dense →
-   empty). For MTP: `SPEC_TYPE = "draft-mtp"`, plus `DRAFT_HF_REPO` / `DRAFT_FILE` if the MTP
-   head is a separate file (leave `DRAFT_FILE` empty when the model GGUF embeds it);
-   `SPEC_TYPE = ""` disables it.
-3. `golem pull`
-4. `golem restart`
-5. `golem eval --long 200000` (quality gate) and `golem bench` (speed)
+1. `golem pull owner/repo[:quant]` (or a name from `config/library.ini`): golem asks the
+   Hub, picks the quant this machine can hold, switches on the MTP head when the file has
+   one, and writes the preset section.
+2. `golem tune <preset> --adopt`: the split, the context and the gate, written as this
+   machine's overlay.
+3. `MODEL_ALIAS = "<preset>"` in `golem.toml` to make it the default; clients that name a
+   model pick any section without it.
 
 ## Memory math, two regimes
 
-**Dense models (all in VRAM)** — OS/display overhead (~1.5 GB on a desktop GPU) leaves
-~10.5 GB usable on a 12 GB card. Weights + KV (q8, virtual growth) must fit, and how far
-the context goes depends on the attention as much as the weights: Qwen3.5-9B at Q4
-(5.6 GB, hybrid attention) holds 258048 tokens, Ornith-1.5-9B at Q6_K (7.0 GB) 156672.
+**Dense models (all in VRAM)** - OS/display overhead (~0.5-1.5 GB on a desktop GPU) leaves
+~10.5 GB usable on a 12 GB card. Weights + KV (q8) must fit, and how far the context goes
+depends on the attention as much as the weights: Qwen3.5-9B and Ornith-1.5-9B at Q4
+(5.6 GB, hybrid attention) hold 262144 tokens, Ornith-1.5-9B at Q6_K (7.0 GB) 156672.
 
-**MoE models (the default setup)** — `--cpu-moe` keeps expert FFN weights in system RAM.
-(Under Docker Desktop the WSL2 VM needs that headroom too: `memory=24GB` in
-`%USERPROFILE%\.wslconfig`.) VRAM then holds only attention + dense parts + KV, so 25-35B
-models fit and 256K context fits too. `--n-cpu-moe N` keeps only the first N layers' experts
-in RAM and puts the remaining layers' experts on the GPU — lower N = faster, more VRAM. `--load-mode mlock` reads the whole model into
-locked RAM at boot (best over bind mounts, notably Docker Desktop/WSL2 on Windows;
-`--no-mmap` no longer exists — it is `--load-mode` now: auto | mmap | mlock | mmap+mlock).
+**MoE models** - `n-cpu-moe N` keeps the first N layers' experts in system RAM and puts
+the rest on the GPU - lower N is faster and takes more VRAM. VRAM then holds attention,
+the dense parts, the remaining experts and the KV cache, so 25-35B models fit with a 256K
+context. `load-mode = mlock` pins the whole model into RAM at start (on llama.cpp b11879
+and later, `mmap+mlock`); a sweep loads with mmap so a 32 GB box survives the restarts.
 
 ---
 
@@ -312,19 +290,3 @@ the native install and the container image both use - and a bump is
 `golem eval --long 200000` passes. Currently b11379, adopted 2026-10-03 (the
 Windows build of b11149 also passes; that regression is Linux-build-specific).
 
-## Candidates and research
-
-The wider landscape — engines and models checked against this box's constraints — lives
-in [engines-and-models.md](engines-and-models.md) (updated on each research pass). The
-short version: nothing measured beats the current defaults in their class. Ornith-1.5-9B
-and Gemma 4 12B QAT were tuned and gated for the everyday slot on 2026-10-25 and neither
-beats Qwen3.5-9B; llama.cpp b11879 does not beat b11379.
-
-## Client pairing
-
-- **Claude Code** (200K assumed): needs a server ctx ≥ 200K — the default coder serves 248832.
-  `golem env` prints the exports.
-- **OpenCode** (context declared per model in `opencode.json` via
-  `limit: { context, output }`, auto-compact honours it): pair it with the Gemma 12B
-  profile (`MODEL_FILE="gemma-4-12b-it-IQ4_NL.gguf"`, `EXTRA_ARGS=""`,
-  `CONTEXT_SIZE="196608"`), declaring `limit.context: 196608`.

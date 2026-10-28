@@ -40,13 +40,12 @@ The other reasons to run natively:
 
 Nothing to set up on a fresh machine. `golem up` writes `golem.toml` beside the binary from
 the compiled-in template if it is not there, installs the pinned llama.cpp build, and then
-fetches every model file the configuration references and `data/models/` lacks —
-`MODEL_FILE` / `DRAFT_FILE`, or in router mode the files listed in the `; Download: <repo> ->
-<file>` comments above the default section (`MODEL_ALIAS`; see
+fetches the files the default model needs and `data/models/` lacks — the ones listed in
+the `; Download: <repo> -> <file>` comments above the default section (`MODEL_ALIAS`; see
 [config/models.ini](../config/models.ini)). Other presets only print a warning when missing —
 fetch one with `golem pull <preset>`. Downloads go straight to Hugging Face's resolve
-endpoint with `curl`, resume across interrupted runs, and the default coder plus its draft
-head are ~22 GB. After that, `up` only fetches what is missing.
+endpoint with `curl`, resume across interrupted runs, and the default coder with its
+vision projector is ~22.6 GB. After that, `up` only fetches what is missing.
 
 ## Engines and pinned builds
 
@@ -126,8 +125,10 @@ or drop a shortcut to `golem.exe service --up` in `shell:startup`.
 ## Notes
 
 - **mlock on Windows** maps to `VirtualLock`, subject to working set limits: with the whole
-  model pinned you may see lock warnings in the log. `LOAD_MODE = "auto"` in `golem.toml`
-  degrades gracefully (pages trim and re-read from disk) if that bothers you.
+  model pinned you may see lock warnings in the log. `load-mode = auto` in a preset section
+  degrades gracefully (pages trim and re-read from disk) if that bothers you. llama.cpp
+  b11879 and b11936 cannot load under `mlock` at all; `mmap+mlock` pins the same way and
+  loads ([engines-and-models.md](engines-and-models.md#builds)).
 - The server writes its own log (`--log-file logs\llama-server.log`), and the binary starts it
   with its stdout and stderr closed rather than inherited — a child that inherits the caller's
   pipes hangs anything reading `golem up`'s output.
