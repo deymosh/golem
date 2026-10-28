@@ -4,12 +4,14 @@
 //! machine ([`crate::gpu`] has no I/O of its own); this decides what the
 //! answers mean.
 
-/// The card's maker, read from its PCI vendor ID.
+/// The card's maker, read from its PCI vendor ID - or Apple, whose GPU is
+/// part of the chip and has no PCI ID to read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Vendor {
     Nvidia,
     Amd,
     Intel,
+    Apple,
 }
 
 /// The vendor for a PCI ID: a Windows `MatchingDeviceId`
@@ -32,13 +34,67 @@ pub fn vendor(pci_id: &str) -> Option<Vendor> {
 }
 
 /// The backend the card's vendor can serve: CUDA for NVIDIA, ROCm for AMD,
-/// Vulkan for Intel.
+/// Vulkan for Intel, Metal for Apple.
 pub fn backend(vendor: Vendor) -> &'static str {
     match vendor {
         Vendor::Nvidia => "cuda",
         Vendor::Amd => "rocm",
         Vendor::Intel => "vulkan",
+        Vendor::Apple => "metal",
     }
+}
+
+// ---------------------------------------------------------------
+// Apple silicon
+// ---------------------------------------------------------------
+//
+// The GPU shares the machine's memory, so "the card" is the share of it
+// Metal lets one process keep resident: `recommendedMaxWorkingSetSize`, the
+// number llama.cpp's Metal backend itself plans against. The machine asks
+// Metal for it; these turn the answers into the card's size and its use.
+
+/// The Metal probe's output, `<device name>\t<recommendedMaxWorkingSetSize
+/// bytes>`: the name and the budget in MiB. `None` for anything else.
+pub fn parse_metal(text: &str) -> Option<(String, u64)> {
+    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let (name, bytes) = line.split_once('\t')?;
+    let bytes: u64 = bytes.trim().parse().ok()?;
+    let name = name.trim();
+    (!name.is_empty() && bytes > 0).then(|| (name.to_string(), bytes / 1_048_576))
+}
+
+/// The share of `memsize_bytes` Metal may use, in MiB, when Metal itself
+/// cannot be asked: `iogpu.wired_limit_mb` when it is set (non-zero, the
+/// sysctl that raises the limit), else macOS's default - two thirds of the
+/// memory up to 32 GiB, three quarters above.
+pub fn apple_budget_mib(memsize_bytes: u64, wired_limit_mb: Option<u64>) -> u64 {
+    if let Some(limit) = wired_limit_mb.filter(|&mb| mb > 0) {
+        return limit;
+    }
+    let mib = memsize_bytes / 1_048_576;
+    if mib > 32 * 1024 {
+        mib / 4 * 3
+    } else {
+        mib / 3 * 2
+    }
+}
+
+/// The GPU's memory in use, in MiB, from `ioreg -r -d 1 -w 0 -c
+/// IOAccelerator`: each accelerator's `PerformanceStatistics` carries `"In
+/// use system memory"=<bytes>`, and the largest is the machine's answer.
+pub fn parse_ioreg_in_use(text: &str) -> Option<u64> {
+    const KEY: &str = "\"In use system memory\"=";
+    let mut best: Option<u64> = None;
+    let mut rest = text;
+    while let Some(at) = rest.find(KEY) {
+        rest = &rest[at + KEY.len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(bytes) = digits.parse::<u64>() {
+            let mib = bytes / 1_048_576;
+            best = Some(best.map_or(mib, |old| old.max(mib)));
+        }
+    }
+    best
 }
 
 /// One adapter a reading found: what it is and how much VRAM it has. An
@@ -162,6 +218,37 @@ mod tests {
         assert_eq!(backend(Vendor::Nvidia), "cuda");
         assert_eq!(backend(Vendor::Amd), "rocm");
         assert_eq!(backend(Vendor::Intel), "vulkan");
+        assert_eq!(backend(Vendor::Apple), "metal");
+    }
+
+    #[test]
+    fn metal_names_the_device_and_its_working_set() {
+        assert_eq!(
+            parse_metal("Apple M2 Pro\t22906503168\n"),
+            Some(("Apple M2 Pro".to_string(), 21845))
+        );
+        assert_eq!(parse_metal("\n"), None);
+        assert_eq!(parse_metal("Apple M2 Pro\t0"), None, "a zero budget is no reading");
+        assert_eq!(parse_metal("Error: something"), None);
+    }
+
+    #[test]
+    fn without_metal_the_budget_is_the_sysctl_or_the_default_share() {
+        let gib = 1024 * 1_048_576u64;
+        assert_eq!(apple_budget_mib(32 * gib, Some(28_000)), 28_000, "a raised limit wins");
+        assert_eq!(apple_budget_mib(32 * gib, Some(0)), 21_844, "0 means the default");
+        assert_eq!(apple_budget_mib(16 * gib, None), 10_922);
+        assert_eq!(apple_budget_mib(64 * gib, None), 49_152);
+    }
+
+    #[test]
+    fn ioreg_gives_the_gpu_memory_in_use() {
+        let text = "+-o AGXAcceleratorG14X  <class AGXAcceleratorG14X, id 0x100000253>\n    {\n      \
+                    \"PerformanceStatistics\" = {\"In use system memory (driver)\"=0,\
+                    \"Alloc system memory\"=3221225472,\"In use system memory\"=1073741824,\
+                    \"Device Utilization %\"=3}\n    }\n";
+        assert_eq!(parse_ioreg_in_use(text), Some(1024));
+        assert_eq!(parse_ioreg_in_use("no accelerator here"), None);
     }
 
     #[test]

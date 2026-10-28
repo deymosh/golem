@@ -304,7 +304,7 @@ impl Machine {
         // every decision of the sweep is a fraction of its VRAM.
         let Some(gpu) = machine::gpu().filter(|g| g.total_mib > 0) else {
             return Err("auto-tune needs the card's VRAM, read from nvidia-smi, the Windows \
-                        registry or amdgpu's sysfs, and none answered"
+                        registry, amdgpu's sysfs or Metal, and none answered"
                 .into());
         };
         Ok(Machine {

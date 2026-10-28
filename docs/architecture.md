@@ -158,7 +158,9 @@ adapter and the preset, and spawns nothing - `golem up --dry-run` prints it.
   `router`) and the flag translation (`flag.*`, `map.*`) from the canonical llama.cpp
   names. The platform is detected, never configured; `GPU_BACKEND = "auto"` reads the
   card's PCI vendor (`nvidia-smi`, else the Windows registry or Linux sysfs, through
-  `machine`): NVIDIA is `cuda`, AMD `rocm`, Intel `vulkan`.
+  `machine`): NVIDIA is `cuda`, AMD `rocm`, Intel `vulkan`, and macOS is `metal`. On
+  Apple Silicon the card `machine` reports is the share of the shared memory Metal may
+  keep resident.
 - **Install** (`release.rs`) downloads the matching archives with `curl` and extracts them
   into `.local/engines/<name>/<build>-<backend>/`, writing a `BUILD` marker only when every
   archive extracted. On Windows the extractor is `%SystemRoot%\System32\tar.exe` (bsdtar,

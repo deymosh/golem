@@ -5,7 +5,8 @@
 //! `None` (or `unknown` / `0`) when the tool is not there, because a missing
 //! fact is not a reason to fail the command that wanted it. The card is read
 //! vendor-neutrally: nvidia-smi when it is there, one PowerShell probe over
-//! the Windows registry and GPU counters otherwise, amdgpu's sysfs on Linux.
+//! the Windows registry and GPU counters otherwise, amdgpu's sysfs on Linux,
+//! and on macOS the share of the shared memory Metal may use.
 //! Two traps are handled here once, for every caller: MSYS's `/proc` files
 //! exist on Windows but are stubs, and PowerShell prints numbers in the
 //! machine's locale - `19,2` on this box - which `f64::from_str` rejects.
@@ -55,7 +56,59 @@ pub fn gpu() -> Option<Gpu> {
             used_mib: reading.used_mib.unwrap_or(0),
         });
     }
+    if cfg!(target_os = "macos") {
+        return apple_gpu();
+    }
     sysfs_gpu()
+}
+
+/// The Metal probe: JavaScript for Automation, which every macOS ships, asks
+/// Metal for the default device's name and `recommendedMaxWorkingSetSize`
+/// through the Objective-C bridge - no compiler and no crate.
+const METAL_SCRIPT: &str = "ObjC.import('Metal'); var d = $.MTLCreateSystemDefaultDevice(); \
+d.name.js + '\\t' + d.recommendedMaxWorkingSetSize";
+
+/// Apple silicon's GPU: the memory is shared, so the card is the share Metal
+/// may keep resident - asked of Metal, else worked out from the machine's
+/// memory and `iogpu.wired_limit_mb` - and its use is what the accelerator
+/// reports in use.
+fn apple_gpu() -> Option<Gpu> {
+    let (name, total_mib) = match stdout("osascript", &["-l", "JavaScript", "-e", METAL_SCRIPT])
+        .and_then(|text| gpu::parse_metal(&text))
+    {
+        Some(reading) => reading,
+        None => {
+            let memsize = sysctl("hw.memsize")?.parse().ok()?;
+            let limit = sysctl("iogpu.wired_limit_mb").and_then(|v| v.parse().ok());
+            let name = sysctl("machdep.cpu.brand_string").unwrap_or_else(|| "Apple GPU".to_string());
+            (name, gpu::apple_budget_mib(memsize, limit))
+        }
+    };
+    Some(Gpu { name, vendor: gpu::Vendor::Apple, total_mib, used_mib: apple_used_mib().unwrap_or(0) })
+}
+
+/// The Apple GPU's memory in use, from the accelerator's own statistics.
+fn apple_used_mib() -> Option<u64> {
+    stdout("ioreg", &["-r", "-d", "1", "-w", "0", "-c", "IOAccelerator"])
+        .and_then(|text| gpu::parse_ioreg_in_use(&text))
+}
+
+/// One `sysctl -n` value, trimmed.
+fn sysctl(name: &str) -> Option<String> {
+    let text = stdout("sysctl", &["-n", name])?;
+    let value = text.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// A program's stdout when it succeeds.
+fn stdout(program: &str, args: &[&str]) -> Option<String> {
+    let out = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// The whole card's VRAM in use, in MiB.
@@ -71,6 +124,9 @@ pub fn vram_used_mib() -> Option<u64> {
     if cfg!(windows) {
         let text = powershell_stdout(WINDOWS_USED_SCRIPT)?;
         return gpu::parse_windows(&text).used_mib;
+    }
+    if cfg!(target_os = "macos") {
+        return apple_used_mib();
     }
     sysfs_gpu().map(|g| g.used_mib)
 }
@@ -131,6 +187,7 @@ fn sysfs_gpu() -> Option<Gpu> {
                 gpu::Vendor::Nvidia => "NVIDIA",
                 gpu::Vendor::Amd => "AMD",
                 gpu::Vendor::Intel => "Intel",
+                gpu::Vendor::Apple => "Apple",
             };
             format!("{prefix} GPU {device}")
         });
@@ -313,6 +370,17 @@ mod tests {
             "rtx-3060_12g_32g_i7-12700kf"
         );
         assert_eq!(host_slug("unknown", 0, 32, ""), "unknown_0g_32g_");
+    }
+
+    #[test]
+    fn a_mac_always_reads_a_card() {
+        // Metal, or the machine's memory when Metal cannot be asked: either
+        // way a Mac has a card with a size, which is what `tune` needs.
+        if cfg!(target_os = "macos") {
+            let card = gpu();
+            eprintln!("macOS card: {card:?} (metal probe: {:?})", stdout("osascript", &["-l", "JavaScript", "-e", METAL_SCRIPT]));
+            assert!(card.is_some_and(|c| c.total_mib > 0 && c.vendor == gpu::Vendor::Apple));
+        }
     }
 
     #[test]
