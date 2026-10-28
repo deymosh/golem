@@ -18,7 +18,7 @@ eliminates most of the field:
 |---|---|---|---|
 | **llama.cpp** b11379 | yes | yes | **the default**: router mode, MTP, CPU expert offload |
 | ik_llama.cpp main-b5483 | no | yes | **rejected, measured**: 16.7 t/s against 58.1 on the same model and flags; its adapter stays for paired measurements and the tuner never adopts it |
-| Strata 0.2.6 | yes | its own packs | **passes the 200K gate, measured** with the Qwen3.8-Flash-Next Coder (below); not adopted: half llama.cpp's decode, and golem does not install or start it (v0.1.45 refused 200K) |
+| Strata 0.2.6 | yes | its own packs | **passes the 200K gate, measured** with the Qwen3.8-Flash-Next Coder (below); not adopted: half llama.cpp's decode, and golem does not install or start it (v0.1.45 refused 200K; 0.2.7 not yet measured) |
 | vLLM, SGLang, TensorRT-LLM, LMDeploy, TGI | no | partial | datacenter engines, Linux-first, no single-GPU expert offload |
 | Ollama, LM Studio, TabbyAPI, llamafile | no | yes | wrappers or front-ends; OpenAI clients only |
 
@@ -67,6 +67,11 @@ haystack was sized by the characters-per-token estimate (the engine has no `/tok
 so the needle was ~201.5K tokens; and it leaves ~90 GB on disk with its packed expert
 file. The packs were removed after the run; the installed terminal and engine stay.
 
+**Strata 0.2.7** (2026-10-27, engine 0.1.52) adds a routing prior for cards of 13 GiB or
+less - its notes claim +15% decode on a story prompt and +37% on code for a 3060 - and a fixed API
+port. Not measured here: it needs the Coder pack again (~64.5 GB), so it waits for the
+disk and a free desktop, and is measured the same way as 0.2.6.
+
 **ik_llama.cpp** loses on every axis here: its `--fit` fills the card to 12.0 GB (the
 sysmem cliff), `-rtr` repacking crashes at start-up, `mlock` of its 17.7 GB buffer fails,
 and it has no `/v1/messages`, no router and no idle unload.
@@ -77,8 +82,7 @@ Builds are not interchangeable, so the pin is gated like a model. b11149's *Linu
 answered the 200K needle wrong twice while every other test passed. **b11755** (measured
 2026-10-20) passes the gate and prefills +31% (1143 vs 871 t/s at 30K, 787 vs 672 at
 200K) but decodes slower at depth (31.0 vs 35.2 t/s, MTP acceptance 57% vs 72%) - and
-decode at depth is what a long session pays on every token, so b11379 stays. b11755 stays
-installed for a paired retest. A bump is `ENGINE_BUILD = "b<new>"`, `golem restart`, the
+decode at depth is what a long session pays on every token, so b11379 stays. A bump is `ENGINE_BUILD = "b<new>"`, `golem restart`, the
 eval, and only then the adapter's `build`.
 
 **b11879** (2026-10-25, the latest) is not adopted, on two counts measured the same night
@@ -114,8 +118,8 @@ session:
 
 and its gate: 200K **PASS**, 707 t/s needle prefill (b11379: 671), 35.2 t/s at depth
 (35.9). Prefill gains ~7%, decode loses 4-10% with a weaker MTP acceptance, so b11379 stays.
-The next build to try is run under `mmap+mlock`; b11936 stays installed for Flint (below),
-which needs b11803 or later.
+The next build to try is run under `mmap+mlock` (the `measure` skill's build trial); only
+the pinned b11379 stays installed.
 
 ### Using another server
 
@@ -138,21 +142,27 @@ base URL is refused: the client has no TLS.
 
 ### The coder slot (≈30-35B total, ≈3B active, MoE, 200K context)
 
-Measured and in `config/models.ini` (numbers in [models.md](models.md); the tuned values
-are from the 2026-10-25 re-tune on b11379):
+Measured here (numbers in [models.md](models.md); the tuned values are from the
+2026-10-25 re-tune on b11379). Only the coder ships as a preset in `config/models.ini`;
+`qwen3.6-35b-a3b` is a `golem pull` away through the library, and the rest were deleted
+from disk once measured:
 
 - **`ornith-1.5-35b`** - the default since 2026-10-19 (vendor SWE-V 79); tuned to
-  n-cpu-moe 35 at 248832 tokens, 63.5 t/s decode, 200K needle at 35.9 t/s at depth.
-- `qwen3.6-35b-a3b` - the previous default and the fallback; n-cpu-moe 37 at 253952,
-  60.8 t/s, 200K at 36.8 at depth, but its prefill is about half Ornith's (493 against 846
-  on the tuner's 8K prompt).
+  n-cpu-moe 35 at 248832 tokens, 63.5 t/s decode; re-gated with its vision projector on
+  2026-10-28, 200K needle at 666 t/s and 34.7 t/s at depth.
+- `qwen3.6-35b-a3b` - the previous default; n-cpu-moe 37 at 253952, 60.8 t/s, 200K at
+  36.8 at depth, but its prefill is about half Ornith's (493 against 846 on the tuner's 8K
+  prompt).
+- `flint` (Recursive, 39.8B-A2.5B MoE, UD-Q3_K_XL; vendor SWE-V 74.2) - tuned on b11936
+  on 2026-10-28: 52.9 t/s decode, but its context stops at 88064 tokens under the wall on
+  this card and both gate attempts failed the needle. Rejected.
 - `ornith-1.5-35b-mtp` (APEX-MTP-Compact) - passes the gate, but its bundled head accepts
   32% and decode falls to 39 t/s. Rejected.
 - `nemotron-3.5-lightning-30b` - no MTP; vendor SWE-V 52. Tuned to n-cpu-moe 41 at 344064
   tokens (its trained context is past 262144): 44.7 t/s decode, 930 prefill, and the
   fastest 200K needle measured here (1134 t/s), but 22.6 t/s at depth. The earlier 25.3
   t/s and 149 prefill came from the preset's hand-set `n-cpu-moe 30`, which spills: the
-  tune measured n38 already over the wall. The long-context fallback.
+  tune measured n38 already over the wall. Not kept: the coder holds 200K faster at depth.
 
 Not viable on 12 GB + 32 GB: GLM-5.2 (755 GB), Kimi K3 (1.56 TB), DeepSeek V4 Flash
 (156 GB), Qwen3-Coder-Next 80B (IQ2 only), Kimi-Linear 48B (needs 64 GB), Muse Glimmer 30B
@@ -161,24 +171,23 @@ generation, skipped: Qwen3-Coder-30B-A3B, Devstral-Small-2-24B.
 
 ### The everyday slot (fits in VRAM, the desktop stays usable)
 
-`qwen3.5-9b` is the assistant preset, and it keeps the slot. The two candidates were
-tuned and gated beside it on 2026-10-25 (b11379, quiet desktop, one at a time):
+**`ornith-1.5-9b`** at Q4_K_M holds the slot since 2026-10-28. The candidates, tuned and
+gated on b11379 on a quiet desktop, one at a time:
 
 | Preset | File | Context | Decode | Prefill (8K) | Gate | At depth |
 |---|---|---|---|---|---|---|
-| **`qwen3.5-9b`** | UD-Q4_K_XL, 5.6 GB | 258048 | **52.1 t/s** | **1659** | 200K **PASS**, 941 t/s | 21.9 t/s |
-| `ornith-1.5-9b` | Q6_K, 7.0 GB | 156672 | 42.3 t/s | 1540 | 141K PASS, 1039 t/s | 23.8 t/s |
-| `gemma-4-12b-it-qat-q4_0` | QAT Q4_0, 6.5 GB | 262144 | 40.0 t/s | 1244 | 200K **PASS**, 476 t/s | 19.5 t/s |
+| **`ornith-1.5-9b`** (2026-10-28) | Q4_K_M, 5.6 GB, MTP off | 262144 | **54.3 t/s** | 1647 | 200K **PASS**, 937 t/s | 22.3 t/s |
+| `qwen3.5-9b` (2026-10-25) | UD-Q4_K_XL, 5.6 GB | 258048 | 52.1 t/s | 1659 | 200K **PASS**, 941 t/s | 21.9 t/s |
+| `ornith-1.5-9b` Q6_K (2026-10-25) | Q6_K, 7.0 GB | 156672 | 42.3 t/s | 1540 | 141K PASS, 1039 t/s | 23.8 t/s |
+| `gemma-4-12b-it-qat-q4_0` (2026-10-25) | QAT Q4_0, 6.5 GB | 262144 | 40.0 t/s | 1244 | 200K **PASS**, 476 t/s | 19.5 t/s |
 
-- **Ornith-1.5-9B** (dense, Qwen3.5-based; vendor SWE-V 70.6, GPQA 86.4) is 19% slower
-  and its Q6_K leaves room for 156672 tokens, so its gate could only ask for 141K: it
-  cannot clear the 200K gate on this card at this quant.
+- **Ornith-1.5-9B** (dense, Qwen3.5-based; vendor SWE-V 70.6 against Qwen3.5-9B's 53.2)
+  wins on speed and on the vendor scores once its quant leaves room for the context: the
+  Q6_K stops at 156672 tokens, the Q4_K_M holds the trained 262144. Its MTP head decodes
+  76-78 t/s, but the draft's own KV cache caps the context at 209920 tokens, short of the
+  200K gate's 223232, so the tuner serves it with MTP off ([models.md](models.md)).
 - **Gemma 4 12B QAT** holds its whole 256K context and passes 200K, but decodes 23% and
   prefills 25% slower than Qwen3.5-9B, and its needle prefill is half.
-
-Neither beats the incumbent on anything golem measures. The vendor scores favour Ornith
-on coding; a smaller quant that reaches 200K, or a side-by-side on real tasks, is what
-would change the verdict.
 
 ### Watch
 
