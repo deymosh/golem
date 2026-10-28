@@ -75,6 +75,14 @@ pub mod mark;
 /// serves, and the reading the Windows GPU probe left.
 pub mod gpu;
 
+/// SHA-256, streamed: the check `golem update` runs a downloaded release
+/// against.
+pub mod sha256;
+
+/// Golem's own updates, decided: release tags and assets, the releases
+/// answer, and the state file that remembers what was checked and skipped.
+pub mod update;
+
 /// The schema version this build understands (bumped on breaking changes
 /// to a row's fields; old rows keep parsing).
 pub const SCHEMA_VERSION: u32 = 1;
