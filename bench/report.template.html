@@ -59,6 +59,7 @@ button, select, input { font: inherit; color: inherit; }
 .brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .brand svg { width: 22px; height: 22px; flex: none; }
 .brand span { font: 600 14px/1 var(--display); letter-spacing: .01em; }
+.brand small { font: 12px/1 var(--code); color: var(--soft); }
 .tabs { display: flex; gap: 2px; padding: 4px; background: var(--ground); border-radius: 8px; }
 .tabs a { padding: 5px 14px; border-radius: 6px; color: var(--soft); text-decoration: none; font-size: 13px; }
 .tabs a:hover { color: var(--ink); }
@@ -209,7 +210,7 @@ tr.classrow td { color: var(--soft); font-size: 12px; font-weight: 600; padding-
 </head>
 <body>
 <header class="bar" id="bar">
-  <div class="brand"><svg id="mark" viewBox="0 0 64 68" role="img" aria-label="Golem"></svg><span>Golem</span></div>
+  <div class="brand"><svg id="mark" viewBox="0 0 64 68" role="img" aria-label="Golem"></svg><span>Golem</span><small id="c-version" title="The running Golem version"></small></div>
   <nav class="tabs" aria-label="Sections">
     <a href="#models" data-tab="models" hidden>Models</a>
     <a href="#chat" data-tab="chat" hidden>Chat</a>
@@ -684,6 +685,7 @@ function renderModels(models, state) {
 }
 
 function renderState(s) {
+  if (s.version) $("c-version").textContent = "v" + s.version;
   const busy = s.job_running;
   jobRunning = !!busy;
   $("c-state").className = "state " + (busy ? "busy" : s.up ? "up" : "");

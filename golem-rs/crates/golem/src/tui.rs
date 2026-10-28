@@ -743,7 +743,10 @@ fn header(app: &App, width: usize) -> Vec<Line<'static>> {
     let [mark_top, mark_bottom] = mark_lines(spark);
     let mark_width = mark::GRID[0].len();
     let mut first: Vec<(String, Style)> =
-        vec![(" GOLEM".to_string(), Style::default().add_modifier(Modifier::BOLD))];
+        vec![
+            (" GOLEM".to_string(), Style::default().add_modifier(Modifier::BOLD)),
+            (format!(" v{}", env!("CARGO_PKG_VERSION")), dim()),
+        ];
     first.push(if facts.up {
         ("   \u{25cf} serving".to_string(), Style::default().fg(SERVING))
     } else {

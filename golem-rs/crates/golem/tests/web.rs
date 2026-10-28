@@ -321,6 +321,8 @@ fn state_reports_what_the_page_shows() {
     // though every other field is right.
     assert!(response.contains("\"engines\": ["), "{response}");
     assert!(response.contains("\"job_tail\": "), "{response}");
+    // The page names the running version beside the brand.
+    assert!(response.contains(&format!("\"version\": \"{}\"", env!("CARGO_PKG_VERSION"))), "{response}");
 }
 
 #[test]
