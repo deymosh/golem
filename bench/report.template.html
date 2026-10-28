@@ -123,7 +123,16 @@ select, input[type=text] { background: var(--raised); border: 1px solid var(--ha
 .msg { margin: 0; padding: 8px 14px; border-top: 1px solid var(--hair); font-size: 13px; color: var(--soft); }
 .msg.bad { color: var(--bad); }
 pre.log { margin: 0; padding: 12px 14px; font: 12px/1.55 var(--code); color: var(--soft); white-space: pre-wrap; overflow-y: auto; }
-#c-log { border-top: 1px solid var(--hair); max-height: 240px; }
+#c-log { border-top: 1px solid var(--hair); max-height: 420px; }
+/* One job-log line. The clock stamp dims; the === strips stand apart; a
+   verdict tag takes the colour the badges use. */
+#c-log .jl { min-height: 18px; }
+#c-log .jt { color: color-mix(in srgb, var(--soft) 55%, transparent); }
+#c-log .jf { color: var(--ink); font-weight: 600; background: color-mix(in srgb, var(--patina) 10%, transparent);
+  margin: 2px -14px; padding: 0 14px; }
+#c-log .ok { color: var(--ok); }
+#c-log .warn { color: var(--busy); }
+#c-log .bad { color: var(--bad); }
 .progress { padding: 10px 14px 12px; border-top: 1px solid var(--hair); }
 .progress .head { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--soft); font-variant-numeric: tabular-nums; }
 .progress .head b { color: var(--ink); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -665,8 +674,30 @@ function renderState(s) {
   }
   const log = $("c-log");
   log.hidden = !s.job_tail;
-  if (s.job_tail) { log.textContent = s.job_tail; log.scrollTop = log.scrollHeight; }
+  if (s.job_tail) renderJobLog(log, s.job_tail);
   document.querySelectorAll("#control .btn, #pull-form .btn").forEach((b) => { b.disabled = !!busy; });
+}
+
+// The job pane, one div per line: the clock stamp dimmed, the === strips
+// bold, a verdict tag coloured. Rebuilt only when the text changed - the
+// page polls several times a second - and the reader's scroll position
+// stays unless they were already at the bottom, where new lines follow.
+let jobLogShown = null;
+function renderJobLog(pre, text) {
+  if (text === jobLogShown) return;
+  jobLogShown = text;
+  const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+  pre.innerHTML = text.split("\n").map((line) => {
+    const stamp = line.match(/^\d\d:\d\d:\d\d /)?.[0] || "";
+    const body = line.slice(stamp.length);
+    const cls = /^=== .* ===$/.test(body) ? " jf"
+      : body.startsWith("[ OK ]") ? " ok"
+      : body.startsWith("[WARN]") ? " warn"
+      : body.startsWith("[FAIL]") ? " bad" : "";
+    const rest = cls === " jf" ? body.replace(/^=== | ===$/g, "") : body;
+    return `<div class="jl${cls}">${stamp ? `<span class="jt">${esc(stamp)}</span>` : ""}${esc(rest)}</div>`;
+  }).join("");
+  if (atEnd) pre.scrollTop = pre.scrollHeight;
 }
 
 async function pollLive() {
