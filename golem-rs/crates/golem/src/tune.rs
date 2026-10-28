@@ -300,16 +300,13 @@ pub struct Machine {
 impl Machine {
     /// What the card, the OS and the CPU say.
     pub fn probe() -> Result<Machine, String> {
-        let Some(gpu) = machine::gpu() else {
+        // A card whose size nothing reported is as good as no card here:
+        // every decision of the sweep is a fraction of its VRAM.
+        let Some(gpu) = machine::gpu().filter(|g| g.total_mib > 0) else {
             return Err("auto-tune needs the card's VRAM, read from nvidia-smi, the Windows \
-                        GPU counters or amdgpu's sysfs, and none answered"
+                        registry or amdgpu's sysfs, and none answered"
                 .into());
         };
-        if gpu.total_mib == 0 {
-            return Err("auto-tune needs the card's VRAM, read from nvidia-smi, the Windows \
-                        GPU counters or amdgpu's sysfs, and none answered"
-                .into());
-        }
         Ok(Machine {
             gpu: gpu.name,
             vram_total_mib: gpu.total_mib,
