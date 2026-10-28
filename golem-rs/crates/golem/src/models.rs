@@ -71,7 +71,9 @@ pub fn list(home: &Path) -> Vec<Model> {
                 .or_else(|| section.downloads.first().map(|d| d.name().to_string()))
                 .unwrap_or_default();
             let path = models_dir.join(&file);
-            let present = !file.is_empty() && path.is_file();
+            // A preset is hand-editable: a `model` that is not a plain file
+            // name is not read, whatever it points at.
+            let present = golem_core::hub::safe_name(&file) && path.is_file();
             // Only a file that is here can be read; a header that will not
             // parse (a download in progress, a foreign file) is not an error
             // the table should show - it is simply a model with no facts.

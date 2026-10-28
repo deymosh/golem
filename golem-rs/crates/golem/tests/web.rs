@@ -25,6 +25,12 @@ fn inlines_records_the_way_the_page_expects() {
 }
 
 #[test]
+fn a_line_cut_short_is_left_out_rather_than_breaking_the_array() {
+    let raw = "{\"a\": 1}\n{\"b\": 2, \"c\"\n";
+    assert_eq!(inline_records(raw), "[{\"a\": 1}]");
+}
+
+#[test]
 fn an_empty_file_inlines_as_an_empty_array() {
     assert_eq!(inline_records(""), "[]");
 }
@@ -271,6 +277,25 @@ fn post(addr: SocketAddr, path: &str, body: &str) -> String {
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).expect("read response");
     String::from_utf8_lossy(&raw).into_owned()
+}
+
+#[test]
+fn another_site_cannot_post_through_the_browser() {
+    let (_dir, cfg) = fixture("cross-site");
+    let addr = spawn(router(cfg));
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).expect("read timeout");
+    let body = "arg=anything";
+    let req = format!(
+        "POST /api/delpreset HTTP/1.1\r\nHost: 127.0.0.1:8787\r\nOrigin: https://evil.example\r\n\
+         Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(req.as_bytes()).expect("write request");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).expect("read response");
+    let response = String::from_utf8_lossy(&raw);
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
 }
 
 #[test]

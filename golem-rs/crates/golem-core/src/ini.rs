@@ -51,7 +51,7 @@ impl Download {
     /// The name the file is stored under in `data/models`: the path's last
     /// part, so a split model's shards land side by side.
     pub fn name(&self) -> &str {
-        self.file.rsplit('/').next().unwrap_or(&self.file)
+        crate::hub::stored_name(&self.file)
     }
 }
 
@@ -99,6 +99,12 @@ impl Document {
     /// The value of `name`'s `key`, or `None` when either is absent.
     pub fn value(&self, name: &str, key: &str) -> Option<&str> {
         self.get(name)?.value(key)
+    }
+
+    /// The value `name` serves with for `key`: its own, else the shared `[*]`
+    /// section's - what llama-server's router applies.
+    pub fn effective(&self, name: &str, key: &str) -> Option<&str> {
+        self.value(name, key).or_else(|| self.value("*", key))
     }
 
     /// The value of `key` set outside any section.
@@ -176,6 +182,9 @@ fn entry_of(line: &str) -> Option<Entry> {
 /// `config/models.ini` puts them - so they are collected and handed to the
 /// next header.
 pub fn parse(text: &str) -> Document {
+    // A byte-order mark (Notepad's "UTF-8 with BOM") is not part of the
+    // first line, which may be a section header.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut doc = Document { preamble: Vec::new(), sections: Vec::new(), text: text.to_string() };
     let mut downloads: Vec<Download> = Vec::new();
     for line in text.lines() {

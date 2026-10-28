@@ -19,6 +19,11 @@ fn home(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("engines/llama.cpp")).expect("temp");
     std::fs::create_dir_all(dir.join("config")).expect("temp");
+    // The models are here, so the dry run has nothing to refuse.
+    std::fs::create_dir_all(dir.join("data/models")).expect("temp");
+    for model in ["a.gguf", "b.gguf"] {
+        std::fs::write(dir.join("data/models").join(model), "x").expect("model");
+    }
     std::fs::write(
         dir.join("engines/llama.cpp/engine.ini"),
         "name = llama.cpp\nbuild = b11379\nserver = llama-server.exe\nrouter = true\n",

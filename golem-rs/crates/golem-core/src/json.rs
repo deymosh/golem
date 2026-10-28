@@ -118,7 +118,9 @@ type Result<T> = std::result::Result<T, ParseError>;
 /// anything else is an error, so a truncated or doubled line is caught
 /// instead of silently half-read.
 pub fn parse(input: &str) -> Result<Value> {
-    let mut p = Parser { bytes: input.as_bytes(), pos: 0 };
+    // A byte-order mark is not JSON, but an editor on Windows writes one.
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+    let mut p = Parser { bytes: input.as_bytes(), pos: 0, depth: 0 };
     p.skip_ws();
     let value = p.value()?;
     p.skip_ws();
@@ -131,7 +133,15 @@ pub fn parse(input: &str) -> Result<Value> {
 struct Parser<'a> {
     bytes: &'a [u8],
     pos: usize,
+    /// How many arrays and objects enclose the value being read. The parser
+    /// recurses once per level and reads what servers answer, so nesting is
+    /// capped at [`MAX_DEPTH`] rather than left to the stack.
+    depth: usize,
 }
+
+/// Deeper than any document golem reads or writes, and far short of what
+/// would overflow a thread's stack.
+const MAX_DEPTH: usize = 128;
 
 impl<'a> Parser<'a> {
     fn err(&self, message: &str) -> ParseError {
@@ -174,8 +184,19 @@ impl<'a> Parser<'a> {
     fn value(&mut self) -> Result<Value> {
         match self.peek() {
             None => Err(self.err("unexpected end of input")),
-            Some(b'{') => self.object(),
-            Some(b'[') => self.array(),
+            Some(b'{' | b'[') if self.depth >= MAX_DEPTH => Err(self.err("nested too deeply")),
+            Some(b'{') => {
+                self.depth += 1;
+                let value = self.object();
+                self.depth -= 1;
+                value
+            }
+            Some(b'[') => {
+                self.depth += 1;
+                let value = self.array();
+                self.depth -= 1;
+                value
+            }
             Some(b'"') => Ok(Value::String(self.string()?)),
             Some(b't') => self.literal("true", Value::Bool(true)),
             Some(b'f') => self.literal("false", Value::Bool(false)),

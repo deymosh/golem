@@ -59,7 +59,7 @@
 //! stop an engine" and not enough for anything more; there is no crate here
 //! for anything more.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -82,8 +82,13 @@ use crate::paths;
 /// bind looked like it took five seconds).
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// How often `up` waits for a service it just started to write its endpoint.
+/// How long `up` waits for a service it just started to write its endpoint.
 const START_DEADLINE: Duration = Duration::from_secs(10);
+
+/// How long a connection has to send its request line, and how long that
+/// line may be: a request is a token, a verb and a few overrides.
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_MAX_BYTES: u64 = 64 * 1024;
 
 /// How often that is checked.
 const START_POLL: Duration = Duration::from_millis(100);
@@ -631,9 +636,17 @@ fn serve_one(
     // engine back, a button on the page) must not bind the loopback.
     let overrides = Overrides::from_env().under(&overrides);
     if starts {
+        // Cleared on the way out however the start ends, a panic included:
+        // a flag left set would refuse every later start.
+        struct Clear<'a>(&'a AtomicBool);
+        impl Drop for Clear<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let _clear = Clear(busy);
         let _held = starting.lock().unwrap_or_else(|e| e.into_inner());
         dispatch(home, &verb, &overrides, &mut stream);
-        busy.store(false, Ordering::SeqCst);
     } else {
         dispatch(home, &verb, &overrides, &mut stream);
     }
@@ -701,9 +714,13 @@ fn request_line(token: &str, verb: &str, env: &[(String, String)]) -> String {
 
 /// Read the request line and check the token.
 fn read_request(stream: &mut TcpStream, token: &str) -> Result<(String, Overrides), String> {
-    let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+    // A client sends its one line at once; a connection that sends nothing,
+    // or never ends its line, must not hold a thread for the service's life.
+    let _ = stream.set_read_timeout(Some(REQUEST_READ_TIMEOUT));
+    let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?).take(REQUEST_MAX_BYTES);
     let mut line = String::new();
     reader.read_line(&mut line).map_err(|e| format!("cannot read the request: {e}"))?;
+    let _ = stream.set_read_timeout(None);
     let value = json::parse(line.trim()).map_err(|_| "the request is not JSON".to_string())?;
     let given = value.get("token").and_then(|t| t.as_str()).unwrap_or_default();
     if given != token {

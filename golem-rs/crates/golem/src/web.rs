@@ -76,15 +76,16 @@ fn app(cfg: Config) -> Arc<App> {
 
 /// `[{...},\n{...}]` from the file's record lines.
 ///
-/// Each line is trimmed; only lines starting with `{` are kept (a trailing
-/// newline or a stray blank line is not a record). `</` is escaped to `<\/`
+/// Each line is trimmed; only lines that parse as a JSON object are kept (a
+/// trailing newline, a stray blank line or a write cut short is not a
+/// record, and one bad line must not cost the page the array). `</` is escaped to `<\/`
 /// because the data lives inside a `<script>` block and a literal `</script>`
 /// in a record would close it early. Empty input becomes `[]`.
 pub fn inline_records(raw: &str) -> String {
     let records: Vec<String> = raw
         .lines()
         .map(str::trim)
-        .filter(|line| line.starts_with('{'))
+        .filter(|line| line.starts_with('{') && json::parse(line).is_ok())
         .map(|line| line.replace("</", "<\\/"))
         .collect();
     format!("[{}]", records.join(",\n"))
@@ -104,6 +105,7 @@ pub fn render_page(template: &str, data: &str) -> String {
 /// other path is a 404. Exposed so tests can drive the router without binding
 /// a well-known port.
 pub fn router(cfg: Config) -> axum::Router {
+    let bind_host = cfg.host.clone();
     axum::Router::new()
         .route("/", get(index))
         .route("/results.jsonl", get(results_jsonl))
@@ -115,7 +117,63 @@ pub fn router(cfg: Config) -> axum::Router {
         .route("/api/delmodel", post(api_delmodel))
         .route("/api/delpreset", post(api_delpreset))
         .fallback(not_found)
+        .layer(axum::middleware::from_fn(move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let bind_host = bind_host.clone();
+            async move {
+                let headers = request.headers();
+                let text = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
+                if !same_origin(&Asked {
+                    host: text("host"),
+                    origin: text("origin"),
+                    fetch_site: text("sec-fetch-site"),
+                    bind_host: &bind_host,
+                }) {
+                    return plain(StatusCode::FORBIDDEN, "the console answers only its own page");
+                }
+                next.run(request).await
+            }
+        }))
         .with_state(app(cfg))
+}
+
+/// What a request says about where it came from.
+struct Asked<'a> {
+    host: Option<String>,
+    origin: Option<String>,
+    fetch_site: Option<String>,
+    /// The address the console is bound to (`CONSOLE_HOST`).
+    bind_host: &'a str,
+}
+
+/// Whether a request is the console's own page (or a client that is not a
+/// browser) rather than another site acting through this browser.
+///
+/// The console has no login - it only runs this machine's engine - so what
+/// keeps a web page elsewhere from posting `delmodel` to 127.0.0.1:8787 is
+/// this: a browser names the page that sent a request (`Origin`,
+/// `Sec-Fetch-Site`), and one from another site is refused. The `Host` is
+/// checked too, against DNS rebinding (a name of the attacker's that comes to
+/// resolve to 127.0.0.1): it must be an address, `localhost`, or the host the
+/// console was bound to. curl and scripts send no `Origin` and pass.
+fn same_origin(asked: &Asked) -> bool {
+    let Some(host) = asked.host.as_deref() else { return false };
+    let name = match host.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(""),
+        None => host.rsplit_once(':').map_or(host, |(name, port)| {
+            if port.bytes().all(|b| b.is_ascii_digit()) { name } else { host }
+        }),
+    };
+    let literal = name.parse::<std::net::IpAddr>().is_ok();
+    if !(literal || name.eq_ignore_ascii_case("localhost") || name.eq_ignore_ascii_case(asked.bind_host)) {
+        return false;
+    }
+    if let Some(origin) = asked.origin.as_deref() {
+        let origin_host = origin.split_once("://").map_or(origin, |(_, rest)| rest).trim_end_matches('/');
+        // The desktop window's page is served from this same address, so
+        // its Origin matches as well.
+        return origin_host.eq_ignore_ascii_case(host);
+    }
+    !matches!(asked.fetch_site.as_deref(), Some("cross-site" | "same-site"))
 }
 
 /// The address the console binds.
@@ -376,11 +434,18 @@ async fn api_run(State(app): State<Arc<App>>, body: Bytes) -> Response {
     let job = app.job.clone();
     let started = action.clone();
     tokio::task::spawn_blocking(move || {
-        let outcome = crate::runner::run(&app_home, &started, &arg, &log);
-        if let Ok(mut job) = job.lock() {
-            job.finish();
+        // The slot is given back however the job ends, a panic included:
+        // one left taken would answer 409 to every later action.
+        struct Finish(SharedJob);
+        impl Drop for Finish {
+            fn drop(&mut self) {
+                if let Ok(mut job) = self.0.lock() {
+                    job.finish();
+                }
+            }
         }
-        outcome
+        let _finish = Finish(job);
+        crate::runner::run(&app_home, &started, &arg, &log)
     });
 
     plain(StatusCode::OK, format!("{action} started (log: logs/web-job.log)"))
@@ -459,6 +524,30 @@ mod unit {
         let form = parse_form(b"action=tune&arg=my+model%2F1");
         assert_eq!(form.get("action").map(String::as_str), Some("tune"));
         assert_eq!(form.get("arg").map(String::as_str), Some("my model/1"));
+    }
+
+    #[test]
+    fn only_the_consoles_own_page_and_non_browsers_get_through() {
+        let asked = |host: &str, origin: Option<&str>, site: Option<&str>| Asked {
+            host: Some(host.to_string()),
+            origin: origin.map(str::to_string),
+            fetch_site: site.map(str::to_string),
+            bind_host: "127.0.0.1",
+        };
+        // The page itself, and curl.
+        assert!(same_origin(&asked("127.0.0.1:8787", Some("http://127.0.0.1:8787"), Some("same-origin"))));
+        assert!(same_origin(&asked("localhost:8787", None, None)));
+        assert!(same_origin(&asked("[::1]:8787", Some("http://[::1]:8787"), None)));
+        // Another site posting through the browser.
+        assert!(!same_origin(&asked("127.0.0.1:8787", Some("https://evil.example"), Some("cross-site"))));
+        assert!(!same_origin(&asked("127.0.0.1:8787", None, Some("cross-site"))));
+        assert!(!same_origin(&asked("127.0.0.1:8787", Some("null"), None)));
+        // A rebound name, and no Host at all.
+        assert!(!same_origin(&asked("evil.example:8787", Some("http://evil.example:8787"), None)));
+        assert!(!same_origin(&Asked { host: None, origin: None, fetch_site: None, bind_host: "127.0.0.1" }));
+        // A console bound to a LAN name answers that name.
+        let lan = Asked { host: Some("golem-box:8787".into()), origin: None, fetch_site: None, bind_host: "golem-box" };
+        assert!(same_origin(&lan));
     }
 
     #[test]

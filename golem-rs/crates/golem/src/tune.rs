@@ -271,6 +271,11 @@ impl Options {
         if opts.target.is_empty() {
             opts.target = config::get(home, "MODEL_ALIAS").unwrap_or_else(|| "local-model".into());
         }
+        // `--prefill 0` measures no prefill, so there is none to hold to a
+        // floor: every point would read 0 t/s and fail it.
+        if opts.prefill == 0 {
+            opts.floor.prefill = 0.0;
+        }
         Ok(opts)
     }
 }
@@ -471,14 +476,17 @@ fn sweep_with(home: &Path, opts: Options, mut out: Box<dyn Write>) -> Result<Ver
         let _ = writeln!(out, "[ .. ] stopping the engine so the card can be measured empty");
         service::request(home, "down", &Overrides::default(), &mut out)?;
     }
-    let verdict = Tuner::new(home, opts, out)?.sweep();
-    let mut log = std::fs::File::options()
+    // The put-back runs whatever the sweep did, a tuner that could not even
+    // start (a missing model, an unreadable preset) included.
+    let verdict = Tuner::new(home, opts, out).and_then(|mut tuner| tuner.sweep());
+    let verb = if was_up { "restart" } else { "down" };
+    let put_back = std::fs::File::options()
         .create(true)
         .append(true)
         .open(home.join(RESTART_LOG))
-        .map_err(|e| format!("cannot open {RESTART_LOG}: {e}"))?;
-    let verb = if was_up { "restart" } else { "down" };
-    if let Err(e) = service::request(home, verb, &Overrides::default(), &mut log) {
+        .map_err(|e| format!("cannot open {RESTART_LOG}: {e}"))
+        .and_then(|mut log| service::request(home, verb, &Overrides::default(), &mut log).map(|_| ()));
+    if let Err(e) = put_back {
         eprintln!("[WARN] the engine was not put back ({verb}): {e}");
     }
     verdict
@@ -685,8 +693,7 @@ impl<'a> Tuner<'a> {
 
     /// One key from `engines/<name>/engine.ini`.
     fn engine_ini(&self, engine: &str, key: &str) -> Option<String> {
-        let text = std::fs::read_to_string(self.home.join("engines").join(engine).join("engine.ini"))
-            .ok()?;
+        let text = paths::adapter(self.home, engine).ok()?;
         ini::parse(&text).global(key).map(str::to_string)
     }
 
@@ -932,11 +939,24 @@ impl<'a> Tuner<'a> {
             }
         }
 
-        // Speculative decoding is only worth a point when the file can do it.
-        if self.preset_value("spec-type").as_deref() == Some("draft-mtp") && self.model_has_mtp() {
-            let mut overrides = base();
-            overrides.push(Entry::new("spec-type", "none"));
-            self.measure(engine, &format!("{engine}-nospec"), &overrides);
+        // Speculative decoding is only worth a point when the file can do it,
+        // and the point is the other side of what the preset says: a head
+        // that accepts too little costs decode, and a file whose head the
+        // preset never switched on may be leaving speed behind.
+        if self.model_has_mtp() {
+            match self.preset_value("spec-type").as_deref() {
+                Some("draft-mtp") => {
+                    let mut overrides = base();
+                    overrides.push(Entry::new("spec-type", "none"));
+                    self.measure(engine, &format!("{engine}-nospec"), &overrides);
+                }
+                None => {
+                    let mut overrides = base();
+                    overrides.push(Entry::new("spec-type", "draft-mtp"));
+                    self.measure(engine, &format!("{engine}-mtp"), &overrides);
+                }
+                Some(_) => {}
+            }
         }
     }
 
@@ -958,8 +978,10 @@ impl<'a> Tuner<'a> {
     /// plain SMT box wants its physical count and all-but-two.
     fn thread_candidates(&self) -> Vec<u32> {
         let (cores, phys) = (self.machine.cores, self.machine.physical_cores);
-        if phys > 0 && phys * 2 > cores {
-            let p = cores - phys;
+        // A CPU without SMT (logical = physical) has no P-core count to read
+        // off, and falls through to the plain list.
+        let p = cores.saturating_sub(phys);
+        if phys > 0 && phys * 2 > cores && p > 0 {
             vec![p, p * 2, cores]
         } else {
             vec![if phys > 0 { phys } else { cores / 2 }, cores.saturating_sub(2), cores]
@@ -973,8 +995,10 @@ impl<'a> Tuner<'a> {
             .unwrap_or(false)
     }
 
+    /// What the target serves with for `key`, a `[*]` default included: a
+    /// `load-mode = mlock` set for every preset locks this one too.
     fn preset_value(&self, key: &str) -> Option<String> {
-        ini::parse(&self.preset_text).value(&self.opts.target, key).map(str::to_string)
+        ini::parse(&self.preset_text).effective(&self.opts.target, key).map(str::to_string)
     }
 
     /// Whether the preset pins its weights into RAM.
@@ -1258,7 +1282,9 @@ impl<'a> Tuner<'a> {
     /// Wait for the engine to answer `/health` with a success - a loading
     /// engine answers 503, and benching it then measures the load.
     fn wait_healthy(&self) -> bool {
-        let endpoint = engine::Endpoint { port: self.port, api_key: String::new() };
+        // The home's key travels with the probe: an engine started with
+        // `--api-key` answers a keyless request as unauthorised.
+        let endpoint = engine::Endpoint { port: self.port, ..engine::Endpoint::from_home(self.home) };
         let deadline = Instant::now() + HEALTH_SLEEP * HEALTH_TRIES;
         while Instant::now() < deadline {
             if engine::healthy(&endpoint) {
@@ -1345,8 +1371,12 @@ impl<'a> Tuner<'a> {
 
             let gate_tokens = (ctx * 9 / 10).min(self.opts.gate_tokens_max);
             let overlay = self.overlay_text(&engine, key);
+            // Ungated is measured, not adopted: the setup is staged where the
+            // gate would have served it from, and nothing that serves changes.
+            // `tune --auto` sweeps every preset this way before it gates one.
             if !self.opts.gate {
-                self.promote(&engine, &overlay)?;
+                let staged = self.stage(&engine, &overlay)?;
+                self.emit(format_args!("  [ .. ] not gated (--no-gate): staged in {staged}, nothing serves it"));
                 return Ok(self.verdict(key, &engine, n_cpu_moe, None));
             }
             let staged = self.stage(&engine, &overlay)?;
@@ -1356,8 +1386,15 @@ impl<'a> Tuner<'a> {
             self.emit(format_args!("[ .. ] gating {engine} {}: restarting and running the {gate_tokens}-token needle (this takes a while)...", self.points[key].label));
             let restarted = matches!(self.restart(&engine, &staged, GATE_LOG, true), Ok(0));
             if !restarted || !self.wait_healthy() {
-                self.emit(format_args!("  [WARN] the engine did not come back on the effective preset - trying the next candidate"));
                 self.say_launcher_tail(GATE_LOG, 6);
+                // A load that died is the same stop as below: the next
+                // candidate would load the same way.
+                if let Some(why) = self.load_failed() {
+                    return Err(format!(
+                        "the engine did not come back for the gate ({why}); nothing adopted"
+                    ));
+                }
+                self.emit(format_args!("  [WARN] the engine did not come back on the effective preset - trying the next candidate"));
                 continue;
             }
             let eval = self.gate(&engine, &staged, gate_tokens);
@@ -1708,7 +1745,11 @@ impl<'a> Tuner<'a> {
             verdict.decode, verdict.prefill, verdict.vram_mib
         ));
 
-        if self.opts.adopt {
+        if !self.opts.gate {
+            if self.opts.adopt {
+                self.emit(format_args!("  [WARN] --adopt ignored: an ungated setup is never adopted"));
+            }
+        } else if self.opts.adopt {
             let config = self.home.join("golem.toml");
             if config.is_file() {
                 std::fs::copy(&config, self.home.join("golem.toml.bak"))

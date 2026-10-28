@@ -171,7 +171,8 @@ fn open(log: &Path) -> Option<File> {
     let file = match File::options().create(true).append(true).open(log) {
         Ok(file) => Ok(file),
         Err(_) => match log.parent() {
-            Some(dir) => std::fs::create_dir_all(dir).and_then(|()| File::create(log)),
+            Some(dir) => std::fs::create_dir_all(dir)
+                .and_then(|()| File::options().create(true).append(true).open(log)),
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "the log path has no directory",

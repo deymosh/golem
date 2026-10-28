@@ -146,10 +146,17 @@ impl From<io::Error> for GgufError {
 /// are only in the way.
 struct Cursor {
     reader: BufReader<File>,
+    /// The file's length: no length field in the header can be larger, so
+    /// one that is says the header is broken before anything is allocated
+    /// or skipped for it.
+    size: u64,
 }
 
 impl Cursor {
     fn take(&mut self, n: usize) -> Result<Vec<u8>, GgufError> {
+        if n as u64 > self.size {
+            return Err(GgufError::Truncated);
+        }
         let mut buf = vec![0u8; n];
         self.reader.read_exact(&mut buf)?;
         Ok(buf)
@@ -201,13 +208,19 @@ impl Cursor {
     /// A GGUF string: a u64 length, then that many bytes of UTF-8.
     fn string(&mut self) -> Result<String, GgufError> {
         let len = self.u64()?;
-        let bytes = self.take(len as usize)?;
+        let len = usize::try_from(len).map_err(|_| GgufError::Truncated)?;
+        let bytes = self.take(len)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
-    /// Step over `n` bytes without reading them into memory.
+    /// Step over `n` bytes without reading them into memory: forward only,
+    /// and never past the end of the file.
     fn skip(&mut self, n: u64) -> Result<(), GgufError> {
+        if n > self.size {
+            return Err(GgufError::Truncated);
+        }
         if n > 0 {
+            // `n` is at most the file's length, which fits an i64.
             self.reader.seek_relative(n as i64)?;
         }
         Ok(())
@@ -274,7 +287,8 @@ impl Cursor {
 /// Read a model's facts from its GGUF header.
 pub fn read(path: &Path) -> Result<ModelFacts, GgufError> {
     let file = File::open(path)?;
-    let mut c = Cursor { reader: BufReader::with_capacity(1 << 16, file) };
+    let size = file.metadata()?.len();
+    let mut c = Cursor { reader: BufReader::with_capacity(1 << 16, file), size };
 
     let magic = c.take(4)?;
     if magic != *b"GGUF" {
@@ -331,7 +345,11 @@ pub fn read(path: &Path) -> Result<ModelFacts, GgufError> {
     let params_active = if moe && n_expert_used > 0 {
         // The routed experts are the only part that scales with how many
         // fire per token.
-        params_total - routed + routed * n_expert_used / n_expert
+        // In u128: the counts are the header's word, and a broken one must
+        // not overflow. `routed` is part of `params_total`, so the result
+        // fits back.
+        let active = routed as u128 * n_expert_used.min(n_expert) as u128 / n_expert as u128;
+        params_total.saturating_sub(routed).saturating_add(active as u64)
     } else {
         params_total
     };

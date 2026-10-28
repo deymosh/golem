@@ -90,11 +90,22 @@ pub fn down(home: &Path, out: &mut dyn Write) -> i32 {
     }
 
     let _ = writeln!(out, "[ .. ] stopping the engine (pid {pid})...");
-    kill_tree(pid);
+    kill_tree(pid, false);
 
     let deadline = Instant::now() + PROCESS_SETTLE;
     while Instant::now() < deadline && alive(pid) {
         std::thread::sleep(Duration::from_millis(500));
+    }
+    // A process that ignored the polite signal gets the forceful one, and
+    // one that survives even that keeps its pid file: it is still running,
+    // and the file is the only way the next `down` can find it.
+    if alive(pid) {
+        kill_tree(pid, true);
+        std::thread::sleep(Duration::from_secs(2));
+        if alive(pid) {
+            let _ = writeln!(out, "[FAIL] the engine (pid {pid}) is still running after a forced stop");
+            return 1;
+        }
     }
     remove_pid(home);
 
@@ -146,10 +157,11 @@ pub fn up(home: &Path, overrides: &Overrides, dry_run: bool, out: &mut dyn Write
         let _ = writeln!(out, "       serving: {}  -> pid {}", plan.served, plan.pid_file.display());
         // A dry run installs and fetches nothing, so it must at least say what
         // a real one would fetch, or the report is a lie by omission.
-        if let Ok(jobs) = model_jobs(home, &plan, out) {
-            if !jobs.is_empty() {
-                let _ = writeln!(out, "[ .. ] would fetch {} model file(s) the preset needs", jobs.len());
-            }
+        // The same refusal a real start would hit (a served model with no
+        // download source) is the dry run's answer too.
+        let jobs = model_jobs(home, &plan, out)?;
+        if !jobs.is_empty() {
+            let _ = writeln!(out, "[ .. ] would fetch {} model file(s) the preset needs", jobs.len());
         }
         return Ok(());
     }
@@ -390,17 +402,26 @@ fn start(home: &Path, plan: &Startup, endpoint: &engine::Endpoint, out: &mut dyn
         let _ = std::fs::create_dir_all(dir);
     }
     if let Err(e) = std::fs::write(&plan.pid_file, format!("{pid}\n")) {
-        // The server is up and the model is about to load; a pid file we
-        // cannot write is worth saying and not worth killing that over.
-        // `down` copes without one - it clears what it cannot use.
-        let _ = writeln!(out, "[WARN] cannot write {}: {e}", plan.pid_file.display());
+        // Without its pid file nothing could stop this engine later - `down`
+        // finds engines by it - so a start that cannot record one is undone.
+        kill_tree(pid, true);
+        let _ = child.wait();
+        return Err(format!("cannot write {}: {e}", plan.pid_file.display()));
     }
 
     let _ = writeln!(out, "[ OK ] {} {} started, PID {pid}", plan.engine, plan.build);
     let _ = writeln!(out, "       logs: {}", plan.log.display());
     let _ = writeln!(out, "[ .. ] waiting for the model to load (first boot includes GPU warmup)...");
 
-    wait_healthy(plan, &mut child, endpoint, out)?;
+    if let Err(e) = wait_healthy(plan, &mut child, endpoint, out) {
+        // A server that never answered is stopped rather than left loading
+        // behind a start that reported failure; one that already exited is
+        // reaped. Either way it no longer runs, so its pid file goes too.
+        kill_tree(pid, true);
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&plan.pid_file);
+        return Err(e);
+    }
 
     // The parent outlives the engine - the service is long-lived - so someone
     // must reap the child or it sits as a zombie on Unix, where `kill -0`
@@ -540,8 +561,9 @@ pub fn alive(pid: u32) -> bool {
     }
 }
 
-/// Kill the process and everything it started.
-fn kill_tree(pid: u32) {
+/// Kill the process and everything it started; `force` is SIGKILL rather
+/// than SIGTERM on Unix (Windows always forces).
+fn kill_tree(pid: u32, force: bool) {
     if cfg!(windows) {
         // /T: in router mode each model is a child process, and /F because a
         // model mid-generation does not answer a polite request.
@@ -552,8 +574,9 @@ fn kill_tree(pid: u32) {
     }
     // The children first, because the parent exiting does not take a loaded
     // model with it, then the parent.
-    let _ = Command::new("pkill").args(["-TERM", "-P", &pid.to_string()]).output();
-    let _ = Command::new("kill").arg(pid.to_string()).output();
+    let signal = if force { "-KILL" } else { "-TERM" };
+    let _ = Command::new("pkill").args([signal, "-P", &pid.to_string()]).output();
+    let _ = Command::new("kill").args([signal, &pid.to_string()]).output();
 }
 
 /// Remove the home's pid file.
@@ -1162,6 +1185,12 @@ mod tests {
         // The command line is the thing worth reading, not the banner, and a
         // dry run is the only way to see it without starting anything.
         let dir = up_home("up-dry", "1");
+        // The served model has no download source and is not here: the dry
+        // run refuses it, as the real start would.
+        let err = up(&dir, &Overrides::default(), true, &mut std::io::sink()).expect_err("no source");
+        assert!(err.contains("a.gguf"), "{err}");
+        std::fs::create_dir_all(dir.join("data/models")).expect("models");
+        std::fs::write(dir.join("data/models/a.gguf"), "x").expect("model");
         assert_eq!(up(&dir, &Overrides::default(), true, &mut std::io::sink()), Ok(()));
         // Nothing was installed, nothing was started, no pid was written.
         assert!(!dir.join(".local/llama-server.pid").exists());
@@ -1435,9 +1464,8 @@ mod tests {
         let endpoint = engine::Endpoint { port: 1, api_key: String::new() };
         let err = start(&dir, &plan, &endpoint, &mut std::io::sink()).expect_err("the child exited at once");
         assert!(err.contains("exit code 3"), "{err}");
-        // The pid is written before the wait.
-        let pid = std::fs::read_to_string(dir.join(".local/llama-server.pid")).expect("pid");
-        assert!(pid.trim().parse::<u32>().is_ok(), "{pid:?}");
+        // The pid file was written before the wait and goes with the server.
+        assert!(!dir.join(".local/llama-server.pid").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 

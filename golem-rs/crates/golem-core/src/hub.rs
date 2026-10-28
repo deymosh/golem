@@ -55,8 +55,21 @@ impl File {
     /// subdirectory of the repo land side by side, which is where the
     /// engine looks for the rest of a split model.
     pub fn name(&self) -> &str {
-        self.path.rsplit('/').next().unwrap_or(&self.path)
+        stored_name(&self.path)
     }
+}
+
+/// The name a repository path is stored under: its last part, split on
+/// either separator so a `\` in a listing cannot reach outside the models
+/// directory. [`safe_name`] says whether what is left is a plain file name.
+pub fn stored_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// Whether `name` is a plain file name: not empty, not `.` or `..`, and no
+/// drive (`C:x`) or separator in it.
+pub fn safe_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains([':', '/', '\\'])
 }
 
 /// The Hub's answer about a repository.
@@ -214,9 +227,36 @@ pub fn projector(repo: &Repo) -> Option<&File> {
     projectors.into_iter().min_by_key(|f| f.size)
 }
 
-/// A mixture of experts, by the architecture the Hub reports (`qwen35moe`).
+/// A mixture of experts, by what the Hub's answer shows: the architecture
+/// (`qwen35moe`) or an active size in the repository's name (`35B-A3B`,
+/// `30B-A2.5B`). An architecture named for its model (`flint`) shows
+/// neither; [`config_experts`] reads the base model's config for those.
 pub fn is_moe(repo: &Repo) -> bool {
-    repo.arch.as_deref().is_some_and(|a| a.to_ascii_lowercase().contains("moe"))
+    let arch = repo.arch.as_deref().is_some_and(|a| a.to_ascii_lowercase().contains("moe"));
+    let name = repo.id.rsplit('/').next().unwrap_or(&repo.id);
+    // `A3B` after a `-` or `_`: the token is the active parameter count.
+    let active = name.split(['-', '_']).any(|t| {
+        let t = t.to_ascii_uppercase();
+        t.strip_prefix('A')
+            .and_then(|r| r.strip_suffix('B'))
+            .is_some_and(|n| !n.is_empty() && n.parse::<f64>().is_ok())
+    });
+    arch || active
+}
+
+/// The routed experts a `config.json` declares, under any of the names the
+/// families use, at the top level or in a multimodal model's `text_config`.
+/// `None` for a dense model or text that is not a config.
+pub fn config_experts(text: &str) -> Option<u64> {
+    let doc = json::parse(text).ok()?;
+    let keys = ["num_experts", "num_local_experts", "n_routed_experts", "moe_num_experts"];
+    let found = [Some(&doc), doc.get("text_config")].into_iter().flatten().find_map(|scope| {
+        keys.iter()
+            .find_map(|k| scope.get(k).and_then(Value::as_f64))
+            .map(|n| n as u64)
+            .filter(|&n| n > 1)
+    });
+    found
 }
 
 /// How many bytes of weights this machine is offered, from its VRAM and RAM
@@ -382,6 +422,30 @@ mod tests {
         assert!(!is_moe(&repo));
         assert!(is_moe(&parse_repo(MOE).expect("parse")));
         assert_eq!(parse_repo(r#"{"error": "Repository not found"}"#).unwrap_err(), "Repository not found");
+    }
+
+    #[test]
+    fn a_mixture_of_experts_shows_in_the_arch_the_name_or_the_config() {
+        let named = |id: &str, arch: &str| Repo {
+            id: id.into(),
+            sha: String::new(),
+            files: Vec::new(),
+            arch: Some(arch.into()),
+            ctx_train: None,
+            params: None,
+            base_model: None,
+            license: None,
+        };
+        assert!(is_moe(&named("unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF", "nemotron_h")));
+        assert!(is_moe(&named("someone/Model-24B-A2.5B-GGUF", "lfm2")));
+        // Flint's GGUF names neither; its base config counts the experts.
+        assert!(!is_moe(&named("unsloth/flint-GGUF", "flint")));
+        assert!(!is_moe(&named("someone/Alpha-9B-GGUF", "llama")));
+        let flint = r#"{"model_type": "flint", "num_experts": 256, "num_experts_per_tok": 6}"#;
+        assert_eq!(config_experts(flint), Some(256));
+        assert_eq!(config_experts(r#"{"text_config": {"num_local_experts": 128}}"#), Some(128));
+        assert_eq!(config_experts(r#"{"num_experts": 1, "hidden_size": 4096}"#), None);
+        assert_eq!(config_experts("not json"), None);
     }
 
     #[test]

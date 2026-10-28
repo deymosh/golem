@@ -70,7 +70,7 @@ pub fn engines(home: &Path) -> Vec<String> {
 /// Empty when nothing has ever run, which is how the page decides whether to
 /// show the pane at all.
 pub fn job_tail(home: &Path, lines: usize) -> String {
-    let Ok(text) = std::fs::read_to_string(paths::job_log(home)) else {
+    let Some(text) = read_end(&paths::job_log(home), TAIL_BYTES) else {
         return String::new();
     };
     let all: Vec<&str> = text.lines().filter(|line| !progress::is_line(line)).collect();
@@ -78,19 +78,32 @@ pub fn job_tail(home: &Path, lines: usize) -> String {
     all[start..].join("\n")
 }
 
+/// How much of a log's end the tails read. The console and the screen ask
+/// several times a second, and the logs keep every job and every engine
+/// start there has been, so a tail never reads the whole file.
+const TAIL_BYTES: u64 = 256 * 1024;
+
+/// The last `bytes` of a file as text, starting at a line: the cut lands
+/// mid-line (or mid-character), so what precedes the first newline is
+/// dropped unless the whole file fit.
+fn read_end(path: &Path, bytes: u64) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let from = len.saturating_sub(bytes);
+    file.seek(SeekFrom::Start(from)).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    Some(match (from, text.find('\n')) {
+        (0, _) | (_, None) => text,
+        (_, Some(nl)) => text[nl + 1..].to_string(),
+    })
+}
+
 /// How far the running job has got, from the newest `PROGRESS` line in the
 /// job log, or `None` when it says nothing or has cleared its bar.
-///
-/// Only the log's end is read: the screen asks several times a second, and
-/// the log keeps every job there has been.
 pub fn job_progress(home: &Path) -> Option<Progress> {
-    const TAIL_BYTES: u64 = 16 * 1024;
-    let mut file = std::fs::File::open(paths::job_log(home)).ok()?;
-    let len = file.metadata().ok()?.len();
-    file.seek(SeekFrom::Start(len.saturating_sub(TAIL_BYTES))).ok()?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    progress::latest(&String::from_utf8_lossy(&bytes))
+    progress::latest(&read_end(&paths::job_log(home), 16 * 1024)?)
 }
 
 /// Whether a console answers on `port`.
@@ -183,11 +196,10 @@ pub fn snapshot(home: &Path, job: &SharedJob) -> Snapshot {
 /// job log is not the engine's and a pane that showed it would be wrong.
 pub fn log_tail(home: &Path, lines: usize) -> (String, String) {
     let path = paths::engine_log(home);
-    let Ok(text) = std::fs::read_to_string(&path) else { return (String::new(), String::new()) };
+    let Some(text) = read_end(&path, TAIL_BYTES) else { return (String::new(), String::new()) };
     let all: Vec<&str> = text.lines().collect();
     let start = all.len().saturating_sub(lines);
-    (path.strip_prefix(home).unwrap_or(&path).to_string_lossy().into_owned(), all[start..].join("
-"))
+    (path.strip_prefix(home).unwrap_or(&path).to_string_lossy().into_owned(), all[start..].join("\n"))
 }
 
 #[cfg(test)]

@@ -19,6 +19,10 @@ const DEFAULT_LINES: usize = 40;
 /// slow enough not to busy a core on an idle engine.
 const POLL: Duration = Duration::from_millis(200);
 
+/// How much of the log's end the opening screenful is cut from: plenty for
+/// any `--lines` a terminal shows, and never the whole of a long-lived log.
+const OPENING_BYTES: u64 = 4 * 1024 * 1024;
+
 /// `golem logs [--lines N] [--no-follow]`.
 pub fn run(home: &Path, args: &[String]) -> i32 {
     let options = match parse_args(args) {
@@ -84,7 +88,11 @@ fn follow(path: &Path, lines: usize, keep_going: bool) -> i32 {
                     // The opening screenful is the *last* `lines`, not the
                     // whole file: following a 2 GB log from byte zero is not
                     // what anyone means by `logs`.
-                    if let Ok(data) = std::fs::read(path) {
+                    // Only the end is read, and only up to the length just
+                    // taken: what arrives after the stat is the follow's.
+                    let from = len.saturating_sub(OPENING_BYTES);
+                    if let Ok(mut data) = read_from(path, from) {
+                        data.truncate((len - from) as usize);
                         let mut lock = stdout.lock();
                         let _ = lock.write_all(tail(&data, lines));
                         let _ = lock.flush();

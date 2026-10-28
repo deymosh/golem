@@ -28,6 +28,8 @@ pub struct Document {
 impl Document {
     /// Parse `text`, or say which line is wrong.
     pub fn parse(text: &str) -> Result<Document, String> {
+        // Notepad's "UTF-8 with BOM" puts U+FEFF before the first key.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let eol = if text.contains("\r\n") { "\r\n" } else { "\n" }.to_string();
         let mut lines = Vec::new();
         for (number, raw) in text.lines().enumerate() {
@@ -104,8 +106,12 @@ impl Document {
 /// Everything before an unquoted `#`.
 fn strip_comment(line: &str) -> &str {
     let mut in_string = false;
+    let mut escaped = false;
     for (at, c) in line.char_indices() {
         match c {
+            // `\"` inside a string is a quote, not its end.
+            _ if escaped => escaped = false,
+            '\\' if in_string => escaped = true,
             '"' => in_string = !in_string,
             '#' if !in_string => return &line[..at],
             _ => {}

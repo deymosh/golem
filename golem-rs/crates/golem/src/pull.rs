@@ -31,8 +31,10 @@ use crate::{config, machine, state};
 /// preset model plus its `.part` wants a generous margin.
 const MIN_FREE_GB: u64 = 25;
 
-/// The completeness floor when Hugging Face does not report a size.
-const FLOOR_FALLBACK: u64 = 1_000_000_000;
+/// The completeness floor when Hugging Face does not report a size: any
+/// bytes at all. curl runs with `-f`, so an error page is never saved, and a
+/// `.part` becomes the file only when curl finished.
+const FLOOR_FALLBACK: u64 = 1;
 
 /// How often a download in a job's log says how far it has got.
 const PROGRESS_EVERY: Duration = Duration::from_secs(2);
@@ -168,7 +170,15 @@ fn pull_ref(home: &Path, reference: &hub::Ref, name: Option<&str>, log: &mut Log
         )
     })?;
     let quants = hub::quants(&repo);
-    let moe = hub::is_moe(&repo);
+    // A model whose GGUF does not say it is a mixture of experts may still be
+    // one; the base model's config counts its experts.
+    let moe = hub::is_moe(&repo)
+        || repo.base_model.as_deref().is_some_and(|base| {
+            curl_text(&format!("https://huggingface.co/{base}/resolve/main/config.json"), token.as_deref())
+                .ok()
+                .and_then(|t| hub::config_experts(&t))
+                .is_some()
+        });
     let params = repo.params.map(|p| format!("{:.1}B", p as f64 / 1e9)).unwrap_or_else(|| "size unknown".into());
     log.ok(&format!(
         "{} - {} {params} {} - trained context {}",
@@ -398,15 +408,15 @@ fn preset_downloads(text: &str) -> Vec<(String, String, String)> {
 /// The name a repository path is stored under in `data/models`: its last
 /// part, so a split model's shards land side by side.
 fn local_name(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
+    hub::stored_name(path)
 }
 
 /// Fetch one GGUF into `models_dir`, resuming a leftover `.part`.
 ///
 /// `path` is the file's path in the repository; it is stored under its last
 /// part. Completeness is judged against the size Hugging Face reports
-/// (`x-linked-size`), so small models are fine; the 1 GB floor is only the
-/// fallback when the server does not say.
+/// (`x-linked-size`), to the byte; when the server does not say, a file curl
+/// finished is taken as it is.
 fn hf_get(
     log: &mut Log,
     models_dir: &Path,
@@ -415,6 +425,9 @@ fn hf_get(
     token: Option<&str>,
 ) -> Result<(), String> {
     let file = local_name(path_in_repo);
+    if !hub::safe_name(file) {
+        return Err(format!("{path_in_repo:?} does not name a file golem can store"));
+    }
     let path = models_dir.join(file);
     let url = format!("https://huggingface.co/{repo}/resolve/main/{path_in_repo}");
     let expected = linked_size(&url, token);
@@ -469,12 +482,13 @@ fn hf_get(
     Ok(())
 }
 
-/// The size a file must reach to count as complete: 1% below what Hugging
-/// Face reports, or the 1 GB fallback when the header is absent.
+/// The size a file must reach to count as complete: what Hugging Face
+/// reports, to the byte (a GGUF short of its end does not load), or the
+/// fallback when the header is absent or says nothing.
 fn floor_of(expected: Option<u64>) -> u64 {
     match expected {
-        Some(expected) => expected - expected / 100,
-        None => FLOOR_FALLBACK,
+        Some(expected) if expected > 0 => expected,
+        _ => FLOOR_FALLBACK,
     }
 }
 
@@ -802,11 +816,11 @@ model = tiny.gguf
     }
 
     #[test]
-    fn the_floor_is_one_percent_below_the_expected_size() {
-        assert_eq!(floor_of(Some(1000)), 990);
-        assert_eq!(floor_of(Some(100)), 99);
-        assert_eq!(floor_of(Some(2_000_000_000)), 1_980_000_000);
+    fn the_floor_is_the_expected_size() {
+        assert_eq!(floor_of(Some(1000)), 1000);
+        assert_eq!(floor_of(Some(2_000_000_000)), 2_000_000_000);
         assert_eq!(floor_of(None), FLOOR_FALLBACK);
+        assert_eq!(floor_of(Some(0)), FLOOR_FALLBACK);
     }
 
     #[test]

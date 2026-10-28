@@ -21,8 +21,9 @@ golem - serve one local model to Claude Code and any OpenAI client
 
 Usage: golem [command] [args]
 
-With no command: double-clicked on a desktop, the console opens in the
-browser; in a terminal, the full-screen screen (`golem tui`).
+With no command: from a desktop (a double-click), the Golem window (the
+console in the browser in a build without the desktop feature); in a
+terminal, the full-screen screen.
 
 Serving:
   up [--dry-run]   Start the engine (installs the pinned build and the
@@ -32,29 +33,37 @@ Serving:
   status           Is the engine up, and what is it serving
   service [--up|stop]
                    The process that owns the engine and hosts the console
-                   (127.0.0.1:8787 by default); up/down/restart
-                   ask it
-  logs [--lines N] Follow the engine's log
+                   (127.0.0.1:8787 by default); up/down/restart ask it
+  logs [--lines N] [--no-follow]
+                   The engine's log, followed
   claude [args]    Launch Claude Code pointed at this server
   env              Print the exports for a shell
 
 Models and engines:
-  pull [preset]    Download a preset's GGUF files from Hugging Face
+  pull owner/repo[:quant]
+                   Fetch a GGUF from Hugging Face and write its preset
+                   (no quant: the largest this machine can hold)
+  pull [preset]    Fetch a preset's or a library model's files
   install          Put the pinned engine build on this machine
-  setup            Inspect the machine and scaffold the home (Windows: the app's shortcuts)
+  setup            Inspect the machine and scaffold the home (Windows: the
+                   app's shortcuts)
 
 Measuring:
-  bench [--runs N] [--prefill N]   Speed: decode + prefill tok/s
+  bench [--runs N] [--prefill N]
+                   Speed: decode and prefill tok/s
   eval [--long N]  Quality gate: sanity, tool calls, needle at depth
-  tune [preset]    Find the fastest setup this machine can serve, and gate it
+  tune [preset] [--adopt] [--no-gate]
+                   Find the fastest setup this machine can serve, gate it,
+                   and with --adopt serve it
   tune --auto      Pick the best installed model, then tune it
 
-Results:
-  app              The Golem window and tray (the console in the browser
-                   in a build without the desktop feature)
+Front ends and results:
+  app              The Golem window and tray
   tui              The full-screen screen in the terminal
-  report [--md]    Static results page (or bench/RESULTS.md)
-  results          List the recorded rows
+  report [--md] [--no-open]
+                   Static results page (or bench/RESULTS.md)
+  results [--model NAME]
+                   List the recorded rows
   version          Print the version
 ";
 
@@ -127,8 +136,10 @@ fn cmd_status() -> ExitCode {
     // engine's state *means*: with one running, `down` stops the engine and
     // the service stays, and a reader who does not know that will wonder what
     // is still holding the home.
-    if let Some(endpoint) = service::Endpoint::read(&home).filter(|_| service::running(&home)) {
-        println!("       golem service is up on 127.0.0.1:{} and owns the engine", endpoint.port);
+    // The service's own port is a control channel for the CLI; the address a
+    // person wants is the console's.
+    if service::running(&home) {
+        println!("       golem service owns the engine - console on {}", desktop::console_url(&home));
     }
     code(exit)
 }
@@ -431,6 +442,7 @@ fn cmd_results(args: &[String]) -> ExitCode {
         "{:<28} {:<10} {:<24} {:>8} {:>9} {:>8}",
         "model", "kind", "engine", "ctx", "decode", "threads"
     );
+    let count = shown.len();
     for row in shown {
         println!(
             "{:<28} {:<10} {:<24} {:>8} {:>9} {:>8}",
@@ -442,6 +454,10 @@ fn cmd_results(args: &[String]) -> ExitCode {
             row.threads.map(|t| t.to_string()).unwrap_or_else(|| "-".to_string()),
         );
     }
-    println!("{} row(s)", rows.len());
+    if count == rows.len() {
+        println!("{count} row(s)");
+    } else {
+        println!("{count} of {} row(s)", rows.len());
+    }
     ExitCode::SUCCESS
 }

@@ -88,7 +88,7 @@ html.app .edge { display: block; }
 .edge.se { bottom: 0; right: 0; width: 10px; height: 10px; cursor: se-resize; }
 .edge.sw { bottom: 0; left: 0; width: 10px; height: 10px; cursor: sw-resize; }
 @media (max-width: 760px) { .bar { grid-template-columns: auto 1fr; } .tabs { grid-column: 1 / -1; grid-row: 2; justify-self: start; }
-  .bar { height: auto; padding-block: 8px; row-gap: 8px; } .state span { display: none; } }
+  .bar { height: auto; padding-block: 8px; row-gap: 8px; } .state span { overflow: hidden; text-overflow: ellipsis; } .state .extra { display: none; } }
 
 /* ---- page -------------------------------------------------------------- */
 main { flex: 1; min-height: 0; width: 100%; max-width: 1240px; margin: 0 auto; display: flex;
@@ -120,6 +120,8 @@ select, input[type=text] { background: var(--raised); border: 1px solid var(--ha
 .strip .group { display: flex; gap: 6px; align-items: center; }
 .strip .group + .group { padding-left: 10px; border-left: 1px solid var(--hair); }
 .strip label { color: var(--soft); font-size: 13px; }
+.msg { margin: 0; padding: 8px 14px; border-top: 1px solid var(--hair); font-size: 13px; color: var(--soft); }
+.msg.bad { color: var(--bad); }
 pre.log { margin: 0; padding: 12px 14px; font: 12px/1.55 var(--code); color: var(--soft); white-space: pre-wrap; overflow-y: auto; }
 #c-log { border-top: 1px solid var(--hair); max-height: 240px; }
 .progress { padding: 10px 14px 12px; border-top: 1px solid var(--hair); }
@@ -224,6 +226,7 @@ tr.classrow td { color: var(--soft); font-size: 12px; font-weight: 600; padding-
           <button class="btn quiet" data-apply="c-engine">Use</button>
         </div>
       </div>
+      <p class="msg" id="c-msg" role="status" aria-live="polite" hidden></p>
       <div class="progress" id="c-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" hidden>
         <div class="head"><b id="c-progress-label"></b><span id="c-progress-amount"></span></div>
         <div class="track"><i id="c-progress-fill"></i></div>
@@ -280,6 +283,14 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const fmt = (v, d = 1) => (v == null || isNaN(v)) ? "–" : Number(v).toFixed(d);
 const day = (ts) => (ts || "").slice(0, 10);
+// A verdict as a class name: only the two the stylesheet knows, whatever a
+// row says.
+const verdict = (v) => (v === "PASS" || v === "FAIL" ? v : "none");
+// The records, one per line; a line that will not parse (a write cut short)
+// is skipped rather than costing the page every other row.
+const parseRows = (text) => text.split("\n").filter((l) => l.trim().startsWith("{")).flatMap((l) => {
+  try { return [JSON.parse(l)]; } catch (e) { return []; }
+});
 const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
 
 // ---- the window (golem app) -------------------------------------------
@@ -435,7 +446,7 @@ function renderBoard(rows) {
         <td class="num">${fmt(r.prefill, 0)}</td><td class="num">${fmt(efficiency(r), 1)}</td>
         <td class="num">${r.vram_mib ? fmt(r.vram_mib / 1024) : "–"}</td>
         <td class="num">${r.ram_used_gib != null ? fmt(r.ram_used_gib) : "–"}</td>
-        <td>${needle ? `<span class="badge ${needle}">${needle === "PASS" ? "Pass" : "Fail"}</span>` : `<span class="badge none">Not run</span>`}${ev?.eval?.tools === "FAIL" ? ` <span class="badge FAIL">Tools</span>` : ""}</td>
+        <td>${needle ? `<span class="badge ${verdict(needle)}">${needle === "PASS" ? "Pass" : "Fail"}</span>` : `<span class="badge none">Not run</span>`}${ev?.eval?.tools === "FAIL" ? ` <span class="badge FAIL">Tools</span>` : ""}</td>
         <td class="num">${fmt(ev?.eval?.depth_decode)}</td><td>${day(r.ts)}</td><td class="flags">${esc(flagStr(r.flags))}</td></tr>`;
     }).join("") + "</tbody>";
 }
@@ -512,7 +523,7 @@ const COLS = [
   ["prefill", "Prefill", (r) => fmt(r.kind === "eval" ? r.eval?.needle_prefill : r.prefill, 0), true],
   ["vram_mib", "VRAM GB", (r) => (r.vram_mib ? fmt(r.vram_mib / 1024) : "–"), true],
   ["ram_used_gib", "RAM GB", (r) => (r.ram_used_gib != null ? fmt(r.ram_used_gib) : "–"), true],
-  ["result", "Eval", (r) => (r.kind === "eval" ? `<span class="badge ${r.eval?.needle || "none"}">${r.eval?.needle === "PASS" ? "Pass" : r.eval?.needle === "FAIL" ? "Fail" : "–"}</span>` : "")],
+  ["result", "Eval", (r) => (r.kind === "eval" ? `<span class="badge ${verdict(r.eval?.needle)}">${r.eval?.needle === "PASS" ? "Pass" : r.eval?.needle === "FAIL" ? "Fail" : "–"}</span>` : "")],
   ["flags", "Flags", (r) => `<span class="flags">${esc(flagStr(r.flags))}</span>`],
   ["note", "Note", (r) => `<span class="note" title="${esc(r.note)}">${esc(r.note)}</span>`],
 ];
@@ -522,10 +533,15 @@ const sortVal = (r, k) => k === "decode" ? (r.kind === "eval" ? r.eval?.decode_b
 
 function renderRuns(rows) {
   const sorted = rows.slice().sort((a, b) => { const x = sortVal(a, sortKey), y = sortVal(b, sortKey); return (x > y ? 1 : x < y ? -1 : 0) * sortDir; });
-  $("runs").innerHTML = `<thead><tr>${COLS.map(([k, label, , num]) => `<th data-k="${k}" class="${num ? "num" : ""}">${label}${k === sortKey ? (sortDir > 0 ? " ▲" : " ▼") : ""}</th>`).join("")}</tr></thead><tbody>` +
+  const order = (k) => (k === sortKey ? (sortDir > 0 ? "ascending" : "descending") : "none");
+  $("runs").innerHTML = `<thead><tr>${COLS.map(([k, label, , num]) => `<th data-k="${k}" class="${num ? "num" : ""}" tabindex="0" aria-sort="${order(k)}">${label}${k === sortKey ? (sortDir > 0 ? " ▲" : " ▼") : ""}</th>`).join("")}</tr></thead><tbody>` +
     (sorted.length ? sorted.map((r) => `<tr class="${r.quiet === false ? "suspect" : ""}">${COLS.map(([, , f, num]) => `<td class="${num ? "num" : ""}">${f(r)}</td>`).join("")}</tr>`).join("")
       : `<tr><td class="empty" colspan="${COLS.length}">No runs match the filters.</td></tr>`) + "</tbody>";
-  $("runs").querySelectorAll("th").forEach((th) => th.onclick = () => { const k = th.dataset.k; sortDir = k === sortKey ? -sortDir : -1; sortKey = k; renderRuns(filtered()); });
+  $("runs").querySelectorAll("th").forEach((th) => {
+    const sort = () => { const k = th.dataset.k; sortDir = k === sortKey ? -sortDir : -1; sortKey = k; renderRuns(filtered()); $("runs").querySelector(`th[data-k="${k}"]`)?.focus(); };
+    th.onclick = sort;
+    th.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sort(); } };
+  });
 }
 
 function render() {
@@ -549,9 +565,31 @@ function bestRun(name) {
 }
 
 const busyNote = "The console is not answering. Is golem service running?";
+
+// What an action answered, said under the engine buttons: the service's own
+// words for a refusal ("a job is already running"), a short one for success.
+const ANSWERS = { applied: "Done. It takes effect at the next start.", added: "Preset added.",
+  "bad-input": "Refused: the default model stays, and only what this machine has can be chosen.",
+  deleted: "Model file deleted.", removed: "Preset removed." };
+async function say(response) {
+  const text = (await response.text()).trim();
+  let words = text;
+  try { const r = JSON.parse(text).result; words = ANSWERS[r] || r; } catch (e) { /* plain text */ }
+  const msg = $("c-msg");
+  msg.textContent = words;
+  msg.className = "msg" + (response.ok ? "" : " bad");
+  msg.hidden = !words;
+}
+
+// The list is rebuilt only when what it shows has changed, so a poll does not
+// take the focus from a button or a choice from a menu.
+let modelsShown = "";
 function renderModels(models, state) {
   const running = !!state?.job_running;
   const serving = state?.up ? state.alias : null;
+  const shown = JSON.stringify([models, running, serving, ROWS.length]);
+  if (shown === modelsShown) return;
+  modelsShown = shown;
   $("m-list").innerHTML = models.length ? models.map((m) => {
     const run = bestRun(m.Name);
     const chips = [
@@ -585,7 +623,8 @@ function renderModels(models, state) {
 
   const act = (sel, fn) => $("m-list").querySelectorAll(sel).forEach((b) => b.onclick = async () => {
     b.disabled = true;
-    try { await fn(b); } catch (e) { $("pull-msg").textContent = busyNote; }
+    try { const r = await fn(b); if (r) await say(r); else b.disabled = false; }
+    catch (e) { $("pull-msg").textContent = busyNote; }
     setTimeout(pollLive, 1200);
   });
   act("[data-alias]", (b) => post("api/run", `action=alias&arg=${encodeURIComponent(b.dataset.alias)}`));
@@ -601,13 +640,20 @@ function renderModels(models, state) {
 
 function renderState(s) {
   const busy = s.job_running;
+  jobRunning = !!busy;
   $("c-state").className = "state " + (busy ? "busy" : s.up ? "up" : "");
   const p = busy ? s.job_progress : null;
   $("c-state-text").innerHTML = busy ? `<b>${esc(s.job_action)}</b> running${p ? `, ${p.percent}%` : ""}`
-    : s.up ? `Serving <b>${esc(s.alias)}</b>${s.vram ? `, ${(s.vram / 1024).toFixed(1)} GB VRAM` : ""}`
+    : s.up ? `Serving <b>${esc(s.alias)}</b>${s.vram ? `<span class="extra">, ${(s.vram / 1024).toFixed(1)} GB VRAM</span>` : ""}`
     : `Stopped, default <b>${esc(s.alias || "none")}</b>`;
   drawMark(busy ? "busy" : s.up ? "up" : "down");
-  $("c-engine").innerHTML = (s.engines || []).map((v) => `<option${v === s.engine ? " selected" : ""}>${esc(v)}</option>`).join("");
+  // Rebuilt only when the list or the setting changed: a choice not yet
+  // applied with "Use" survives the poll.
+  const engines = JSON.stringify([s.engines, s.engine]);
+  if ($("c-engine").dataset.shown !== engines) {
+    $("c-engine").dataset.shown = engines;
+    $("c-engine").innerHTML = (s.engines || []).map((v) => `<option${v === s.engine ? " selected" : ""}>${esc(v)}</option>`).join("");
+  }
   const bar = $("c-progress");
   bar.hidden = !p;
   if (p) {
@@ -628,7 +674,7 @@ async function pollLive() {
   try {
     const r = await fetch("results.jsonl", { cache: "no-store" });
     if (r.ok) {
-      const rows = (await r.text()).split("\n").filter((l) => l.trim().startsWith("{")).map((l) => JSON.parse(l));
+      const rows = parseRows(await r.text());
       if (rows.length !== ROWS.length || (rows.length && rows[rows.length - 1].ts !== ROWS[ROWS.length - 1]?.ts)) {
         ROWS = rows;
         fillFilters();
@@ -658,7 +704,7 @@ document.querySelectorAll("#control .btn").forEach((b) => b.onclick = async () =
   b.disabled = true;
   const apply = b.dataset.apply;
   const body = apply ? `action=engine&arg=${encodeURIComponent($(apply).value)}` : `action=${b.dataset.run}`;
-  try { await post("api/run", body); } catch (e) { $("pull-msg").textContent = busyNote; }
+  try { await say(await post("api/run", body)); } catch (e) { $("pull-msg").textContent = busyNote; }
   setTimeout(pollLive, 1200);
 });
 $("pull-form").onsubmit = async (e) => {
@@ -675,8 +721,17 @@ $("pull-form").onsubmit = async (e) => {
 };
 
 showTab(location.hash.slice(1) || "results");
-pollLive();
-setInterval(pollLive, 5000);
+// Every 5 s, and every 1.5 s while a job runs so its bar moves; never two
+// polls at once.
+let polling = false, jobRunning = false;
+async function tick() {
+  if (!polling) {
+    polling = true;
+    try { await pollLive(); } finally { polling = false; }
+  }
+  setTimeout(tick, jobRunning ? 1500 : 5000);
+}
+tick();
 </script>
 </body>
 </html>

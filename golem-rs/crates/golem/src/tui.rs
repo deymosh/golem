@@ -211,6 +211,9 @@ pub struct App {
     /// When the expensive machine readings in `facts` were taken, so a
     /// redraw does not pay for them again. See [`FACTS_TTL`].
     read_at: Option<Instant>,
+    /// How many actions the last drawing put on a row: up and down move by
+    /// what is on screen, which is fewer than four on a narrow window.
+    per: std::cell::Cell<usize>,
 }
 
 impl Default for App {
@@ -238,6 +241,7 @@ impl App {
             engines: Vec::new(),
             log: Vec::new(),
             read_at: None,
+            per: std::cell::Cell::new(COLS),
         }
     }
 
@@ -272,17 +276,19 @@ impl App {
         self.selected = self.selected.saturating_sub(1);
     }
 
-    /// Move to the row below, keeping the column.
+    /// Move to the row below, keeping the column, as the grid is drawn.
     pub fn down(&mut self) {
-        if self.selected + COLS < COLS * GRID.len() {
-            self.selected += COLS;
+        let per = self.per.get();
+        if self.selected + per < COLS * GRID.len() {
+            self.selected += per;
         }
     }
 
-    /// Move to the row above, keeping the column.
+    /// Move to the row above, keeping the column, as the grid is drawn.
     pub fn up(&mut self) {
-        if self.selected >= COLS {
-            self.selected -= COLS;
+        let per = self.per.get();
+        if self.selected >= per {
+            self.selected -= per;
         }
     }
 
@@ -517,6 +523,7 @@ fn screen(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
     // The grid, flowed to the width: four to a row when there is room,
     // fewer on a narrow window, and at least one row.
     let per = ((w.saturating_sub(2)) / CELL).clamp(1, COLS);
+    app.per.set(per);
     let cells: Vec<Line<'static>> = grid_lines(app, per);
     let room = h.saturating_sub(header_rows + bottom_rows).max(1);
     // On a window too short for every grid row, the selection's row is kept.
@@ -881,6 +888,7 @@ pub fn run(
     let mut running: Option<&'static str> = None;
     let mut job = Job { act: &act, tx: &tx, running: &mut running };
     let mut progress_read = Instant::now();
+    let mut quit_armed = false;
 
     loop {
         // Every turn of the loop draws, which is also what makes a resize
@@ -896,6 +904,8 @@ pub fn run(
                 // One notch of the wheel moves one action, like an arrow key.
                 Event::Mouse(mouse) => {
                     match mouse.kind {
+                        MouseEventKind::ScrollUp if app.focus() == Focus::Models => app.model_previous(),
+                        MouseEventKind::ScrollDown if app.focus() == Focus::Models => app.model_next(),
                         MouseEventKind::ScrollUp => app.previous(),
                         MouseEventKind::ScrollDown => app.next(),
                         _ => {}
@@ -913,6 +923,9 @@ pub fn run(
             // is caught here or not at all.
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 break;
+            }
+            if !matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
+                quit_armed = false;
             }
 
             // The pull prompt takes every key while it is open.
@@ -960,6 +973,13 @@ pub fn run(
                     Some(engine) => job.start(&mut app, Action::SetEngine, "engine", engine),
                     None => app.set_message("one engine installed - nothing to switch to"),
                 },
+                // A running action outlives the screen (it is its own
+                // process), so quitting then takes a second press.
+                (_, KeyCode::Char('q') | KeyCode::Esc) if app.busy && !quit_armed => {
+                    quit_armed = true;
+                    app.set_message("an action is running and keeps running after the screen closes (logs/web-job.log) - q again to quit");
+                    continue;
+                }
                 (_, KeyCode::Char('q') | KeyCode::Esc) => break,
 
                 (Focus::Actions, KeyCode::Left | KeyCode::Char('h')) => app.previous(),

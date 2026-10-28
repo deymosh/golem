@@ -125,8 +125,9 @@ fn env_or(home: &Path, key: &str, fallback: &str) -> String {
 
 /// The driver itself: install check, cheap sweeps, ranking, full tune.
 fn auto_tune(home: &Path, opts: &Options) -> Result<(), String> {
-    let preset_rel =
-        config::get(home, "MODELS_PRESET").unwrap_or_else(|| "config/models.ini".to_string());
+    // The same file every sweep starts from: never the effective preset an
+    // earlier tune wrote, whose overlays would become the candidates' start.
+    let preset_rel = tune::base_preset(home);
     let preset_path = home.join(&preset_rel);
     let text = std::fs::read_to_string(&preset_path)
         .map_err(|_| format!("preset file not found: {}", preset_path.display()))?;
