@@ -1,13 +1,16 @@
 # Running Golem on AMD GPUs (ROCm/HIP)
 
 Everything in this repo defaults to NVIDIA + CUDA, but the same stack runs on AMD GPUs
-through llama.cpp's ROCm/HIP backend. Nothing has to be configured on a normal machine: the
-GPU vendor is **auto-detected** (`GPU_BACKEND = "auto"`, the default) — NVIDIA resolves to
-`cuda`, AMD to `rocm`. Set it explicitly only when detection can't work or guesses wrong
-(headless box, remote host, dual-GPU):
+through llama.cpp's ROCm/HIP backend, or its Vulkan one. Nothing has to be configured on a
+normal machine: the GPU vendor is **auto-detected** (`GPU_BACKEND = "auto"`, the default)
+from the card's PCI vendor ID — NVIDIA resolves to `cuda`, AMD to `rocm`, Intel to
+`vulkan`. No ROCm tool is needed for that: `nvidia-smi` answers when it is there, and
+otherwise the Windows display-adapter registry or Linux's `/sys/class/drm` names the card.
+Set it explicitly only when detection guesses wrong (headless box, remote host, dual-GPU) or
+to try the other AMD backend:
 
 ```toml
-GPU_BACKEND = "rocm"    # or "cuda"; auto detects NVIDIA -> cuda, AMD -> rocm
+GPU_BACKEND = "rocm"    # cuda | rocm | vulkan | metal; auto reads the card's vendor
 ```
 
 `rocm` then means two things, and they are the same engine either way:
@@ -16,6 +19,15 @@ GPU_BACKEND = "rocm"    # or "cuda"; auto detects NVIDIA -> cuda, AMD -> rocm
 |---|---|
 | native (Linux, Windows) | the `linux_asset_rocm` / `windows_asset_rocm` release the adapter names — the official `llama-*-bin-ubuntu-rocm-*-x64.tar.gz` or `llama-*-bin-win-rocm-*-x64.zip`, installed by `golem up` or `golem install`. The HIP runtime ships inside the archive, so there is no ROCm equivalent of the separate `cudart` runtime the CUDA asset needs |
 | container | the `rocm` build arg: `docker build --build-arg GPU_BACKEND=rocm -t golem:rocm .`, run with `/dev/kfd` and `/dev/dri` passed through instead of `gpus: all` ([compose.yml](../compose.yml), `--profile rocm`) |
+
+### Vulkan
+
+`GPU_BACKEND = "vulkan"` installs the same release's `llama-*-bin-win-vulkan-x64.zip` or
+`llama-*-bin-ubuntu-vulkan-x64.tar.gz` (the adapter's `windows_asset_vulkan` /
+`linux_asset_vulkan`). It needs nothing beyond the GPU driver and has no gfx target list, so
+it is the backend to try when the ROCm build does not load on a card; which of the two is
+faster on a given card is for `golem bench` to say. It runs on an NVIDIA card too, which is how the
+non-CUDA path — install, start, bench, tune — is exercised on the NVIDIA reference box.
 
 ## Requirements
 
@@ -46,16 +58,31 @@ what reaches the model. See AMD's ROCm docs.
 ## Status and the eval gate
 
 **This path is not exercised by the reference machine** (NVIDIA RTX 3060 12 GB): the
-rocm release assets and the `golem:rocm` image are pinned from upstream but have never been
-through this repo's eval gate. On AMD hardware, right after the first `golem up`, run:
+rocm and vulkan release assets and the `golem:rocm` image are pinned from upstream but have
+never been through this repo's eval gate. On AMD hardware, right after the first `golem up`,
+run it for each backend worth keeping:
 
 ```bash
 golem eval --long 200000   # adopt only on PASS — same rule as a CUDA upgrade
 ```
 
+## VRAM readings
+
+The tuner, `golem bench`, `golem status` and the console read the card's VRAM without
+vendor tools:
+
+| | total | in use |
+|---|---|---|
+| NVIDIA | `nvidia-smi` | `nvidia-smi` |
+| Windows, any vendor | the display class's registry key (`HardwareInformation.qwMemorySize`, or the binary `MemorySize` some AMD drivers write) | the `GPUAdapterMemory` performance counters, through WMI |
+| Linux, amdgpu | `/sys/class/drm/card*/device/mem_info_vram_total` | `mem_info_vram_used` |
+
+With several adapters the largest one is the card (a discrete Radeon beats a Ryzen iGPU's
+carve-out). The Windows counters name adapters by LUID only, so the in-use figure is the
+highest of them: on a box with an iGPU next to the card, an idle card can read the iGPU's
+use until a model is loaded. A Windows reading costs one PowerShell start (~0.4 s).
+
 Also expect the VRAM-headroom notes in [models.md](models.md) to shift: the silent
 spill-to-shared-memory threshold that governs `--n-cpu-moe` tuning on the NVIDIA reference box
 behaves differently (and not always silently) per AMD driver. Re-run `golem bench` after any
-offload change. One known gap: the VRAM line in `golem status` and the header of `golem tui`
-comes from `nvidia-smi`, so on AMD it simply stays silent — the health check itself is
-vendor-independent.
+offload change.

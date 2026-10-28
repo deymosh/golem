@@ -83,9 +83,9 @@ and holding the 200K gate. What is still open, from
 
 ## Smaller items
 
-- The AMD path (`GPU_BACKEND = "rocm"`, the rocm release assets, the rocm image) has never
-  been through the eval gate here, and `golem status` / the tuner read VRAM through
-  `nvidia-smi` only.
+- The AMD path (`GPU_BACKEND = "rocm"` or `"vulkan"`, their release assets, the rocm
+  image) has never been through the eval gate: an RX 7800 XT on Windows is the first box to
+  run it. Its `eval --long 200000` on both backends decides which one `auto` gives AMD.
 - `scripts/cargo.sh` picks the built binary from `target/<profile>/` when no target triple
   is configured; that branch (Linux and macOS checkouts) has not been run by hand.
 - mintty and raw conhost have not been walked by hand with the screen.

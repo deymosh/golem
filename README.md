@@ -39,7 +39,7 @@ machine. Measured numbers: [docs/models.md](docs/models.md).
 
 | | |
 |---|---|
-| GPU | NVIDIA (CUDA) or AMD (ROCm) with 12 GB VRAM — detected automatically; dense models up to ~9B fit fully in VRAM; MoE models of the 30B class run with expert weights offloaded to system RAM |
+| GPU | NVIDIA (CUDA) or AMD (ROCm or Vulkan) with 12 GB VRAM — detected automatically; dense models up to ~9B fit fully in VRAM; MoE models of the 30B class run with expert weights offloaded to system RAM |
 | RAM | 32 GB recommended for MoE offload (16 GB is enough for dense models) |
 | OS | Linux, or Windows natively (no Docker, no WSL, no Git Bash) |
 | Docker | optional: Engine or Desktop + Compose v2 + GPU passthrough, for the container |

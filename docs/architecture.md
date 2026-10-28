@@ -156,7 +156,9 @@ adapter and the preset, and spawns nothing - `golem up --dry-run` prints it.
   GitHub release archives per platform and GPU backend (`windows_asset_cuda`,
   `linux_asset_rocm`, ...), the server's name, its capabilities (`api_anthropic`,
   `router`) and the flag translation (`flag.*`, `map.*`) from the canonical llama.cpp
-  names. The platform is detected, never configured; `GPU_BACKEND = "auto"` reads the card.
+  names. The platform is detected, never configured; `GPU_BACKEND = "auto"` reads the
+  card's PCI vendor (`nvidia-smi`, else the Windows registry or Linux sysfs, through
+  `machine`): NVIDIA is `cuda`, AMD `rocm`, Intel `vulkan`.
 - **Install** (`release.rs`) downloads the matching archives with `curl` and extracts them
   into `.local/engines/<name>/<build>-<backend>/`, writing a `BUILD` marker only when every
   archive extracted. On Windows the extractor is `%SystemRoot%\System32\tar.exe` (bsdtar,
