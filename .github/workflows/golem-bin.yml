@@ -118,7 +118,12 @@ jobs:
         run: |
           src=golem-rs/target/${{ matrix.target }}/release/golem
           if [[ "${{ runner.os }}" == Windows ]]; then
-            7z a "${{ matrix.asset }}" "${src}.exe" "${src}w.exe"
+            # Archive from inside the release directory: 7z stores the paths it
+            # is given, and the zip must hold golem.exe and golemw.exe at its
+            # root - unzipped anywhere, the two files beside each other are the
+            # whole install.
+            (cd "$(dirname "${src}.exe")" \
+              && 7z a "$GITHUB_WORKSPACE/${{ matrix.asset }}" golem.exe golemw.exe)
           else
             cp "${src}" "${{ matrix.asset }}"
           fi
