@@ -140,6 +140,16 @@ MODEL_ALIAS = "ornith-1.5-35b"
 # /health and /models do not count as activity.
 #SLEEP_IDLE_SECONDS = "600"
 
+# ------------------------------------------------------------
+# Updates
+# ------------------------------------------------------------
+
+# Golem checks GitHub for a new release of itself once a day and offers it
+# in the console and, in a terminal, before `up` and `tui`. "off" stops the
+# automatic checks; `golem update` still works. A checkout never updates
+# itself: `git pull` and `./scripts/cargo.sh build`.
+UPDATE_CHECK = "ask"
+
 # A Hugging Face token, for a gated or private repo.
 #HF_TOKEN = ""
 

@@ -47,12 +47,12 @@ pub enum Plan {
 
 /// The actions the console offers, in the order it offers them: the page's
 /// own names, which is what `POST /api/run` is handed.
-pub const ACTIONS: [&str; 9] =
-    ["start", "stop", "restart", "status", "bench", "eval", "tune", "report", "pull"];
+pub const ACTIONS: [&str; 10] =
+    ["start", "stop", "restart", "status", "bench", "eval", "tune", "report", "pull", "update"];
 
 /// The actions the console answers itself, without running a verb: they
 /// rewrite the configuration rather than start anything.
-pub const SETTINGS: [&str; 2] = ["alias", "engine"];
+pub const SETTINGS: [&str; 3] = ["alias", "engine", "skip-update"];
 
 /// Whether `action` is one the console offers. `up` and `down` are accepted
 /// as the CLI's spellings of `start` and `stop`.
@@ -97,6 +97,9 @@ pub fn plan(action: &str, arg: &str) -> Option<Plan> {
         }
         "pull" if !arg.is_empty() => Some(Plan::Command(vec![action.to_string(), arg.to_string()])),
         "bench" | "pull" | "report" => Some(Plan::Command(vec![action.to_string()])),
+        // The console's Update button: no question on the way, the click is
+        // the yes.
+        "update" => Some(Plan::Command(vec!["update".to_string(), "--yes".to_string()])),
         _ => None,
     }
 }
@@ -376,5 +379,13 @@ mod tests {
         assert_eq!(plan("report", "sneaky"), Some(command(&["report"])));
         assert_eq!(plan("nonsense", ""), None);
         assert_eq!(plan("", ""), None);
+    }
+
+    #[test]
+    fn the_update_button_is_an_unconditional_yes() {
+        // The click is the consent, so the child runs with --yes: a prompt
+        // in the job log would wait on a terminal nobody is reading.
+        assert_eq!(plan("update", ""), Some(command(&["update", "--yes"])));
+        assert_eq!(plan("update", "sneaky"), Some(command(&["update", "--yes"])));
     }
 }

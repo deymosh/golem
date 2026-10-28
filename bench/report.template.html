@@ -91,11 +91,18 @@ html.app .edge { display: block; }
   .bar { height: auto; padding-block: 8px; row-gap: 8px; } .state span { overflow: hidden; text-overflow: ellipsis; } .state .extra { display: none; } }
 
 /* ---- page -------------------------------------------------------------- */
-main { flex: 1; min-height: 0; width: 100%; max-width: 1240px; margin: 0 auto; display: flex;
+main { flex: 1; min-height: 0; width: 100%; max-width: 1240px; margin: 0 auto; display: flex; flex-wrap: wrap;
   padding: 22px max(18px, env(safe-area-inset-right, 0px)) 18px max(18px, env(safe-area-inset-left, 0px)); }
 section { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 16px; }
 section[hidden] { display: none; }
 section > * { flex: none; }
+/* The update banner, a full-width strip above whichever tab is open. */
+.update { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+  padding: 10px 14px; margin-bottom: 16px; background: var(--surface); border: 1px solid var(--hair); border-radius: 10px; }
+.update[hidden] { display: none; }
+.update span b { color: var(--ink); font-weight: 600; }
+.update span { color: var(--soft); font-size: 13px; }
+.update .spacer { flex: 1; }
 /* What scrolls in each tab. */
 #m-list { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
 #tab-results { overflow-y: auto; padding-right: 4px; margin-right: -4px; }
@@ -222,6 +229,15 @@ tr.classrow td { color: var(--soft); font-size: 12px; font-weight: 600; padding-
 <div class="edge ne" data-edge="ne"></div><div class="edge nw" data-edge="nw"></div><div class="edge se" data-edge="se"></div><div class="edge sw" data-edge="sw"></div>
 
 <main>
+  <!-- The update banner: shown only when api/state has an update to name.
+       The job it starts shows its progress in the job pane under Models. -->
+  <div class="update" id="update" role="status" hidden>
+    <span id="update-text"></span>
+    <span class="spacer"></span>
+    <button class="btn go" id="update-go">Update</button>
+    <a class="btn quiet" id="update-link" target="_blank" rel="noopener" hidden>What's new</a>
+    <button class="btn quiet" id="update-skip">Not now</button>
+  </div>
   <section id="tab-models" hidden>
     <div class="surface">
       <div class="strip" id="control">
@@ -695,8 +711,42 @@ function renderState(s) {
   const log = $("c-log");
   log.hidden = !s.job_tail;
   if (s.job_tail) renderJobLog(log, s.job_tail);
+  renderUpdate(s.update);
   document.querySelectorAll("#control .btn, #pull-form .btn").forEach((b) => { b.disabled = !!busy; });
 }
+
+// The update banner: a release on offer, or one installed and waiting for a
+// restart. Hidden the rest of the time - api/state says `update: null`.
+let updateShown = "";
+function renderUpdate(u) {
+  const shown = JSON.stringify(u) || "";
+  if (shown === updateShown) return;
+  updateShown = shown;
+  const box = $("update");
+  box.hidden = !u;
+  if (!u) return;
+  $("update-text").innerHTML = u.installed
+    ? `Golem <b>${esc(u.latest)}</b> is installed. Restart Golem to use it.`
+    : `Golem <b>${esc(u.latest)}</b> is available (you have ${esc(u.current)}).`;
+  $("update-link").hidden = !u.url;
+  if (u.url) $("update-link").href = u.url;
+  $("update-go").hidden = u.installed;
+  $("update-skip").hidden = u.installed;
+}
+
+// The click is the consent: the job runs `golem update --yes`, its progress
+// lands in the job pane, and the Models tab is where that pane lives.
+$("update-go").onclick = async () => {
+  updateShown = "";
+  $("update").hidden = true;
+  try { await post("api/run", "action=update"); } catch (e) { /* the poll says so */ }
+  showTab("models");
+  setTimeout(pollLive, 1200);
+};
+$("update-skip").onclick = async () => {
+  $("update").hidden = true;
+  try { await post("api/run", "action=skip-update"); } catch (e) { /* nothing to skip */ }
+};
 
 // The job pane, one div per line: the clock stamp dimmed, the === strips
 // bold, a verdict tag coloured. Rebuilt only when the text changed - the

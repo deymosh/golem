@@ -108,6 +108,13 @@ const ACCEPT_POLL: Duration = Duration::from_millis(100);
 /// activity for `SLEEP_IDLE_SECONDS`, so the poll keeps nothing awake.
 const LOAD_GUARD_POLL: Duration = Duration::from_secs(2);
 
+/// How long the update check waits between its own passes.
+///
+/// The check itself decides whether a pass is due (once a day, in the state
+/// file), so this only bounds how stale a long-running service's view can
+/// get.
+const UPDATE_CHECK_POLL: Duration = Duration::from_secs(60 * 60);
+
 /// Where the service is, as the file it writes and the client reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
@@ -549,6 +556,18 @@ fn serve(home: &Path, start_now: bool) -> i32 {
     {
         let (home, starting) = (home.to_path_buf(), Arc::clone(&starting));
         std::thread::spawn(move || guard_loads(&home, &starting));
+    }
+    // The daily update check, off the serving path: a background thread that
+    // passes the baton to `update::background_check` and sleeps. The check
+    // decides its own due date, so an off switch or a fresh state file makes
+    // a pass cost nothing; errors are ignored, because a release that cannot
+    // be asked about is not the engine's problem.
+    {
+        let home = home.to_path_buf();
+        std::thread::spawn(move || loop {
+            crate::update::background_check(&home);
+            std::thread::sleep(UPDATE_CHECK_POLL);
+        });
     }
     // A `shutdown` request's exit code, once its thread has stopped the engine.
     let shutdown: Arc<Mutex<Option<i32>>> = Arc::new(Mutex::new(None));

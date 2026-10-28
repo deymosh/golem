@@ -376,6 +376,66 @@ fn an_unknown_action_is_refused() {
     );
 }
 
+// ---- the update banner (api/state's update, skip-update) ----------------
+
+/// An update state in the fixture home, as the daily check leaves it.
+fn update_state(dir: &std::path::Path, text: &str) {
+    std::fs::create_dir_all(dir.join("data/cache")).expect("cache");
+    std::fs::write(dir.join("data/cache/update.txt"), text).expect("write update state");
+}
+
+#[test]
+fn state_names_an_update_when_one_is_on_offer() {
+    let (dir, cfg) = fixture("update-offer");
+    std::fs::write(dir.join("golem.toml"), "LOCAL_AI_PORT=1\n").expect("write golem.toml");
+    update_state(
+        &dir,
+        "checked = 1798200000\n\
+         latest = v99.0.0\n\
+         url = https://github.com/deymosh/golem/releases/tag/v99.0.0\n",
+    );
+    let addr = spawn(router(cfg));
+
+    let response = request(addr, "/api/state");
+    assert!(response.contains(r#""latest": "v99.0.0""#), "{response}");
+    assert!(response.contains(r#""url": "https://github.com/deymosh/golem/releases/tag/v99.0.0""#), "{response}");
+    assert!(response.contains(r#""installed": false"#), "{response}");
+    // The shape is one object or null - never an absent member, which an
+    // older page would read as its own kind of broken.
+    assert!(response.contains(r#""update": {"#), "{response}");
+}
+
+#[test]
+fn with_nothing_to_say_the_update_is_null() {
+    let (dir, cfg) = fixture("update-null");
+    std::fs::write(dir.join("golem.toml"), "LOCAL_AI_PORT=1\n").expect("write golem.toml");
+    let addr = spawn(router(cfg));
+    assert!(request(addr, "/api/state").contains(r#""update": null"#));
+}
+
+#[test]
+fn skipping_the_update_records_the_tag() {
+    let (dir, cfg) = fixture("update-skip");
+    update_state(&dir, "latest = v99.0.0\n");
+    let addr = spawn(router(cfg));
+
+    let response = post(addr, "/api/run", "action=skip-update");
+    assert!(response.contains("\"result\": \"applied\""), "{response}");
+    let state = std::fs::read_to_string(dir.join("data/cache/update.txt")).expect("read");
+    assert!(state.contains("latest = v99.0.0"), "{state}");
+    assert!(state.contains("skipped = v99.0.0"), "{state}");
+
+    // And the banner stays down on the next poll: the skip is the offer's
+    // answer.
+    assert!(request(addr, "/api/state").contains(r#""update": null"#));
+
+    // With no latest on file there is nothing to skip.
+    let (dir, cfg) = fixture("update-skip-empty");
+    update_state(&dir, "checked = 1798200000\n");
+    let addr = spawn(router(cfg));
+    assert!(post(addr, "/api/run", "action=skip-update").contains("\"result\": \"bad-input\""));
+}
+
 // ---- the Models tab (api/models and the three edits) -------------------
 
 const PRESET: &str = "\

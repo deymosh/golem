@@ -179,6 +179,14 @@ fn cmd_driver(action: &str, rest: &[String]) -> ExitCode {
         };
     }
 
+    if matches!(action, "up" | "start") {
+        // The update offer, in a terminal only, before the engine takes the
+        // stage: an install ends this command, and the user runs it again.
+        if let Some(exit) = update::prompt_if_due(&home) {
+            return code(exit);
+        }
+    }
+
     if matches!(action, "up" | "start" | "restart") {
         let verb = if action == "restart" { "restart" } else { "up" };
         // `up` may fetch a model first, and its progress is a bar here.
@@ -242,6 +250,10 @@ async fn cmd_open_console() -> ExitCode {
 /// when there is none.
 async fn cmd_tui() -> ExitCode {
     let home = prepare_home();
+    // The update offer, in a terminal only, before the screen opens.
+    if let Some(exit) = update::prompt_if_due(&home) {
+        return code(exit);
+    }
     let log = paths::job_log(&home);
     // The closure owns everything it touches: `tui::run` hands it to a
     // thread per action, so nothing here can borrow from this function.

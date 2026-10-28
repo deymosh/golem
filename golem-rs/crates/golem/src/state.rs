@@ -30,11 +30,25 @@ pub fn presets(home: &Path) -> Vec<String> {
     ini::Document::read(&preset_path(home)).map(|doc| doc.preset_names()).unwrap_or_default()
 }
 
-/// Point the setup at another preset (`alias`) or engine (`engine`), by
-/// rewriting golem.toml: `applied`, or `bad-input` for a name that is not
+/// Point the setup at another preset (`alias`) or engine (`engine`), or
+/// record an update the console declined (`skip-update`), in golem.toml or
+/// the update state file: `applied`, or `bad-input` for a name that is not
 /// installed - the same lists the console's choices and the screen offer, so
 /// a hand-made request cannot write a name that would not start.
 pub fn apply(home: &Path, setting: &str, value: &str) -> std::io::Result<&'static str> {
+    if setting == "skip-update" {
+        let path = crate::paths::update_state(home);
+        let mut state = golem_core::update::parse_state(
+            &std::fs::read_to_string(&path).unwrap_or_default(),
+        );
+        let Some(latest) = state.latest.clone() else { return Ok("bad-input") };
+        state.skipped = Some(latest);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, golem_core::update::write_state(&state))?;
+        return Ok("applied");
+    }
     let (key, installed) = match setting {
         "alias" => ("MODEL_ALIAS", presets(home)),
         "engine" => ("ENGINE", engines(home)),
@@ -175,6 +189,46 @@ pub struct Snapshot {
     pub job_tail: String,
     /// The running job's bar, when it has one.
     pub job_progress: Option<Progress>,
+    /// An update on offer, or one installed and waiting for a restart.
+    pub update: Option<UpdateNotice>,
+}
+
+/// An update the page's banner has something to say about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateNotice {
+    /// The version this build is.
+    pub current: String,
+    /// The tag on offer, or the one installed and not yet restarted into.
+    pub latest: String,
+    /// The release's page.
+    pub url: String,
+    /// True when the tag is already on disk and Golem only needs a restart.
+    pub installed: bool,
+}
+
+/// What the update state file offers the running build, or `None`: a newer
+/// release that was not skipped, or a tag installed since this one started.
+fn update_notice(home: &Path) -> Option<UpdateNotice> {
+    let current = env!("CARGO_PKG_VERSION");
+    let state = golem_core::update::parse_state(
+        &std::fs::read_to_string(crate::paths::update_state(home)).unwrap_or_default(),
+    );
+    // The tag the banner names: first a tag installed since this build
+    // started - it outranks the offer, because the update already happened -
+    // else a newer release on offer. The same tag running is home, not news.
+    let (latest, installed) = match state.installed.as_deref() {
+        Some(tag) if golem_core::update::is_newer(current, tag) => (tag.to_string(), true),
+        _ => match golem_core::update::offer(current, &state) {
+            Some(tag) => (tag, false),
+            None => return None,
+        },
+    };
+    Some(UpdateNotice {
+        current: format!("v{current}"),
+        latest,
+        url: state.url.unwrap_or_default(),
+        installed,
+    })
 }
 
 pub fn snapshot(home: &Path, job: &SharedJob) -> Snapshot {
@@ -198,6 +252,7 @@ pub fn snapshot(home: &Path, job: &SharedJob) -> Snapshot {
         // 200 lines, because the pane scrolls.
         job_tail: job_tail(home, 200),
         job_progress: if job_running { job_progress(home) } else { None },
+        update: update_notice(home),
     }
 }
 
@@ -259,6 +314,56 @@ mod tests {
         // in the binary, so it is still the one engine on offer.
         let dir = home("no-engines");
         assert_eq!(engines(&dir), vec![crate::paths::DEFAULT_ENGINE.to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_update_notice_reads_the_state_file() {
+        let dir = home("update-notice");
+        // Nothing on file: no banner.
+        assert_eq!(update_notice(&dir), None);
+        // A newer release on offer.
+        std::fs::create_dir_all(dir.join("data/cache")).expect("cache");
+        std::fs::write(
+            dir.join("data/cache/update.txt"),
+            "checked = 1798200000\n\
+             latest = v99.0.0\n\
+             url = https://github.com/deymosh/golem/releases/tag/v99.0.0\n",
+        )
+        .expect("state");
+        assert_eq!(
+            update_notice(&dir),
+            Some(UpdateNotice {
+                current: "v0.1.0".to_string(),
+                latest: "v99.0.0".to_string(),
+                url: "https://github.com/deymosh/golem/releases/tag/v99.0.0".to_string(),
+                installed: false,
+            })
+        );
+        // Skipped: the banner goes away.
+        assert_eq!(apply(&dir, "skip-update", "").expect("skip"), "applied");
+        assert_eq!(update_notice(&dir), None);
+        // A stale installed tag does not bring it back, but a newer release
+        // on file is still an offer.
+        std::fs::write(
+            dir.join("data/cache/update.txt"),
+            "latest = v99.0.0\ninstalled = v0.1.0\n",
+        )
+        .expect("state");
+        assert_eq!(
+            update_notice(&dir).map(|n| (n.latest, n.installed)),
+            Some(("v99.0.0".to_string(), false))
+        );
+        // The same tag running is home, not news.
+        std::fs::write(dir.join("data/cache/update.txt"), "latest = v0.1.0\ninstalled = v0.1.0\n")
+            .expect("state");
+        assert_eq!(update_notice(&dir), None);
+        // Installed and newer: the banner says to restart.
+        std::fs::write(dir.join("data/cache/update.txt"), "latest = v99.0.0\ninstalled = v99.0.0\n")
+            .expect("state");
+        let notice = update_notice(&dir).expect("installed notice");
+        assert!(notice.installed);
+        assert_eq!(notice.latest, "v99.0.0");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -298,12 +298,22 @@ async fn api_state(State(app): State<Arc<App>>) -> Response {
         values.iter().map(|v| json::quote(v)).collect::<Vec<_>>().join(", ")
     };
     let vram = snapshot.vram_mib.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string());
+    let update = match &snapshot.update {
+        Some(u) => format!(
+            "{{\"current\": {}, \"latest\": {}, \"url\": {}, \"installed\": {}}}",
+            json::quote(&u.current),
+            json::quote(&u.latest),
+            json::quote(&u.url),
+            u.installed
+        ),
+        None => "null".to_string(),
+    };
     json(
         StatusCode::OK,
         format!(
             "{{\"up\": {}, \"vram\": {}, \"alias\": {}, \"engine\": {}, \"presets\": [{}], \
              \"engines\": [{}], \"job_running\": {}, \"job_action\": {}, \"job_tail\": {}, \
-             \"job_progress\": {}}}",
+             \"job_progress\": {}, \"update\": {}}}",
             snapshot.up,
             vram,
             json::quote(&snapshot.alias),
@@ -314,6 +324,7 @@ async fn api_state(State(app): State<Arc<App>>) -> Response {
             json::quote(&snapshot.job_action),
             json::quote(&snapshot.job_tail),
             snapshot.job_progress.as_ref().map_or_else(|| "null".to_string(), |p| p.to_json()),
+            update,
         ),
     )
 }
