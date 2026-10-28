@@ -81,7 +81,21 @@ and holding the 200K gate. What is still open, from
 - Flint fine-tunes: Flint itself was rejected (context capped at 88064 tokens on 12 GB,
   the needle failed twice); a variant with a smaller KV footprint would be worth a tune.
 
+## 5. Web search, phase 2: pages that need JavaScript
+
+`golem_web_fetch` reads a page's HTML without running it, and a page that builds its
+content with JavaScript says so and gives its description
+([architecture.md](architecture.md#web-search)). The next step renders such pages in a
+headless browser, on any host that has one: golem finds a Chromium-family browser where
+each OS installs it (Edge, Chrome, Chromium, Brave on Windows, macOS and Linux), starts
+it headless on a temporary profile, and reads the rendered DOM over the DevTools
+protocol on a loopback socket - not `--dump-dom`, whose output a detached launcher (Edge
+on Windows) never hands back. A host with no browser, a container among them, keeps
+today's fetch. The rendered DOM goes through the same Markdown extraction, and the
+same private-address check applies to every request the page makes.
+
 ## Smaller items
+
 
 - The AMD path (`GPU_BACKEND = "rocm"` or `"vulkan"`, their release assets, the rocm
   image) has never been through the eval gate: an RX 7800 XT on Windows is the first box to
