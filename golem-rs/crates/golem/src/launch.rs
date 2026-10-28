@@ -30,6 +30,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use golem_core::adapter;
+use golem_core::gpu;
 use golem_core::ini;
 use golem_core::record;
 
@@ -834,18 +835,21 @@ fn merge(into: &mut Vec<(String, String)>, extra: Vec<(String, String)>) {
 
 /// `GPU_BACKEND`, with `auto` resolved from what this machine has.
 ///
-/// A backend is a fact about the card, so `auto` reads it: `nvidia-smi` for
-/// CUDA, `rocminfo` for ROCm, and on macOS the answer is Metal whatever is
-/// installed. The adapter's `backend` key is the last fallback, for a machine
-/// where nothing answers and the adapter still knows what it wants.
+/// A backend is a fact about the card, so `auto` reads it: `nvidia-smi` on
+/// PATH for CUDA (one cheap spawn, kept first), else the machine probe's
+/// vendor - CUDA for NVIDIA, ROCm for AMD, Vulkan for Intel. On macOS the
+/// answer is Metal whatever is installed. The adapter's `backend` key is
+/// the last fallback, for a machine where nothing answers and the adapter
+/// still knows what it wants.
 fn resolve_backend(home: &Path, fallback: &str) -> String {
     let configured = config::get(home, "GPU_BACKEND").unwrap_or_else(|| "auto".to_string());
     match configured.as_str() {
-        "cuda" | "rocm" | "metal" => configured,
+        "cuda" | "rocm" | "metal" | "vulkan" => configured,
         _ if cfg!(target_os = "macos") => "metal".to_string(),
         _ if which("nvidia-smi") => "cuda".to_string(),
-        _ if which("rocminfo") => "rocm".to_string(),
-        _ => fallback.to_string(),
+        _ => machine::gpu()
+            .map(|card| gpu::backend(card.vendor).to_string())
+            .unwrap_or_else(|| fallback.to_string()),
     }
 }
 
