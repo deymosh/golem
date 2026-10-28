@@ -99,6 +99,24 @@ point loaded, so it is `mlock` on this build - the abort is in
 stops the engine after the first failed load (see [architecture.md](architecture.md)) and
 the tuner stops at a gate whose model does not load.
 
+**b11936** (2026-10-27, measured 2026-10-28) fails the same way under `load-mode = mlock`
+- the weights load in 25 s, then `ggml_backend_cuda_buffer_set_tensor` reports CUDA out of
+memory - and **loads under `mmap+mlock`**, which maps the file and pins it, so the weights
+stay in RAM exactly as `mlock` keeps them. What broke between b11755 and b11879 is `mlock`
+without `mmap` (the weights read into allocated buffers), not the card. With `mmap+mlock`,
+Ornith-1.5-35B on its b11379-tuned preset, quiet desktop, three alternating pairs the same
+session:
+
+| | decode median | decode best | prefill (30K) | MTP accept |
+|---|---|---|---|---|
+| b11379 | 59.5 / 61.4 / 61.0 | 62.3 / 62.4 / 61.3 | 869 / 856 / 857 | 67-68% |
+| b11936 | 58.5 / 54.9 / 52.7 | 61.2 / 59.1 / 58.3 | 925 / 895 / 926 | 63% |
+
+and its gate: 200K **PASS**, 707 t/s needle prefill (b11379: 671), 35.2 t/s at depth
+(35.9). Prefill gains ~7%, decode loses 4-10% with a weaker MTP acceptance, so b11379 stays.
+The next build to try is run under `mmap+mlock`; b11936 stays installed for Flint (below),
+which needs b11803 or later.
+
 ### Using another server
 
 Golem's measuring commands only need an OpenAI-compatible endpoint: point

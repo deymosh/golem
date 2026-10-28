@@ -113,9 +113,10 @@ Desktop.ini
 .env
 .env.*
 
-# Claude Code local session state; the project instructions are shared
+# Claude Code local session state; the project instructions and skills are shared
 .claude/*
 !.claude/CLAUDE.md
+!.claude/skills/
 
 *.secret
 *.secrets

@@ -55,6 +55,9 @@ tuner), `docs/roadmap.md` (the work, in order), `golem-rs/README.md` (code conve
 
 ## Measuring
 
+The `measure` skill (`.claude/skills/measure/`) is the routine: preflight, background
+runs, alternating pairs, build trials, adoption.
+
 - The GPU usually belongs to someone's desktop: ask before loading a model or running
   `bench`/`eval`/`tune`. Cheap checks use a tiny model or no model at all.
 - Never build while a bench or tune is measuring. Run one engine-touching command at a
@@ -64,7 +67,14 @@ tuner), `docs/roadmap.md` (the work, in order), `golem-rs/README.md` (code conve
 - A background script must not be the one that starts `golem service`: the service
   inherits the script's pipe and the script never sees EOF. Start the service
   interactively first.
-- Unexplained VRAM or RAM use: look for an orphan `llama-server` before blaming anything.
+- Unexplained VRAM or RAM use: look for an orphan `llama-server` before blaming anything,
+  then at Docker Desktop's WSL VM (page cache).
+- llama.cpp b11879 and b11936 fail `load-mode = mlock` on load (b11755 does not);
+  `mmap+mlock` pins the same way and loads. A failed CUDA load blanks a Windows screen
+  for a moment.
+- The console page (`bench/report.template.html`) is compiled in: change it, rebuild,
+  restart the service. The presets, library and default adapter are compiled in too, for
+  a release folder; a checkout's own files win.
 
 ## Git
 

@@ -538,9 +538,34 @@ fn grow(current: u64, ceiling: u64) -> Rung {
     }
 }
 
+/// The context a winner must serve: enough for the gate's needle at 90% of
+/// the context (`gate_tokens` / 0.9, rounded up to a 1024-token step), so a
+/// setup that passes the gate is one an agent session can use at that size.
+/// A model trained on less is held only to its trained context (`0` is
+/// unknown, and holds it to the gate).
+pub fn required_ctx(gate_tokens: u64, ctx_train: u64) -> u64 {
+    let need = (gate_tokens * 10).div_ceil(9).div_ceil(1024) * 1024;
+    if ctx_train > 0 {
+        need.min(ctx_train)
+    } else {
+        need
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_winner_holds_the_gate_at_ninety_percent() {
+        // 200000 / 0.9 = 222223, the next 1024 step is 223232, and the gate
+        // there asks for 200908 - capped at 200000.
+        assert_eq!(required_ctx(200_000, 262_144), 223_232);
+        assert!(223_232 * 9 / 10 >= 200_000);
+        // A model trained on less is held to what it was trained on.
+        assert_eq!(required_ctx(200_000, 32_768), 32_768);
+        assert_eq!(required_ctx(200_000, 0), 223_232);
+    }
 
     /// The reference box's wall: 12288 MiB less the default 1024 of headroom.
     const WALL: u64 = 11264;

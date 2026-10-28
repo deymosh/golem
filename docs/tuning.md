@@ -77,6 +77,13 @@ and put back after the run on the configuration as it then stands.
    of noise, and one load confirms it. Two to three loads where the doubling ladder took
    four or five. `TUNE_CTX_POLICY = "ladder"` or `--ctx-ladder` keeps the old ladder for a
    paired comparison; `--ctx N` pins a context.
+   A candidate whose grown context cannot hold the gate - `GATE_TOKENS` at 90%, 223232
+   tokens for 200000, or the trained context when that is smaller - is passed over for the
+   next-ranked one, however fast it was: on a 12 GB card Ornith-1.5-9B with MTP stops at
+   188416 tokens (its draft keeps a cache of its own), and without MTP it holds the 200K
+   gate. Only when no candidate holds it - a model this machine cannot serve at that
+   size - are the ones that fell short gated, largest context first, and the run says
+   so. A pinned `--ctx` is the caller's choice and is not held to this.
 6. **Gate once**, in the serving configuration: the preset's own load mode (sweep points
    load with mmap so a 32 GB box survives the restarts; the gate keeps `mlock`), a needle
    at 90% of the tuned context capped at `GATE_TOKENS`, tool calls, and decode at depth

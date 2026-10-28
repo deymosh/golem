@@ -1351,88 +1351,122 @@ impl<'a> Tuner<'a> {
             ));
         }
 
-        for &candidate in &ranked {
-            let engine = self.points[candidate].engine.clone();
-            if !self.serves_anthropic(&engine) {
+        // Two passes. The first holds every candidate to the context the gate
+        // needs - a setup that cannot hold an agent's window is not one to
+        // serve, however fast, and the next candidate may trade speed for
+        // context (MTP's draft keeps a cache of its own). Only when none can
+        // does the second pass gate the ones that fell short, largest context
+        // first: a model this machine cannot serve at that size still gets
+        // the most it can hold, and the run says so. A pinned context is the
+        // caller's choice and is not held to this.
+        let need = tune::required_ctx(self.opts.gate_tokens_max, self.ctx_ceiling);
+        let mut short: Vec<usize> = Vec::new();
+        for pass in 0..2 {
+            let list: Vec<usize> = if pass == 0 {
+                ranked.clone()
+            } else {
+                if short.is_empty() {
+                    break;
+                }
+                short.sort_by(|&a, &b| self.points[b].ctx.cmp(&self.points[a].ctx));
                 self.emit(format_args!(
-                    "  [WARN] {engine} {} is in the ranking, but its adapter serves no \
-                     /v1/messages - Claude Code cannot use it, so it cannot win",
-                    self.points[candidate].label
+                    "  [WARN] no setup holds {need} tokens on this machine - gating the largest context it reached instead"
                 ));
-                continue;
-            }
-            self.emit(format_args!(
-                "[ OK ] candidate winner: {engine} {} ({:.1} t/s decode)",
-                self.points[candidate].label, self.points[candidate].decode
-            ));
-            let key = self.maximize_ctx(candidate);
-            let ctx = self.points[key].ctx;
-            let n_cpu_moe = self.points[key].n_cpu_moe.clone();
+                std::mem::take(&mut short)
+            };
+            for candidate in list {
+                let engine = self.points[candidate].engine.clone();
+                if !self.serves_anthropic(&engine) {
+                    self.emit(format_args!(
+                        "  [WARN] {engine} {} is in the ranking, but its adapter serves no \
+                         /v1/messages - Claude Code cannot use it, so it cannot win",
+                        self.points[candidate].label
+                    ));
+                    continue;
+                }
+                self.emit(format_args!(
+                    "[ OK ] candidate winner: {engine} {} ({:.1} t/s decode)",
+                    self.points[candidate].label, self.points[candidate].decode
+                ));
+                // The second pass holds points whose context was already grown.
+                let key = if pass == 0 { self.maximize_ctx(candidate) } else { candidate };
+                let ctx = self.points[key].ctx;
+                let n_cpu_moe = self.points[key].n_cpu_moe.clone();
 
-            let gate_tokens = (ctx * 9 / 10).min(self.opts.gate_tokens_max);
-            let overlay = self.overlay_text(&engine, key);
-            // Ungated is measured, not adopted: the setup is staged where the
-            // gate would have served it from, and nothing that serves changes.
-            // `tune --auto` sweeps every preset this way before it gates one.
-            if !self.opts.gate {
+                if pass == 0 && self.opts.ctx == CtxPolicy::Max && ctx < need {
+                    self.emit(format_args!(
+                        "  [WARN] {engine} {} holds {ctx} tokens, under the {need} a {}-token gate needs - trying the next candidate",
+                        self.points[key].label, self.opts.gate_tokens_max
+                    ));
+                    short.push(key);
+                    continue;
+                }
+
+                let gate_tokens = (ctx * 9 / 10).min(self.opts.gate_tokens_max);
+                let overlay = self.overlay_text(&engine, key);
+                // Ungated is measured, not adopted: the setup is staged where the
+                // gate would have served it from, and nothing that serves changes.
+                // `tune --auto` sweeps every preset this way before it gates one.
+                if !self.opts.gate {
+                    let staged = self.stage(&engine, &overlay)?;
+                    self.emit(format_args!("  [ .. ] not gated (--no-gate): staged in {staged}, nothing serves it"));
+                    return Ok(self.verdict(key, &engine, n_cpu_moe, None));
+                }
                 let staged = self.stage(&engine, &overlay)?;
-                self.emit(format_args!("  [ .. ] not gated (--no-gate): staged in {staged}, nothing serves it"));
-                return Ok(self.verdict(key, &engine, n_cpu_moe, None));
-            }
-            let staged = self.stage(&engine, &overlay)?;
 
-            self.enter(Phase::Gate);
-            self.load();
-            self.emit(format_args!("[ .. ] gating {engine} {}: restarting and running the {gate_tokens}-token needle (this takes a while)...", self.points[key].label));
-            let restarted = matches!(self.restart(&engine, &staged, GATE_LOG, true), Ok(0));
-            if !restarted || !self.wait_healthy() {
-                self.say_launcher_tail(GATE_LOG, 6);
-                // A load that died is the same stop as below: the next
-                // candidate would load the same way.
+                self.enter(Phase::Gate);
+                self.load();
+                self.emit(format_args!("[ .. ] gating {engine} {}: restarting and running the {gate_tokens}-token needle (this takes a while)...", self.points[key].label));
+                let restarted = matches!(self.restart(&engine, &staged, GATE_LOG, true), Ok(0));
+                if !restarted || !self.wait_healthy() {
+                    self.say_launcher_tail(GATE_LOG, 6);
+                    // A load that died is the same stop as below: the next
+                    // candidate would load the same way.
+                    if let Some(why) = self.load_failed() {
+                        return Err(format!(
+                            "the engine did not come back for the gate ({why}); nothing adopted"
+                        ));
+                    }
+                    self.emit(format_args!("  [WARN] the engine did not come back on the effective preset - trying the next candidate"));
+                    continue;
+                }
+                let eval = self.gate(&engine, &staged, gate_tokens);
+                // A gate whose model did not load says nothing about the
+                // candidate's needle, and the next candidate loads the same way:
+                // the sweep loaded every point with mmap, the gate with the
+                // preset's own mode. Another load is another driver reset on
+                // Windows, so the run stops here and says why.
                 if let Some(why) = self.load_failed() {
                     return Err(format!(
-                        "the engine did not come back for the gate ({why}); nothing adopted"
+                        "the model did not load in its serving configuration for the gate ({why}); \
+                         every sweep point loaded with mmap, so the gate's load mode is the suspect - \
+                         nothing adopted"
                     ));
                 }
-                self.emit(format_args!("  [WARN] the engine did not come back on the effective preset - trying the next candidate"));
-                continue;
-            }
-            let eval = self.gate(&engine, &staged, gate_tokens);
-            // A gate whose model did not load says nothing about the
-            // candidate's needle, and the next candidate loads the same way:
-            // the sweep loaded every point with mmap, the gate with the
-            // preset's own mode. Another load is another driver reset on
-            // Windows, so the run stops here and says why.
-            if let Some(why) = self.load_failed() {
-                return Err(format!(
-                    "the model did not load in its serving configuration for the gate ({why}); \
-                     every sweep point loaded with mmap, so the gate's load mode is the suspect - \
-                     nothing adopted"
-                ));
-            }
-            let Some(eval) = eval else {
-                self.emit(format_args!("  [WARN] the eval produced no result - trying the next candidate"));
-                continue;
-            };
-            let depth = eval.needle.as_ref().and_then(|n| n.gen_tok_s_at_depth);
-            match eval.needle.as_ref().map(|n| n.verdict) {
-                Some(Gate::Pass) => {
-                    // A context you cannot use at depth is a fake win.
-                    if let Some(depth) = depth {
-                        if depth > 0.0 && depth < floor.depth_decode {
-                            self.emit(format_args!("  [WARN] decode at depth {depth} t/s is under the {} t/s floor - trying the next candidate", floor.depth_decode));
-                            continue;
+                let Some(eval) = eval else {
+                    self.emit(format_args!("  [WARN] the eval produced no result - trying the next candidate"));
+                    continue;
+                };
+                let depth = eval.needle.as_ref().and_then(|n| n.gen_tok_s_at_depth);
+                match eval.needle.as_ref().map(|n| n.verdict) {
+                    Some(Gate::Pass) => {
+                        // A context you cannot use at depth is a fake win.
+                        if let Some(depth) = depth {
+                            if depth > 0.0 && depth < floor.depth_decode {
+                                self.emit(format_args!("  [WARN] decode at depth {depth} t/s is under the {} t/s floor - trying the next candidate", floor.depth_decode));
+                                continue;
+                            }
                         }
+                        self.emit(format_args!("[ OK ] eval gate PASSED"));
+                        self.promote(&engine, &overlay)?;
+                        self.points[key].passed_gate = Some(true);
+                        self.points[key].depth_decode = depth;
+                        return Ok(self.verdict(key, &engine, n_cpu_moe, Some(gate_tokens)));
                     }
-                    self.emit(format_args!("[ OK ] eval gate PASSED"));
-                    self.promote(&engine, &overlay)?;
-                    self.points[key].passed_gate = Some(true);
-                    self.points[key].depth_decode = depth;
-                    return Ok(self.verdict(key, &engine, n_cpu_moe, Some(gate_tokens)));
-                }
-                _ => {
-                    self.emit(format_args!("  [WARN] eval gate FAILED for {engine} + n-cpu-moe {n_cpu_moe} - trying the next candidate"));
-                    self.points[key].passed_gate = Some(false);
+                    _ => {
+                        self.emit(format_args!("  [WARN] eval gate FAILED for {engine} + n-cpu-moe {n_cpu_moe} - trying the next candidate"));
+                        self.points[key].passed_gate = Some(false);
+                    }
                 }
             }
         }
