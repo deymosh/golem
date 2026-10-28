@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(
             update_notice(&dir),
             Some(UpdateNotice {
-                current: "v0.1.0".to_string(),
+                current: format!("v{}", env!("CARGO_PKG_VERSION")),
                 latest: "v99.0.0".to_string(),
                 url: "https://github.com/deymosh/golem/releases/tag/v99.0.0".to_string(),
                 installed: false,
@@ -355,7 +355,8 @@ mod tests {
             Some(("v99.0.0".to_string(), false))
         );
         // The same tag running is home, not news.
-        std::fs::write(dir.join("data/cache/update.txt"), "latest = v0.1.0\ninstalled = v0.1.0\n")
+        let running = format!("v{}", env!("CARGO_PKG_VERSION"));
+        std::fs::write(dir.join("data/cache/update.txt"), format!("latest = {running}\ninstalled = {running}\n"))
             .expect("state");
         assert_eq!(update_notice(&dir), None);
         // Installed and newer: the banner says to restart.
