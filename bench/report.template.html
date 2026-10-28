@@ -138,13 +138,18 @@ pre.log { margin: 0; padding: 12px 14px; font: 12px/1.55 var(--code); color: var
 #c-log { border-top: 1px solid var(--hair); max-height: 420px; }
 /* One job-log line. The clock stamp dims; the === strips stand apart; a
    verdict tag takes the colour the badges use. */
-#c-log .jl { min-height: 18px; }
-#c-log .jt { color: color-mix(in srgb, var(--soft) 55%, transparent); }
-#c-log .jf { color: var(--ink); font-weight: 600; background: color-mix(in srgb, var(--patina) 10%, transparent);
+:is(#c-log, #engine-log) .jl { min-height: 18px; }
+:is(#c-log, #engine-log) .jt { color: color-mix(in srgb, var(--soft) 55%, transparent); }
+:is(#c-log, #engine-log) .jf { color: var(--ink); font-weight: 600; background: color-mix(in srgb, var(--patina) 10%, transparent);
   margin: 2px -14px; padding: 0 14px; }
-#c-log .ok { color: var(--ok); }
-#c-log .warn { color: var(--busy); }
-#c-log .bad { color: var(--bad); }
+:is(#c-log, #engine-log) .ok { color: var(--ok); }
+:is(#c-log, #engine-log) .warn { color: var(--busy); }
+:is(#c-log, #engine-log) .bad { color: var(--bad); }
+/* The engine pane: the model a line is about, as a quiet tag before it. */
+#engine-log .em { display: inline-block; min-width: 14ch; margin-right: 1ch; color: var(--soft); opacity: .8;
+  overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; white-space: nowrap; max-width: 24ch; }
+#engine-log.raw { color: var(--soft); }
+#log-strip { justify-content: space-between; }
 .progress { padding: 10px 14px 12px; border-top: 1px solid var(--hair); }
 .progress .head { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--soft); font-variant-numeric: tabular-nums; }
 .progress .head b { color: var(--ink); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -313,7 +318,11 @@ tr.classrow td { color: var(--soft); font-size: 12px; font-weight: 600; padding-
   </section>
 
   <section id="tab-log" hidden>
-    <div class="surface"><div class="strip sub" id="log-file"></div><pre class="log" id="engine-log"></pre></div>
+    <div class="surface">
+      <div class="strip sub" id="log-strip"><span id="log-file"></span>
+        <button class="btn quiet" id="log-raw" type="button" aria-pressed="false" title="Show llama.cpp's own lines">Raw</button></div>
+      <pre class="log" id="engine-log"></pre>
+    </div>
   </section>
   <div id="tip" hidden></div>
 </main>
@@ -807,9 +816,43 @@ async function pollLive() {
   try {
     const l = await (await fetch("api/logs", { cache: "no-store" })).json();
     $("log-file").textContent = l.file ? l.file : "No engine log yet. It starts with the engine.";
-    $("engine-log").textContent = l.text || "";
+    renderEngineLog($("engine-log"), l);
   } catch (e) { /* no log */ }
 }
+
+// The engine pane: llama.cpp's lines as the service read them (a model tag,
+// loads, request speeds, failures coloured like the job log), or its own
+// text with Raw on. Rebuilt only when what it shows changed, and it follows
+// new lines only when the reader was already at the bottom.
+let ENGINE_RAW = false;
+try { ENGINE_RAW = localStorage.getItem("golem.engineRaw") === "1"; } catch (e) { /* no storage */ }
+let engineLogShown = null;
+function renderEngineLog(pre, l) {
+  const raw = ENGINE_RAW || !Array.isArray(l.lines);
+  const key = (raw ? "r" : "l") + (l.text || "");
+  if (key === engineLogShown) return;
+  engineLogShown = key;
+  const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+  pre.classList.toggle("raw", raw);
+  if (raw) {
+    pre.textContent = l.text || "";
+  } else {
+    pre.innerHTML = l.lines.map((line) =>
+      `<div class="jl${line.k ? " " + line.k : ""}"><span class="em" title="${esc(line.m)}">${esc(line.m || "router")}</span>${esc(line.t)}</div>`
+    ).join("");
+  }
+  if (atEnd) pre.scrollTop = pre.scrollHeight;
+}
+$("log-raw").onclick = () => {
+  ENGINE_RAW = !ENGINE_RAW;
+  $("log-raw").setAttribute("aria-pressed", String(ENGINE_RAW));
+  $("log-raw").classList.toggle("go", ENGINE_RAW);
+  try { localStorage.setItem("golem.engineRaw", ENGINE_RAW ? "1" : "0"); } catch (e) { /* no storage */ }
+  engineLogShown = null;
+  pollLive();
+};
+$("log-raw").setAttribute("aria-pressed", String(ENGINE_RAW));
+$("log-raw").classList.toggle("go", ENGINE_RAW);
 
 // ---- chat ---------------------------------------------------------------
 // The Chat tab frames the engine's own chat page (llama-server's, on the

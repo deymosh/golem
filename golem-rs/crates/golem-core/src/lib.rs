@@ -63,6 +63,10 @@ pub mod library;
 /// console and the screen draw from the newest one.
 pub mod progress;
 
+/// The engine's log read for the console: loads, request speeds, prefill
+/// progress and failures, the router's noise left out.
+pub mod enginelog;
+
 /// The job log's grammar: the header and footer that mark one job, and the
 /// clock stamp each line carries.
 pub mod joblog;

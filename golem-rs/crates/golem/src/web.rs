@@ -357,16 +357,19 @@ async fn api_chat(State(app): State<Arc<App>>) -> Response {
     )
 }
 
-/// `GET /api/logs`: the tail of the engine's log.
+/// `GET /api/logs`: the tail of the engine's log, as it is (`text`) and read
+/// (`lines`, `golem_core::enginelog`). The tail is long because most of the
+/// router's lines fold away in the reading.
 async fn api_logs(State(app): State<Arc<App>>) -> Response {
     let home = app.cfg.home.clone();
-    let tail = tokio::task::spawn_blocking(move || state::log_tail(&home, 200)).await;
+    let tail = tokio::task::spawn_blocking(move || state::log_tail(&home, 600)).await;
     let Ok((file, text)) = tail else {
         return plain(StatusCode::INTERNAL_SERVER_ERROR, "log unavailable");
     };
+    let lines = golem_core::enginelog::to_json(&golem_core::enginelog::read(&text));
     json(
         StatusCode::OK,
-        format!("{{\"file\": {}, \"text\": {}}}", json::quote(&file), json::quote(&text)),
+        format!("{{\"file\": {}, \"text\": {}, \"lines\": {lines}}}", json::quote(&file), json::quote(&text)),
     )
 }
 
