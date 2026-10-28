@@ -53,8 +53,8 @@ tune or an eval in the console, the screen and the terminal are in. What is left
 `master` touches the code or a file the binary compiles in, and attaches the binaries to a `v*` tag, each with nothing to install beside it:
 `golem.exe` and `golemw.exe` with the WebView2 loader and the C runtime linked in, a static
 (musl) `golem` for Linux, a Linux desktop build that uses the system's WebKitGTK, and
-macOS. The test matrix passes on all three; the release job runs only on a tag, so its
-first run is the first release. A fresh clone has no binary until then and builds one with
+macOS. The test matrix passes on all three platforms, and v0.1.0 (2026-10-28) shipped the
+four assets. A fresh clone has no binary until a release and builds one with
 `./scripts/cargo.sh build`. Tagging is a push, and it waits for the go-ahead.
 
 ## 4. Candidates, when the GPU is free
