@@ -735,17 +735,23 @@ function renderUpdate(u) {
 }
 
 // The click is the consent: the job runs `golem update --yes`, its progress
-// lands in the job pane, and the Models tab is where that pane lives.
+// lands in the job pane, and the Models tab is where that pane lives. A
+// refused click (another job is running) leaves the banner up: the poll
+// repaints it, and the offer is not lost.
 $("update-go").onclick = async () => {
   updateShown = "";
-  $("update").hidden = true;
-  try { await post("api/run", "action=update"); } catch (e) { /* the poll says so */ }
-  showTab("models");
+  try {
+    const r = await post("api/run", "action=update");
+    if (r.ok) { $("update").hidden = true; showTab("models"); }
+  } catch (e) { /* the poll repaints */ }
   setTimeout(pollLive, 1200);
 };
 $("update-skip").onclick = async () => {
-  $("update").hidden = true;
-  try { await post("api/run", "action=skip-update"); } catch (e) { /* nothing to skip */ }
+  updateShown = "";
+  try {
+    const r = await post("api/run", "action=skip-update");
+    if (r.ok) $("update").hidden = true;
+  } catch (e) { /* nothing to skip */ }
 };
 
 // The job pane, one div per line: the clock stamp dimmed, the === strips
