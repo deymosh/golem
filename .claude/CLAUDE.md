@@ -29,7 +29,10 @@ tuner), `docs/roadmap.md` (the work, in order), `golem-rs/README.md` (code conve
   dependency set is deliberate (tokio and axum, ratatui and crossterm). JSON, TOML, INI,
   GGUF and HTTP are hand-written; don't add crates casually.
 - After rebuilding, a running `golem service` still runs the old code: `golem service stop`
-  it first.
+  it after the build. With the app window (`golem app`) open, the window starts a new
+  service itself within seconds, from whatever binary is there then - a stop before the
+  build brings the old code straight back. Check the service's start time against the
+  binary's.
 
 ## Code conventions
 
