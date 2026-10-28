@@ -156,9 +156,50 @@ pub fn hex(hash: &[u8; 32]) -> String {
     out
 }
 
+/// The SHA-256 of a file, streamed: a release binary or a 20 GB model is far
+/// larger than a read into memory should be. `read` hears the running byte
+/// count after every chunk, for a caller that shows how far it has got.
+pub fn file(path: &std::path::Path, read: &mut dyn FnMut(u64)) -> std::io::Result<[u8; 32]> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    let mut done = 0u64;
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            return Ok(hasher.finish());
+        }
+        hasher.update(&buf[..n]);
+        done += n as u64;
+        read(done);
+    }
+}
+
+/// The line a `.sha256` file holds for `name`: `sha256sum`'s own shape,
+/// `<hash>  <name>`, so `sha256sum -c` checks it from the file's folder.
+pub fn line(hash: &[u8; 32], name: &str) -> String {
+    format!("{}  {name}\n", hex(hash))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_hashes_like_its_bytes_and_reports_its_progress() {
+        let path = std::env::temp_dir().join(format!("golem-core-sha256-{}", std::process::id()));
+        std::fs::write(&path, b"abc").expect("write");
+        let mut seen = Vec::new();
+        let hash = file(&path, &mut |done| seen.push(done)).expect("hash");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(hex(&hash), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(seen, vec![3]);
+        assert_eq!(
+            line(&hash, "x.gguf"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  x.gguf\n"
+        );
+    }
 
     /// The one-shot digest of `data`, in hex.
     fn digest(data: &[u8]) -> String {

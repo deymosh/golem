@@ -19,7 +19,7 @@ use std::fs::File;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use golem_core::progress::Progress;
 use golem_core::{hub, ini};
@@ -448,16 +448,33 @@ fn hf_get(
         .map_err(|e| format!("cannot move {} into place: {e}", part.display()))?;
     log.ok(&format!("{file} downloaded ({} MB).", size / 1_048_576));
 
-    if have_tool("sha256sum") {
-        match sha256sum(&path) {
-            Ok(line) => {
-                let _ = std::fs::write(with_suffix(&path, ".sha256"), &line);
-                log.line(line.trim_end());
-            }
-            Err(e) => log.warn(&format!("sha256sum failed for {file}: {e}")),
+    match hash_file(log, &path, file, size) {
+        Ok(line) => {
+            let _ = std::fs::write(with_suffix(&path, ".sha256"), &line);
+            log.line(line.trim_end());
         }
+        Err(e) => log.warn(&format!("cannot hash {file}: {e}")),
     }
     Ok(())
+}
+
+/// The `.sha256` line for a downloaded file, hashed in process.
+///
+/// The bare name keeps the line portable - `<hash>  <file>`, checkable with
+/// `sha256sum -c` from that folder. A 20 GB model takes a minute or more,
+/// so the hash says how far it has got, like the download before it.
+fn hash_file(log: &mut Log, path: &Path, file: &str, size: u64) -> Result<String, String> {
+    let label = format!("sha256: {file}");
+    let mut said = Instant::now();
+    let hash = golem_core::sha256::file(path, &mut |done| {
+        if said.elapsed() >= crate::proc::PROGRESS_EVERY {
+            log.progress(&Progress::bytes(done.min(size), size, &label));
+            said = Instant::now();
+        }
+    })
+    .map_err(|e| e.to_string());
+    log.progress_done();
+    Ok(golem_core::sha256::line(&hash?, file))
 }
 
 /// The size a file must reach to count as complete: what Hugging Face
@@ -549,28 +566,6 @@ fn curl_download(
     // The bar goes: the next line says how the download ended.
     log.progress_done();
     Ok(status)
-}
-
-/// `sha256sum <file>`, run in the file's folder, whose one output line
-/// becomes the `.sha256` file.
-///
-/// The bare name keeps the line portable - `<hash>  <file>`, checkable with
-/// `sha256sum -c` from that folder - where a Windows path would make GNU
-/// sha256sum escape every backslash and prefix the line with one.
-fn sha256sum(path: &Path) -> Result<String, String> {
-    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
-        return Err(format!("{} is not a file path", path.display()));
-    };
-    let out = Command::new("sha256sum")
-        .current_dir(dir)
-        .arg(name)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err("sha256sum exited non-zero".to_string());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Free space in GB on the filesystem holding `home`.

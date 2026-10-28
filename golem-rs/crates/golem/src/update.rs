@@ -21,10 +21,10 @@
 //! pulls (`pull.rs`): the binary has no TLS of its own and GitHub is
 //! HTTPS-only.
 
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 
-use golem_core::sha256::{self, Sha256};
+use golem_core::sha256;
 use golem_core::update as core;
 
 use crate::release;
@@ -303,22 +303,9 @@ fn hash_of(
         .ok_or_else(|| format!("{hash_asset} names no hash for {name}"))
 }
 
-/// The SHA-256 of a file, streamed: a release binary is far larger than a
-/// read into memory should be.
+/// The SHA-256 of a downloaded file.
 fn file_hash(path: &Path) -> Result<[u8; 32], String> {
-    let mut file =
-        std::fs::File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        let n = file
-            .read(&mut buf)
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        if n == 0 {
-            return Ok(hasher.finish());
-        }
-        hasher.update(&buf[..n]);
-    }
+    sha256::file(path, &mut |_| {}).map_err(|e| format!("cannot read {}: {e}", path.display()))
 }
 
 /// Windows: the extracted zip's two exes replace the ones beside the running

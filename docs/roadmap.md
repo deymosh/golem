@@ -90,9 +90,6 @@ and holding the 200K gate. What is still open, from
   tune` refuses there and the VRAM readings stay empty. Apple Silicon's memory is shared;
   the branch reports the machine's memory and the share Metal may use
   (`recommendedMaxWorkingSetSize`) as the card. Then a Mac's `eval --long 200000` decides.
-- `golem pull` writes a model's `.sha256` through the `sha256sum` tool and skips it where
-  there is none (a Windows box without Git Bash); `golem_core::sha256` computes it in
-  process.
 - `scripts/cargo.sh` picks the built binary from `target/<profile>/` when no target triple
   is configured; that branch (Linux and macOS checkouts) has not been run by hand.
 - mintty and raw conhost have not been walked by hand with the screen.
