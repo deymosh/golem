@@ -49,32 +49,43 @@ tune or an eval in the console, the screen and the terminal are in. What is left
 
 ## 3. Release
 
-`.github/workflows/golem-bin.yml` builds and tests on the three platforms and attaches the
-binaries to a `v*` tag, each with nothing to install beside it: `golem.exe` and
-`golemw.exe` with the WebView2 loader and the C runtime linked in, a static (musl)
-`golem` for Linux, a Linux desktop build that uses the system's WebKitGTK, and macOS. A
-fresh clone has no binary until then and builds one with `./scripts/cargo.sh build`. Tagging is a push, and it waits for the go-ahead.
+`.github/workflows/golem-bin.yml` builds and tests on the three platforms whenever a push to
+`master` touches the code or a file the binary compiles in, and attaches the binaries to a `v*` tag, each with nothing to install beside it:
+`golem.exe` and `golemw.exe` with the WebView2 loader and the C runtime linked in, a static
+(musl) `golem` for Linux, a Linux desktop build that uses the system's WebKitGTK, and
+macOS. The test matrix passes on all three; the release job runs only on a tag, so its
+first run is the first release. A fresh clone has no binary until then and builds one with
+`./scripts/cargo.sh build`. Tagging is a push, and it waits for the go-ahead.
 
 ## 4. Candidates, when the GPU is free
 
-Every preset was re-tuned and gated on b11379 on 2026-10-25, and the defaults held (the
-numbers are in [models.md](models.md#every-preset-re-tuned-2026-10-25)). What is still
-open, from [engines-and-models.md](engines-and-models.md):
+The lineup is two presets, both gated at 200K on b11379: `ornith-1.5-35b` for code and
+`ornith-1.5-9b` (Q4_K_M, MTP off) for everything else, with the 0.5B smoke model beside
+them ([models.md](models.md)). A model joins only by beating one of them on this machine
+and holding the 200K gate. What is still open, from
+[engines-and-models.md](engines-and-models.md):
 
-- **The next llama.cpp build.** b11879 decodes ~11% slower than b11379 and cannot load
-  under `mlock`; b11755 loads but decodes slower at depth. Each new release gets the same
-  tune and gate, and the adapter's `build` moves when one wins. Where between b11755 and
-  b11879 the `mlock` load started failing is worth pinning down for an upstream report;
-  each probe is one load that may reset the display driver, so it waits for a free desktop.
-- **The everyday slot's quality.** Qwen3.5-9B wins on every speed and holds 200K;
-  Ornith-1.5-9B has the better vendor coding scores but its Q6_K stops at 156672 tokens.
-  A smaller Ornith quant that reaches 200K is the one candidate left there.
-- Strata 0.2.6 passes 200K with its Coder at half llama.cpp's decode, and stays a measured
-  alternative rather than an engine golem runs.
+- **The next llama.cpp build.** b11879 and b11936 both fail `load-mode = mlock` and load
+  under `mmap+mlock`; b11879 decodes ~11% slower than b11379, b11936 4-10% slower, and
+  b11755 loads but decodes slower at depth. Each new release gets the `measure` skill's
+  build trial under `mmap+mlock`, and the adapter's `build` moves when one wins. Where
+  between b11755 and b11879 `mlock` started failing is worth pinning down for an upstream
+  report; each probe is one load that may reset the display driver.
+- **Strata 0.2.7.** A routing prior for cards of 13 GiB or less (+15-37% decode on a 3060
+  by its own notes) may close the gap that kept 0.2.6 at half llama.cpp's decode. It
+  needs the ~64.5 GB Coder pack again, and is measured as another server, like 0.2.6.
+- **MTP for the everyday model.** Ornith-1.5-9B decodes 76-78 t/s with its MTP head, but
+  the draft's own KV cache stops the context at 209920 tokens on 12 GB. A build or flag
+  that shrinks the draft's cache below the wall at 223232 tokens would be a ~40% faster
+  everyday model.
+- Flint fine-tunes: Flint itself was rejected (context capped at 88064 tokens on 12 GB,
+  the needle failed twice); a variant with a smaller KV footprint would be worth a tune.
 
 ## Smaller items
 
 - The AMD path (`GPU_BACKEND = "rocm"`, the rocm release assets, the rocm image) has never
   been through the eval gate here, and `golem status` / the tuner read VRAM through
   `nvidia-smi` only.
+- `scripts/cargo.sh` picks the built binary from `target/<profile>/` when no target triple
+  is configured; that branch (Linux and macOS checkouts) has not been run by hand.
 - mintty and raw conhost have not been walked by hand with the screen.
