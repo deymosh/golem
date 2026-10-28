@@ -294,6 +294,13 @@ fn builder<'a>(context: &'a mut wry::WebContext, url: &str, proxy: EventLoopProx
     wry::WebViewBuilder::with_web_context(context)
         .with_url(url)
         .with_initialization_script("window.__GOLEM_APP__ = true;")
+        // A link that asks for a new window - "Open in the browser" on the
+        // Chat tab, a link in a model's answer - goes to the system
+        // browser rather than to a bare webview window of its own.
+        .with_new_window_req_handler(|url| {
+            crate::desktop::open(&url);
+            false
+        })
         .with_ipc_handler(move |request| {
             if let Some(chrome) = chrome(request.body()) {
                 let _ = proxy.send_event(chrome);

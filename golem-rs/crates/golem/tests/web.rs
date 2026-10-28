@@ -324,6 +324,22 @@ fn state_reports_what_the_page_shows() {
 }
 
 #[test]
+fn chat_names_the_engines_page_and_the_key_it_asks_for() {
+    let (dir, cfg) = fixture("chat");
+    std::fs::write(dir.join("golem.toml"), "LOCAL_AI_HOST=\"0.0.0.0\"\nLOCAL_AI_PORT=\"8123\"\nLOCAL_AI_API_KEY=\"secret\"\n")
+        .expect("write golem.toml");
+    let addr = spawn(router(cfg));
+    let response = request(addr, "/api/chat");
+    assert!(response.starts_with("HTTP/1.1 200"), "{}", response.lines().next().unwrap_or(""));
+    assert!(response.contains("{\"host\": \"0.0.0.0\", \"port\": \"8123\", \"key\": \"secret\"}"), "{response}");
+
+    // No key in golem.toml: the one the engine is started with.
+    std::fs::write(dir.join("golem.toml"), "").expect("write golem.toml");
+    let response = request(addr, "/api/chat");
+    assert!(response.contains("\"key\": \"local-ai-key\""), "{response}");
+}
+
+#[test]
 fn state_lists_the_installed_engines_and_the_last_job_log() {
     let (dir, cfg) = fixture("state-engines");
     std::fs::write(dir.join("golem.toml"), "LOCAL_AI_PORT=1\n").expect("write golem.toml");

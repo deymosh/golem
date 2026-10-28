@@ -26,12 +26,12 @@ fn host(home: &Path) -> String {
 }
 
 /// `LOCAL_AI_PORT`, default `8000`.
-fn port(home: &Path) -> String {
+pub(crate) fn port(home: &Path) -> String {
     config::get(home, "LOCAL_AI_PORT").unwrap_or_else(|| "8000".to_string())
 }
 
 /// `LOCAL_AI_API_KEY`, default `local-ai-key`.
-fn api_key(home: &Path) -> String {
+pub(crate) fn api_key(home: &Path) -> String {
     config::get(home, "LOCAL_AI_API_KEY").unwrap_or_else(|| "local-ai-key".to_string())
 }
 

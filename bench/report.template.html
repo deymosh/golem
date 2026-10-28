@@ -101,6 +101,10 @@ section > * { flex: none; }
 #tab-results { overflow-y: auto; padding-right: 4px; margin-right: -4px; }
 #tab-log > .surface { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #engine-log { flex: 1; min-height: 0; }
+#tab-chat > .surface { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+#chat-key { font-family: var(--code); width: 22ch; }
+#chat-frame { flex: 1; min-height: 0; width: 100%; border: 0; border-top: 1px solid var(--hair); background: var(--surface); }
+#chat-open { text-decoration: none; }
 h2 { font: 600 15px/1.3 var(--display); margin: 14px 0 -6px; }
 .sub { color: var(--soft); font-size: 13px; }
 .surface { background: var(--surface); border: 1px solid var(--hair); border-radius: 10px; min-width: 0; }
@@ -201,6 +205,7 @@ tr.classrow td { color: var(--soft); font-size: 12px; font-weight: 600; padding-
   <div class="brand"><svg id="mark" viewBox="0 0 64 68" role="img" aria-label="Golem"></svg><span>Golem</span></div>
   <nav class="tabs" aria-label="Sections">
     <a href="#models" data-tab="models" hidden>Models</a>
+    <a href="#chat" data-tab="chat" hidden>Chat</a>
     <a href="#results" data-tab="results">Results</a>
     <a href="#log" data-tab="log" hidden>Engine log</a>
   </nav>
@@ -276,6 +281,20 @@ tr.classrow td { color: var(--soft); font-size: 12px; font-weight: 600; padding-
     <div class="surface scroll"><table id="runs"></table></div>
   </section>
 
+  <section id="tab-chat" hidden>
+    <div class="surface">
+      <div class="strip" id="chat-key-strip">
+        <span class="sub">The chat asks for an API key the first time. Paste this one into it:</span>
+        <input type="password" id="chat-key" readonly aria-label="API key" spellcheck="false">
+        <button class="btn go" id="chat-copy">Copy key</button>
+        <button class="btn quiet" id="chat-show">Show</button>
+        <a class="btn quiet" id="chat-open" target="_blank" rel="noopener">Open in the browser</a>
+      </div>
+      <p class="msg" id="chat-msg" role="status" aria-live="polite" hidden></p>
+      <iframe id="chat-frame" title="Chat" allow="clipboard-read; clipboard-write; microphone" hidden></iframe>
+    </div>
+  </section>
+
   <section id="tab-log" hidden>
     <div class="surface"><div class="strip sub" id="log-file"></div><pre class="log" id="engine-log"></pre></div>
   </section>
@@ -347,7 +366,8 @@ function showTab(name) {
     if (a.dataset.tab === name) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   });
-  ["models", "results", "log"].forEach((t) => { $("tab-" + t).hidden = t !== name; });
+  ["models", "chat", "results", "log"].forEach((t) => { $("tab-" + t).hidden = t !== name; });
+  if (name === "chat") showChat();
 }
 window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
 
@@ -716,13 +736,15 @@ async function pollLive() {
   } catch (e) { live = false; }
   if (live !== LIVE) {
     LIVE = live;
-    document.querySelectorAll('.tabs a[data-tab="models"], .tabs a[data-tab="log"]').forEach((a) => { a.hidden = !live; });
+    document.querySelectorAll('.tabs a[data-tab="models"], .tabs a[data-tab="chat"], .tabs a[data-tab="log"]').forEach((a) => { a.hidden = !live; });
     showTab(location.hash.slice(1) || (live ? "models" : "results"));
   }
   if (!live) return;
   let state = null;
   try { state = await (await fetch("api/state", { cache: "no-store" })).json(); renderState(state); }
   catch (e) { $("c-state-text").textContent = "No state"; }
+  ENGINE_UP = !!state?.up;
+  if (!$("tab-chat").hidden) showChat();
   try { renderModels(await (await fetch("api/models", { cache: "no-store" })).json(), state); } catch (e) { /* older service */ }
   try {
     const l = await (await fetch("api/logs", { cache: "no-store" })).json();
@@ -730,6 +752,55 @@ async function pollLive() {
     $("engine-log").textContent = l.text || "";
   } catch (e) { /* no log */ }
 }
+
+// ---- chat ---------------------------------------------------------------
+// The Chat tab frames the engine's own chat page (llama-server's, on the
+// engine's port). That page keeps its API key in its own origin's storage,
+// which this page cannot write, so the key is shown here to paste once.
+let ENGINE_UP = false;
+let CHAT = null;        // { host, port, key } from api/chat
+let chatShown = "";     // the URL the frame was loaded with, while it is up
+async function showChat() {
+  if (!CHAT) {
+    try { CHAT = await (await fetch("api/chat", { cache: "no-store" })).json(); } catch (e) { return; }
+    $("chat-key").value = CHAT.key || "";
+  }
+  // A wildcard bind is reached the way this page was; anything else by name.
+  const wild = CHAT.host === "0.0.0.0" || CHAT.host === "::";
+  const url = `http://${wild ? location.hostname : CHAT.host}:${CHAT.port}/`;
+  $("chat-open").href = url;
+  const frame = $("chat-frame"), msg = $("chat-msg");
+  frame.hidden = !ENGINE_UP;
+  msg.hidden = ENGINE_UP;
+  if (!ENGINE_UP) {
+    msg.textContent = "The chat opens when a model is serving. Start one from Models.";
+    chatShown = "";
+    frame.removeAttribute("src");
+  } else if (chatShown !== url) {
+    // Loaded once per start: the poll must not reload a conversation.
+    frame.src = url;
+    chatShown = url;
+  }
+}
+$("chat-show").onclick = () => {
+  const input = $("chat-key"), hidden = input.type === "password";
+  input.type = hidden ? "text" : "password";
+  $("chat-show").textContent = hidden ? "Hide" : "Show";
+};
+$("chat-copy").onclick = async () => {
+  const input = $("chat-key");
+  let copied = false;
+  try { await navigator.clipboard.writeText(input.value); copied = true; } catch (e) {
+    // No async clipboard (an insecure origin, an older webview): select it.
+    const type = input.type;
+    input.type = "text";
+    input.select();
+    try { copied = document.execCommand("copy"); } catch (err) { copied = false; }
+    input.type = type;
+  }
+  $("chat-copy").textContent = copied ? "Copied" : "Select and copy it";
+  setTimeout(() => { $("chat-copy").textContent = "Copy key"; }, 2000);
+};
 
 document.querySelectorAll("#control .btn").forEach((b) => b.onclick = async () => {
   b.disabled = true;

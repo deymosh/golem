@@ -111,6 +111,7 @@ pub fn router(cfg: Config) -> axum::Router {
         .route("/results.jsonl", get(results_jsonl))
         .route("/api/state", get(api_state))
         .route("/api/logs", get(api_logs))
+        .route("/api/chat", get(api_chat))
         .route("/api/run", post(api_run))
         .route("/api/models", get(api_models))
         .route("/api/addmodel", post(api_addmodel))
@@ -313,6 +314,31 @@ async fn api_state(State(app): State<Arc<App>>) -> Response {
             json::quote(&snapshot.job_action),
             json::quote(&snapshot.job_tail),
             snapshot.job_progress.as_ref().map_or_else(|| "null".to_string(), |p| p.to_json()),
+        ),
+    )
+}
+
+/// `GET /api/chat`: where the engine's own chat page is, and the key it asks
+/// for once.
+///
+/// The chat page is llama-server's, served by the engine on its own port,
+/// and the console's Chat tab frames it. It keeps the API key in its own
+/// origin's storage, which no other page can write, and the engine's
+/// `/props` (where `--webui-config` defaults would come from) is behind the
+/// same key - so the key is handed to the person, to paste once. It is no
+/// more than the console already gives away: the same-origin guard keeps
+/// other sites out, and whoever reaches the console runs the engine anyway.
+async fn api_chat(State(app): State<Arc<App>>) -> Response {
+    let home = &app.cfg.home;
+    let host = crate::config::get(home, "LOCAL_AI_HOST").unwrap_or_else(|| "127.0.0.1".to_string());
+    json(
+        StatusCode::OK,
+        format!(
+            "{{\"host\": {}, \"port\": {}, \"key\": {}}}",
+            json::quote(&host),
+            json::quote(&crate::client::port(home)),
+            // The key the engine is started with, default included.
+            json::quote(&crate::client::api_key(home))
         ),
     )
 }
