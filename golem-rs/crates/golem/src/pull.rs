@@ -19,12 +19,13 @@ use std::fs::File;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use golem_core::progress::Progress;
 use golem_core::{hub, ini};
 use golem_core::time::civil_from_days;
 
+use crate::proc::{CURL_STALL, watch_progress};
 use crate::{config, machine, state};
 
 /// The free space the download refuses to start below, in GB - the biggest
@@ -35,9 +36,6 @@ const MIN_FREE_GB: u64 = 25;
 /// bytes at all. curl runs with `-f`, so an error page is never saved, and a
 /// `.part` becomes the file only when curl finished.
 const FLOOR_FALLBACK: u64 = 1;
-
-/// How often a download in a job's log says how far it has got.
-const PROGRESS_EVERY: Duration = Duration::from_secs(2);
 
 /// `golem pull [preset | owner/repo[:quant]]`.
 pub fn run(home: &Path, args: &[String]) -> i32 {
@@ -505,14 +503,17 @@ fn parse_linked_size(headers: &str) -> Option<u64> {
     last
 }
 
-/// `curl -fL -C - --retry 5 --retry-delay 3 -o <part> <url>`.
+/// `curl -fL -C - --retry 5 --retry-delay 3 <stall limits> -o <part> <url>`.
 ///
-/// On a terminal curl draws its own meter on the inherited stderr. Anywhere
-/// else - the job log the console and the screen tail - its meter would be
-/// carriage-return noise, so curl runs quiet and the download says how far
-/// it has got as `PROGRESS` lines instead: the `.part` file's size against
-/// the size the Hub reported (`sized`, the file's name and its bytes), every
-/// [`PROGRESS_EVERY`]. The exit status is returned for the caller to judge.
+/// The stall limits ([`CURL_STALL`]) end a connection that has gone quiet,
+/// and `--retry` has another go at what they cut short. On a terminal curl
+/// draws its own meter on the inherited stderr. Anywhere else - the job log
+/// the console and the screen tail - its meter would be carriage-return
+/// noise, so curl runs quiet and the download says how far it has got as
+/// `PROGRESS` lines instead: the `.part` file's size against the size the
+/// Hub reported (`sized`, the file's name and its bytes), every
+/// [`crate::proc::PROGRESS_EVERY`]. The exit status is returned for the
+/// caller to judge.
 fn curl_download(
     log: &mut Log,
     url: &str,
@@ -523,6 +524,7 @@ fn curl_download(
     let quiet = !std::io::stderr().is_terminal();
     let mut command = Command::new("curl");
     command.args(["-fL", "-C", "-", "--retry", "5", "--retry-delay", "3"]);
+    command.args(CURL_STALL);
     if quiet {
         // Silent, but errors still said.
         command.arg("-sS");
@@ -540,22 +542,13 @@ fn curl_download(
     let Some((file, total)) = sized.filter(|_| quiet) else {
         return command.status().map_err(|e| format!("cannot run curl: {e}"));
     };
-    let mut child = command.spawn().map_err(|e| format!("cannot run curl: {e}"))?;
+    let child = command.spawn().map_err(|e| format!("cannot run curl: {e}"))?;
     let label = format!("pull: {file}");
-    let mut said = Instant::now().checked_sub(PROGRESS_EVERY).unwrap_or_else(Instant::now);
-    loop {
-        if let Some(status) = child.try_wait().map_err(|e| format!("cannot wait for curl: {e}"))? {
-            // The bar goes: the next line says how the download ended.
-            log.progress_done();
-            return Ok(status);
-        }
-        if said.elapsed() >= PROGRESS_EVERY {
-            let done = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0);
-            log.progress(&Progress::bytes(done.min(total), total, &label));
-            said = Instant::now();
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    let status = watch_progress(child, part, total, &label, &mut |progress| log.progress(&progress))
+        .map_err(|e| format!("cannot wait for curl: {e}"))?;
+    // The bar goes: the next line says how the download ended.
+    log.progress_done();
+    Ok(status)
 }
 
 /// `sha256sum <file>`, run in the file's folder, whose one output line

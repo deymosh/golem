@@ -1,7 +1,46 @@
-//! Running a child: this binary's own verbs, with their output in a file.
+//! Running a child: this binary's own verbs, with their output in a file,
+//! and the shared curl plumbing a download watches.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
+
+use golem_core::progress::Progress;
+
+/// The curl arguments that end a connection going nowhere: thirty seconds to
+/// connect, then at least 1 KiB/s or curl gives up after a minute of it.
+/// `--retry` has another go at a transfer these cut short, so a stalled
+/// download becomes a pause instead of a hang.
+pub const CURL_STALL: [&str; 6] =
+    ["--connect-timeout", "30", "--speed-limit", "1024", "--speed-time", "60"];
+
+/// How often a download in a job's log says how far it has got.
+pub const PROGRESS_EVERY: Duration = Duration::from_secs(2);
+
+/// Wait for `child` to finish, and every [`PROGRESS_EVERY`] tell `emit` how
+/// far the file it is writing has grown - its size against `total`, capped
+/// at it, with `label` naming the work. The status comes back for the caller
+/// to judge.
+pub fn watch_progress(
+    mut child: Child,
+    dest: &Path,
+    total: u64,
+    label: &str,
+    emit: &mut dyn FnMut(Progress),
+) -> std::io::Result<ExitStatus> {
+    let mut said = Instant::now().checked_sub(PROGRESS_EVERY).unwrap_or_else(Instant::now);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if said.elapsed() >= PROGRESS_EVERY {
+            let done = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+            emit(Progress::bytes(done.min(total), total, label));
+            said = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
 
 /// This binary, about to run `args` against the same home.
 pub fn golem(home: &Path, args: &[String]) -> std::io::Result<Command> {
@@ -28,4 +67,45 @@ pub fn run_to_file(mut command: Command, log: &Path) -> std::io::Result<i32> {
         .stderr(Stdio::from(err))
         .status()?;
     Ok(status.code().unwrap_or(-1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_stall_args_end_a_connection_gone_quiet() {
+        assert_eq!(
+            CURL_STALL,
+            ["--connect-timeout", "30", "--speed-limit", "1024", "--speed-time", "60"]
+        );
+    }
+
+    #[test]
+    fn a_child_that_ends_is_watched_to_its_status() {
+        let mut command = Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        if cfg!(windows) {
+            command.args(["/C", "exit 0"]);
+        } else {
+            command.args(["-c", "exit 0"]);
+        }
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+        // The destination exists and is smaller than the total, so the one
+        // tick the short child allows says how much is there, capped.
+        let mut said = Vec::new();
+        let status = watch_progress(child, &std::env::temp_dir(), 100, "test", &mut |p| {
+            said.push(p)
+        })
+        .expect("watched");
+        assert!(status.success());
+        let first = said.first().expect("at least one tick");
+        assert_eq!(first.total, 100);
+        assert!(first.done <= 100, "{first:?}");
+        assert_eq!(first.label, "test");
+    }
 }

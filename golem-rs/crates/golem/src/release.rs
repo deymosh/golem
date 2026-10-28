@@ -20,13 +20,16 @@
 //! ("This does not look like a tar archive"). `%SystemRoot%\System32\tar.exe`
 //! is bsdtar and reads one.
 
-use std::io::Write;
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
 use golem_core::ini;
 use golem_core::json::{self, Value};
 use golem_core::pattern;
+use golem_core::progress;
+
+use crate::proc::{CURL_STALL, watch_progress};
 
 /// The platform's name in an adapter's keys: `windows_repo`,
 /// `linux_asset_cuda`, `macos_asset_metal`.
@@ -213,7 +216,8 @@ pub fn ensure(home: &Path, pinned: &Pinned, out: &mut dyn Write) -> Result<Insta
         let mb = (asset.size as f64 / 1_048_576.0).round() as u64;
         let _ = writeln!(out, "[ .. ] {} ({mb} MB)", asset.name);
         let zip = tmp.join(&asset.name);
-        curl_download(&asset.url, &zip)?;
+        curl_download(&asset.url, &zip, &asset.name, asset.size, out)?;
+        let _ = writeln!(out, "[ .. ] extracting {}", asset.name);
         extract(&tar, &zip, &dir)?;
     }
 
@@ -417,26 +421,73 @@ fn curl_text(url: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// `curl -fL --retry 5 --retry-delay 3 -o <dest> <url>`.
+/// `curl -fL -C - --retry 5 --retry-delay 3 <stall limits> -o <dest> <url>`.
 ///
-/// Output is captured rather than inherited, so a failure's stderr is what the
-/// caller's `[FAIL]` line carries.
-fn curl_download(url: &str, dest: &Path) -> Result<(), String> {
-    let out = Command::new("curl")
-        .args(["-fL", "--retry", "5", "--retry-delay", "3", "-o"])
+/// The stall limits ([`CURL_STALL`]) end a connection that has gone quiet,
+/// and `--retry` has another go at what they cut short; `-C -` makes the
+/// retry resume what is already on disk. On a terminal curl draws its own
+/// meter on the inherited stderr. Anywhere else - the job log - the meter
+/// would be noise, so curl runs `-sS` (silent, errors still said) and the
+/// download says how far it has got as `PROGRESS` lines against the asset's
+/// `total`, and its stderr is captured so a failure can still say why.
+fn curl_download(
+    url: &str,
+    dest: &Path,
+    asset: &str,
+    total: u64,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let quiet = !std::io::stderr().is_terminal();
+    let mut command = Command::new("curl");
+    command.args(["-fL", "-C", "-", "--retry", "5", "--retry-delay", "3"]);
+    command.args(CURL_STALL);
+    if quiet {
+        command.arg("-sS");
+    }
+    command
+        .arg("-o")
         .arg(dest)
         .arg(url)
         .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("cannot run curl: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "download failed for {url} ({}): {}",
-            code_text(out.status),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        .stdout(Stdio::null());
+    if !quiet {
+        let status = command
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(|e| format!("cannot run curl: {e}"))?;
+        return download_ended(url, status, None);
     }
-    Ok(())
+    command.stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|e| format!("cannot run curl: {e}"))?;
+    // With `-sS` curl writes errors here and nothing else, so the pipe
+    // cannot fill while the download runs.
+    let mut pipe = child.stderr.take();
+    let label = format!("install: {asset}");
+    let status = watch_progress(child, dest, total, &label, &mut |progress| {
+        let _ = writeln!(out, "{}", progress.line());
+    })
+    .map_err(|e| format!("cannot wait for curl: {e}"))?;
+    // The bar goes: the next line says how the download ended.
+    let _ = writeln!(out, "{}", progress::CLEAR);
+    let said = pipe
+        .as_mut()
+        .map(|pipe| {
+            let mut text = String::new();
+            let _ = pipe.read_to_string(&mut text);
+            text
+        })
+        .unwrap_or_default();
+    download_ended(url, status, Some(&said))
+}
+
+/// The failure the caller's `[FAIL]` line carries, curl's own words included
+/// where they were captured.
+fn download_ended(url: &str, status: ExitStatus, said: Option<&str>) -> Result<(), String> {
+    if status.success() {
+        return Ok(());
+    }
+    let said = said.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("curl said nothing");
+    Err(format!("download failed for {url} ({}): {said}", code_text(status)))
 }
 
 /// `<tar> -xf <zip> -C <dir>`, output captured; a failure carries tar's stderr.
@@ -473,6 +524,27 @@ fn code_text(status: std::process::ExitStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An `ExitStatus` carrying `code`, the portable way (a raw wait status
+    /// on Unix, the code itself on Windows).
+    fn exit_status(code: i32) -> ExitStatus {
+        #[cfg(windows)]
+        return std::os::windows::process::ExitStatusExt::from_raw(code as u32);
+        #[cfg(unix)]
+        return std::os::unix::process::ExitStatusExt::from_raw(code << 8);
+    }
+
+    #[test]
+    fn a_failed_download_says_what_curl_said() {
+        assert!(download_ended("https://example.invalid/x", exit_status(0), Some("boom")).is_ok());
+        let err = download_ended("https://example.invalid/x", exit_status(1), Some("404: Not Found\r\n"))
+            .expect_err("failed");
+        assert_eq!(err, "download failed for https://example.invalid/x (exit code 1): 404: Not Found");
+        // Nothing captured: the message still says the download failed.
+        let err = download_ended("https://example.invalid/x", exit_status(1), Some(""))
+            .expect_err("failed");
+        assert!(err.contains("curl said nothing"), "{err}");
+    }
 
     fn home(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("golem-rs-release-{tag}"));
