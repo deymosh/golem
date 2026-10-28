@@ -86,6 +86,13 @@ and holding the 200K gate. What is still open, from
 - The AMD path (`GPU_BACKEND = "rocm"` or `"vulkan"`, their release assets, the rocm
   image) has never been through the eval gate: an RX 7800 XT on Windows is the first box to
   run it. Its `eval --long 200000` on both backends decides which one `auto` gives AMD.
+- macOS is experimental: the card reader (`machine::gpu`) has no macOS branch, so `golem
+  tune` refuses there and the VRAM readings stay empty. Apple Silicon's memory is shared;
+  the branch reports the machine's memory and the share Metal may use
+  (`recommendedMaxWorkingSetSize`) as the card. Then a Mac's `eval --long 200000` decides.
+- `golem pull` writes a model's `.sha256` through the `sha256sum` tool and skips it where
+  there is none (a Windows box without Git Bash); `golem_core::sha256` computes it in
+  process.
 - `scripts/cargo.sh` picks the built binary from `target/<profile>/` when no target triple
   is configured; that branch (Linux and macOS checkouts) has not been run by hand.
 - mintty and raw conhost have not been walked by hand with the screen.

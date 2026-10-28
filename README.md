@@ -41,7 +41,7 @@ machine. Measured numbers: [docs/models.md](docs/models.md).
 |---|---|
 | GPU | NVIDIA (CUDA) or AMD (ROCm or Vulkan) with 12 GB VRAM — detected automatically; dense models up to ~9B fit fully in VRAM; MoE models of the 30B class run with expert weights offloaded to system RAM |
 | RAM | 32 GB recommended for MoE offload (16 GB is enough for dense models) |
-| OS | Linux, or Windows natively (no Docker, no WSL, no Git Bash) |
+| OS | Linux, or Windows natively (no Docker, no WSL, no Git Bash). macOS on Apple Silicon is experimental: it builds, passes the tests and serves on Metal, but has not been run on a real Mac, and `golem tune` cannot read a Mac's memory yet |
 | Docker | optional: Engine or Desktop + Compose v2 + GPU passthrough, for the container |
 | Disk | ~17 GB for the default model (less for smaller models) |
 
