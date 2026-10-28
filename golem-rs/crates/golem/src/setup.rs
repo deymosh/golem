@@ -208,6 +208,11 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
     } else {
         report.warn("nvidia-smi is not available.");
         report.warn("No NVIDIA GPU was detected through the standard NVIDIA interface.");
+        // The card may still be there and readable without NVIDIA's tool:
+        // the machine probe reads the registry on Windows and sysfs on Linux.
+        if let Some(gpu) = crate::machine::gpu() {
+            report.info(&format!("GPU detected: {} ({} MiB VRAM)", gpu.name, gpu.total_mib));
+        }
     }
 
     // ---- 6. gpu devices --------------------------------------------------

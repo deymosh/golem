@@ -15,7 +15,6 @@
 
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use golem_core::json::{self, Value};
@@ -43,16 +42,16 @@ const DECODE_PROMPT: &str = "Write a complete Python module implementing an LRU 
 /// `golem bench [--runs N] [--prefill TOKENS]`: 0 when every request was
 /// answered, 1 otherwise.
 pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
-    run_with(home, args, out, &vram_used)
+    run_with(home, args, out, &|| crate::machine::vram_used_mib().map(|m| m.to_string()))
 }
 
 /// [`run`], with the one machine fact it needs - the VRAM reading - handed
 /// in rather than taken.
 ///
-/// The seam exists for the tests: a test must not need nvidia-smi, and this
-/// box has one, so a bench that shelled out to it inside `run` would make
-/// every assertion depend on the GPU's current load. `vram` returns the
-/// trimmed number, or `None` when nvidia-smi is not there.
+/// The seam exists for the tests: a test must not need a readable card, and
+/// this box has one, so a bench that shelled out to it inside `run` would
+/// make every assertion depend on the GPU's current load. `vram` returns
+/// the used MiB as text, or `None` when nothing answers.
 fn run_with(
     home: &Path,
     args: &[String],
@@ -278,25 +277,6 @@ fn median(sorted: &[f64]) -> f64 {
         n if n % 2 == 1 => sorted[n / 2],
         n => (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0,
     }
-}
-
-/// `nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits`, first
-/// line trimmed.
-///
-/// `None` when nvidia-smi is not there; the caller turns that into the
-/// literal `-`.
-fn vram_used() -> Option<String> {
-    let out = Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    Some(text.lines().next().unwrap_or("").trim().to_string())
 }
 
 // ---------------------------------------------------------------

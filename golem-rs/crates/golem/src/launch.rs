@@ -596,7 +596,7 @@ fn wait_for_card() -> bool {
     let deadline = Instant::now() + CARD_SETTLE;
     loop {
         match machine::vram_used_mib() {
-            // No nvidia-smi (an AMD box, a container): nothing to wait for.
+            // No readable card (a headless box, a container): nothing to wait for.
             None => return true,
             Some(used) if used < CARD_IDLE_MIB => return true,
             Some(_) => {}

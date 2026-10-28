@@ -298,11 +298,18 @@ pub struct Machine {
 }
 
 impl Machine {
-    /// What nvidia-smi, the OS and the CPU say.
+    /// What the card, the OS and the CPU say.
     pub fn probe() -> Result<Machine, String> {
         let Some(gpu) = machine::gpu() else {
-            return Err("auto-tune needs nvidia-smi (an NVIDIA card); for AMD set the split by hand".into());
+            return Err("auto-tune needs the card's VRAM, read from nvidia-smi, the Windows \
+                        GPU counters or amdgpu's sysfs, and none answered"
+                .into());
         };
+        if gpu.total_mib == 0 {
+            return Err("auto-tune needs the card's VRAM, read from nvidia-smi, the Windows \
+                        GPU counters or amdgpu's sysfs, and none answered"
+                .into());
+        }
         Ok(Machine {
             gpu: gpu.name,
             vram_total_mib: gpu.total_mib,

@@ -67,6 +67,10 @@ pub mod progress;
 /// `.ico` file.
 pub mod mark;
 
+/// The graphics card: its vendor from a PCI ID, the backend that vendor
+/// serves, and the reading the Windows GPU probe left.
+pub mod gpu;
+
 /// The schema version this build understands (bumped on breaking changes
 /// to a row's fields; old rows keep parsing).
 pub const SCHEMA_VERSION: u32 = 1;

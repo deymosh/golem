@@ -140,7 +140,7 @@ const FACTS_TTL: Duration = Duration::from_secs(10);
 
 /// What the header says about the machine, read once per refresh.
 ///
-/// Never per frame: `vram_mib` runs nvidia-smi and `web_up` opens a socket,
+/// Never per frame: `vram_mib` asks the card and `web_up` opens a socket,
 /// and a screen that stalls while it waits is worse than one that is a
 /// second out of date.
 #[derive(Debug, Clone, PartialEq)]
@@ -424,8 +424,9 @@ impl App {
     /// Read everything the screen shows.
     ///
     /// One pass over the world per call, never per frame: two sockets (the
-    /// engine and the console), an nvidia-smi, a PowerShell round trip for
-    /// the free memory, `golem.toml`, the preset file, the results file and
+    /// engine and the console), a VRAM reading (nvidia-smi, or the platform
+    /// probe when there is no nvidia-smi), a PowerShell round trip for the
+    /// free memory, `golem.toml`, the preset file, the results file and
     /// the engine's log.
     ///
     /// `force` re-reads the machine even when a value is fresh; the automatic
