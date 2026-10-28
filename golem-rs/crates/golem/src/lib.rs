@@ -33,5 +33,6 @@ pub mod setup;
 pub mod shortcut;
 pub mod state;
 pub mod tune;
+pub mod update;
 pub mod tui;
 pub mod web;

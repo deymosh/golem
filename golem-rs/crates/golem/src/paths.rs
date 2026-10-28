@@ -152,6 +152,12 @@ pub fn load_failure(home: &Path) -> PathBuf {
     home.join(".local").join("load-failure.txt")
 }
 
+/// What the update check last found, under the home: `data/cache/update.txt`
+/// (`data/cache` is created on first run, so the file's directory is there).
+pub fn update_state(home: &Path) -> PathBuf {
+    home.join("data").join("cache").join("update.txt")
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -209,6 +215,7 @@ mod tests {
         assert_eq!(results(home), home.join("bench/results.jsonl"));
         assert_eq!(engine_log(home), home.join("logs").join("llama-server.log"));
         assert_eq!(pid_file(home), home.join(".local").join("llama-server.pid"));
+        assert_eq!(update_state(home), home.join("data/cache/update.txt"));
     }
 
     #[test]

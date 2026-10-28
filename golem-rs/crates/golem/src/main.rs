@@ -13,7 +13,7 @@ use golem::config::Overrides;
 use golem::desktop::{self, FrontEnd, Launch};
 use golem::{
     auto_tune, client, install, launch, logs, measure, paths, pull, runner, service, setup, tui,
-    tune, web,
+    tune, update, web,
 };
 
 const USAGE: &str = "\
@@ -64,6 +64,9 @@ Front ends and results:
                    Static results page (or bench/RESULTS.md)
   results [--model NAME]
                    List the recorded rows
+  update [--check] [--yes]
+                   Update this binary from the latest GitHub release
+                   (--check only looks; a checkout updates with git pull)
   version          Print the version
 ";
 
@@ -100,6 +103,7 @@ async fn main() -> ExitCode {
         Some("pull") => code(pull::run(&prepare_home(), &args[1..])),
         Some("setup") => code(setup::run(&prepare_home(), &args[1..])),
         Some("install") => code(install::run(&prepare_home(), &args[1..])),
+        Some("update") => code(update::run(&prepare_home(), &args[1..])),
         Some("service") => code(service::run(&prepare_home(), &args[1..])),
         Some("env") => {
             print!("{}", client::exports(&prepare_home()));
@@ -347,6 +351,9 @@ fn results_path(args: &[String]) -> Option<PathBuf> {
 /// failure is a warning, not an exit: the command that needed the missing
 /// directory reports its own error.
 fn prepare_home() -> PathBuf {
+    // A previous update's `.old` binaries, still to be swept: best-effort,
+    // and the one still running (this process, if it was renamed) stays.
+    update::cleanup_old_binaries();
     let home = paths::home();
     if let Err(e) = paths::ensure(&home) {
         eprintln!("[WARN] cannot create the directories under {}: {e}", home.display());

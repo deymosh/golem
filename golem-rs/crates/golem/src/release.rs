@@ -216,7 +216,7 @@ pub fn ensure(home: &Path, pinned: &Pinned, out: &mut dyn Write) -> Result<Insta
         let mb = (asset.size as f64 / 1_048_576.0).round() as u64;
         let _ = writeln!(out, "[ .. ] {} ({mb} MB)", asset.name);
         let zip = tmp.join(&asset.name);
-        curl_download(&asset.url, &zip, &asset.name, asset.size, out)?;
+        curl_download(&asset.url, &zip, &format!("install: {}", asset.name), asset.size, out)?;
         let _ = writeln!(out, "[ .. ] extracting {}", asset.name);
         extract(&tar, &zip, &dir)?;
     }
@@ -387,7 +387,7 @@ fn remove_any(path: &Path) -> Result<(), String> {
 
 /// The tar to extract with: `%SystemRoot%\System32\tar.exe` (bsdtar, which
 /// reads zip) when it exists, else `tar` from PATH.
-fn tar_program() -> PathBuf {
+pub(crate) fn tar_program() -> PathBuf {
     pick_tar(std::env::var_os("SystemRoot").map(PathBuf::from))
 }
 
@@ -405,9 +405,17 @@ fn pick_tar(system_root: Option<PathBuf>) -> PathBuf {
 }
 
 /// `curl -fsSL <url>`, output captured; a failure carries curl's stderr.
-fn curl_text(url: &str) -> Result<String, String> {
+pub(crate) fn curl_text(url: &str) -> Result<String, String> {
+    curl_text_with(url, &[])
+}
+
+/// [`curl_text`] with extra curl flags - `--max-time`, for a caller that
+/// must not wait on a silent GitHub.
+pub(crate) fn curl_text_with(url: &str, extra: &[&str]) -> Result<String, String> {
     let out = Command::new("curl")
-        .args(["-fsSL", url])
+        .arg("-fsSL")
+        .args(extra)
+        .arg(url)
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("cannot run curl: {e}"))?;
@@ -423,6 +431,9 @@ fn curl_text(url: &str) -> Result<String, String> {
 
 /// `curl -fL -C - --retry 5 --retry-delay 3 <stall limits> -o <dest> <url>`.
 ///
+/// `label` names the work in the `PROGRESS` lines ("install: <asset>",
+/// "update: <asset>").
+///
 /// The stall limits ([`CURL_STALL`]) end a connection that has gone quiet,
 /// and `--retry` has another go at what they cut short; `-C -` makes the
 /// retry resume what is already on disk. On a terminal curl draws its own
@@ -430,10 +441,10 @@ fn curl_text(url: &str) -> Result<String, String> {
 /// would be noise, so curl runs `-sS` (silent, errors still said) and the
 /// download says how far it has got as `PROGRESS` lines against the asset's
 /// `total`, and its stderr is captured so a failure can still say why.
-fn curl_download(
+pub(crate) fn curl_download(
     url: &str,
     dest: &Path,
-    asset: &str,
+    label: &str,
     total: u64,
     out: &mut dyn Write,
 ) -> Result<(), String> {
@@ -462,8 +473,7 @@ fn curl_download(
     // With `-sS` curl writes errors here and nothing else, so the pipe
     // cannot fill while the download runs.
     let mut pipe = child.stderr.take();
-    let label = format!("install: {asset}");
-    let status = watch_progress(child, dest, total, &label, &mut |progress| {
+    let status = watch_progress(child, dest, total, label, &mut |progress| {
         let _ = writeln!(out, "{}", progress.line());
     })
     .map_err(|e| format!("cannot wait for curl: {e}"))?;
@@ -491,7 +501,7 @@ fn download_ended(url: &str, status: ExitStatus, said: Option<&str>) -> Result<(
 }
 
 /// `<tar> -xf <zip> -C <dir>`, output captured; a failure carries tar's stderr.
-fn extract(tar: &Path, zip: &Path, dir: &Path) -> Result<(), String> {
+pub(crate) fn extract(tar: &Path, zip: &Path, dir: &Path) -> Result<(), String> {
     let out = Command::new(tar)
         .arg("-xf")
         .arg(zip)
