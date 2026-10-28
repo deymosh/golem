@@ -72,6 +72,12 @@ const TOOL_SCHEMA: &str = "{\n    \"type\": \"function\",\n    \"function\": {\n
      \"unit\": {\"type\": \"string\", \"enum\": [\"celsius\", \"fahrenheit\"]}\n        },\n        \
      \"required\": [\"city\"]\n      }\n    }\n  }";
 
+/// The vision check's picture: a red circle on white, 64x64 PNG, and what
+/// is asked about it.
+const VISION_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAGDSURBVHhe7ZDRCgUhCET3/3/6XnwQlkEYLWuVOnBeYhqt53c4Dx6cxv0APDiN+wF4cBr3A/DgNO4H4MEynifuBtZOwQfNuIg1zbh8psnkNuKyK00isclYcrUJJLUYy+1ykoQGY6ndTjB521jmKweZuGks8bUDDN4yhlcxyMANY2g1A8TSAg6raIBg2hhWVSf+pIBDKuskkDSGVNeBLyVgeQcd+FIClnfQgTNllHeRwBMClnaSwBMClnaSwBMClnaSwBMClnaSwBMClnaS4EgYpZ0k8ISApZ0k8ISApZ0k8ISApZ0k8ISApZ0k8ISApZ0k8ISApZ0k8ISCxR104EsJWN5BB76UgOUddOBLKTigsk78SQGHVNaJP6ngoIoGiKUFHFbRALG0ggMrGSR+Q8HBFRxg7JaCC3zpIOM3FVzkCyeYu63gQjudZL5BwcV2mEBOi4ILrjSJvKY3uGymyeQ3vsHlZ1zEumYEH+RxA3umFOZ+AB6cxv0APDiN+wF4cBrHf8AfTKnU3JKFy1YAAAAASUVORK5CYII=";
+const VISION_QUESTION: &str = "What colour is the circle in this picture? Answer with one word.";
+const VISION_ANSWER: &str = "red";
+
 /// The throughput prompt. The `\\n` and
 /// `\\t` are two characters each: the body is JSON, where they are an escaped
 /// newline and tab, and that is why the prompt can carry Go code at all.
@@ -90,6 +96,11 @@ const HAYSTACK_HEAD: &str =
 const NEEDLE: &str = "IMPORTANT: the release code for Q3 is stored under the passphrase 8127.";
 /// The number the needle's answer must contain for the gate to pass.
 const NEEDLE_ANSWER: &str = "8127";
+
+/// How much of the asked-for haystack the server must report reading for a
+/// PASS to count: the tokenizer-sized haystack lands within a fraction of a
+/// percent of the target, so anything well short was cut.
+const NEEDLE_READ_SHARE: f64 = 0.9;
 
 /// The question asked at the needle's depth, and the follow-up that measures
 /// decode speed there by reusing the whole haystack as a cached prefix.
@@ -190,7 +201,7 @@ pub fn run_with(home: &Path, args: &[String], out: &mut dyn Write, progress: boo
     match engine::post_json(&base, "/v1/chat/completions", &warmup_body(&model), RUN_TIMEOUT) {
         Some(reply) if reply.ok() => {}
         reply => {
-            let said = reply.map_or_else(|| "no answer".to_string(), |r| error_message(&r));
+            let said = reply.map_or_else(|| "no answer".to_string(), |r| r.error_message());
             let _ = writeln!(out, "[FAIL] warmup request failed: {said}");
             return 1;
         }
@@ -227,6 +238,21 @@ pub fn run_with(home: &Path, args: &[String], out: &mut dyn Write, progress: boo
         let _ = writeln!(out, "{call}");
     }
     let _ = writeln!(out, "{verdict}");
+
+    // A model served with a vision projector is asked about a picture: a
+    // projector that loaded but reads nothing passes every other step. The
+    // engine says in `/props` whether it has one, which it only knows once
+    // the model is loaded - after the warmup, not before.
+    let props = parse_body(&get_body(&base, &format!("/props?model={model}"), PROPS_TIMEOUT));
+    if deep(&props, "vision").and_then(Value::as_bool) == Some(true) {
+        let answer = message_content(&post_body(&base, &vision_body(&model), REQUEST_TIMEOUT));
+        let _ = writeln!(out, "answer: {}", if answer.is_empty() { "(request failed)" } else { answer.trim() });
+        if answer.to_ascii_lowercase().contains(VISION_ANSWER) {
+            let _ = writeln!(out, "[ OK ] vision (the picture's colour)");
+        } else {
+            let _ = writeln!(out, "[FAIL] vision: expected {VISION_ANSWER} for a red circle");
+        }
+    }
 
     // ------------------------------------------------------------
     // 4. THROUGHPUT (3 timed runs)
@@ -319,12 +345,17 @@ fn parse_args(args: &[String]) -> Result<Option<String>, String> {
     while i < args.len() {
         match args[i].as_str() {
             "--long" => {
-                long = Some(
-                    args.get(i + 1)
-                        .filter(|value| !value.is_empty())
-                        .cloned()
-                        .unwrap_or_else(|| LONG_DEFAULT.to_string()),
-                );
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| LONG_DEFAULT.to_string());
+                // A count of tokens: anything else would size a haystack of
+                // nothing and pass it.
+                if !value.trim().parse::<u64>().is_ok_and(|n| n > 0) {
+                    return Err(format!("--long {value}"));
+                }
+                long = Some(value);
                 i += 2;
             }
             other => return Err(other.to_string()),
@@ -472,15 +503,6 @@ fn compact(value: &Value) -> String {
 // The request bodies
 // ---------------------------------------------------------------
 
-/// What an unhappy reply says about itself: the engine's `error.message`
-/// (the router's "model name=... failed to load"), else the status code.
-fn error_message(reply: &engine::Reply) -> String {
-    json::parse(&reply.body)
-        .ok()
-        .and_then(|v| v.get("error")?.get("message")?.as_str().map(str::to_string))
-        .unwrap_or_else(|| format!("HTTP {}", reply.status))
-}
-
 /// The warmup body: eight tokens of `"hi"`.
 fn warmup_body(model: &str) -> String {
     format!(
@@ -497,6 +519,17 @@ fn sanity_body(model: &str, no_think: bool) -> String {
     format!(
         "{{\n  \"model\": \"{model}\",\n  \"messages\": [{{\"role\": \"user\", \"content\": \
          \"{SANITY_QUESTION}\"}}],\n{kwargs}  \"temperature\": 0,\n  \"max_tokens\": 512\n}}"
+    )
+}
+
+/// The vision body: the picture as a data URL, one word asked for, thinking
+/// off so the word is the answer.
+fn vision_body(model: &str) -> String {
+    format!(
+        "{{\"model\": \"{model}\", \"messages\": [{{\"role\": \"user\", \"content\": [\
+         {{\"type\": \"image_url\", \"image_url\": {{\"url\": \"data:image/png;base64,{VISION_PNG}\"}}}}, \
+         {{\"type\": \"text\", \"text\": \"{VISION_QUESTION}\"}}]}}], \
+         \"chat_template_kwargs\": {{\"enable_thinking\": false}}, \"temperature\": 0, \"max_tokens\": 64}}"
     )
 }
 
@@ -784,7 +817,17 @@ fn long_context(out: &mut dyn Write, base: &Base, model: &str, long: &str, steps
     let depth_tps = timing(&depth, "predicted_per_second").unwrap_or(0.0);
     let _ = writeln!(out, "depth  : {} (prefix from cache)", timings_line(&depth));
 
-    let verdict = if answer.contains(NEEDLE_ANSWER) {
+    // The passphrase as a number of its own (`8127.`, `**8127**`), not a
+    // run of digits that contains it. And when the server says how much it
+    // read, it must have read the haystack: a prompt cut to fit a smaller
+    // context can keep the needle and lose the point of the test.
+    let found = answer.split(|c: char| !c.is_ascii_digit()).any(|digits| digits == NEEDLE_ANSWER);
+    let read: u64 = prompt_n.parse().unwrap_or(0);
+    let short = read > 0 && (read as f64) < target * NEEDLE_READ_SHARE;
+    let verdict = if short {
+        let _ = writeln!(out, "[FAIL] the server read {read} tokens of the {long} asked for");
+        "FAIL"
+    } else if found {
         let _ = writeln!(out, "[ OK ] needle found");
         "PASS"
     } else {
@@ -963,8 +1006,9 @@ mod tests {
         format!("{{\"tokens\": [{}]}}", ids.join(", "))
     }
 
-    /// The eight answers a run without `--long` asks for: health, props,
-    /// warmup, sanity, tool, and three timed runs.
+    /// The nine answers a run without `--long` asks for: health, props,
+    /// warmup, sanity, tool, props again (no vision here), and three timed
+    /// runs.
     fn short_run(sanity: &str, tool: String) -> Vec<String> {
         vec![
             "{}".to_string(),
@@ -972,6 +1016,7 @@ mod tests {
             "{}".to_string(),
             sanity_reply(sanity),
             tool,
+            props_reply(),
             run_reply(115, 7977.4, 192, 328.0),
             run_reply(115, 7977.4, 192, 330.2),
             run_reply(115, 7977.4, 192, 325.1),
@@ -1061,6 +1106,29 @@ mod tests {
         assert_eq!(golem_core::progress::strip(&text) + "\n", plain);
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&plain_dir).ok();
+    }
+
+    #[test]
+    fn a_model_with_vision_is_asked_about_the_picture() {
+        let seeing = "{\"model_path\": \"/m/a.gguf\", \"modalities\": {\"vision\": true}}".to_string();
+        let mut replies = short_run("391", tool_reply("Munich"));
+        replies[5] = seeing.clone();
+        replies.insert(6, sanity_reply("Red."));
+        let port = serve(replies);
+        let dir = home("vision", port);
+        let (status, text) = run_out(&dir, &[]);
+        assert_eq!(status, 0);
+        assert!(text.contains("answer: Red.\n[ OK ] vision (the picture's colour)\n"), "{text}");
+
+        let mut replies = short_run("391", tool_reply("Munich"));
+        replies[5] = seeing;
+        replies.insert(6, sanity_reply("Blue"));
+        let port = serve(replies);
+        let blind = home("vision-blind", port);
+        let (_, text) = run_out(&blind, &[]);
+        assert!(text.contains("[FAIL] vision: expected red"), "{text}");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&blind).ok();
     }
 
     #[test]

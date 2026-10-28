@@ -83,8 +83,8 @@ struct Asset {
 /// installed and the directory holding it - which for `latest` is only known
 /// here. `Err` is a message the caller prints after `[FAIL] `.
 pub fn ensure(home: &Path, pinned: &Pinned, out: &mut dyn Write) -> Result<Installed, String> {
-    let ini_path = home.join("engines").join(&pinned.engine).join("engine.ini");
-    let text = std::fs::read_to_string(&ini_path)
+    let ini_path = crate::paths::adapter_path(home, &pinned.engine);
+    let text = crate::paths::adapter(home, &pinned.engine)
         .map_err(|e| format!("cannot read {}: {e}", ini_path.display()))?;
     let adapter = ini::parse(&text);
 

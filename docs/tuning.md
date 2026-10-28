@@ -60,8 +60,10 @@ and put back after the run on the configuration as it then stands.
    load is an upper bound, not a lost point. (`--candidates a,b,c` measures exactly those.)
 3. **Refine - one probe per knob that can still matter.** `ubatch-size 1024` (prefill's
    lever; the collapse test catches a bad one). A thread count only when decode is within
-   25% of the floor - the knob moves decode by a few percent and costs a whole load. MTP
-   off, only when the model has a head.
+   25% of the floor - the knob moves decode by a few percent and costs a whole load. When
+   the file carries an MTP head, the other side of the preset's `spec-type`: MTP off for a
+   preset that drafts, MTP on for one that does not (`golem pull` switches it on for such
+   a file, and the probe keeps it honest).
 4. **Rank** what is not excluded by decode, and take the best. A point over the wall is
    excluded however fast it ran: the splits the bisection measured past the frontier
    decode faster precisely because they hold more than the card can spare. Decodes

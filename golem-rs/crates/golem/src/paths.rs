@@ -44,6 +44,33 @@ pub fn library(home: &Path) -> Vec<golem_core::library::Entry> {
     golem_core::library::parse(own.as_deref().unwrap_or(EMBEDDED_LIBRARY))
 }
 
+/// The shipped presets (`config/models.ini`), compiled in and written into a
+/// home that has none on first run: a release folder is one binary, and the
+/// presets are the user's file from then on (`golem pull` appends to it).
+const EMBEDDED_PRESETS: &str = include_str!("../../../../config/models.ini");
+
+/// The default engine's adapter, compiled in. Read through rather than
+/// written: the adapter pins the gated build, and a copy in the home would
+/// keep an upgraded binary on the old pin. A home's own
+/// `engines/llama.cpp/engine.ini` takes its place ([`adapter`]).
+const EMBEDDED_ADAPTER: &str = include_str!("../../../../engines/llama.cpp/engine.ini");
+
+/// An engine's adapter text: `engines/<name>/engine.ini` under the home, or
+/// for the default engine the compiled-in one when the home has none.
+pub fn adapter(home: &Path, engine: &str) -> std::io::Result<String> {
+    match std::fs::read_to_string(adapter_path(home, engine)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && engine == DEFAULT_ENGINE => {
+            Ok(EMBEDDED_ADAPTER.to_string())
+        }
+        other => other,
+    }
+}
+
+/// Where an engine's adapter lives under the home.
+pub fn adapter_path(home: &Path, engine: &str) -> PathBuf {
+    home.join("engines").join(engine).join("engine.ini")
+}
+
 /// The directories the binary expects under the home. Created on demand.
 const DIRS: [&str; 5] = ["bench", "data/models", "data/cache", "data/tuned", "logs"];
 
@@ -72,6 +99,11 @@ pub fn ensure(home: &Path) -> std::io::Result<()> {
     let config = home.join("golem.toml");
     if !config.is_file() {
         std::fs::write(&config, EMBEDDED_CONFIG)?;
+    }
+    let presets = home.join(BASE_PRESET);
+    if !presets.is_file() {
+        std::fs::create_dir_all(home.join("config"))?;
+        std::fs::write(&presets, EMBEDDED_PRESETS)?;
     }
     Ok(())
 }

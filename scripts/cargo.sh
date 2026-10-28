@@ -32,11 +32,12 @@ fi
 
 export PATH="${MINGW_BIN}:${PATH}"
 
-# The manifest lives in golem-rs/, the cargo config at the repository root;
-# running from here finds both, and the caller's working directory (which
-# relative paths in arguments resolve against) is left alone. --manifest-path
-# is a flag of each subcommand, not of cargo itself, so it goes after the
-# subcommand.
+# The manifest lives in golem-rs/, the cargo config and the rustup override at
+# the repository root. Both are found from the working directory, so cargo
+# runs from the root whatever directory called this - relative paths in the
+# arguments resolve against the root too. --manifest-path is a flag of each
+# subcommand, not of cargo itself, so it goes after the subcommand.
+cd "${ROOT_DIR}"
 [[ $# -ge 1 ]] || { exec cargo; }
 sub="$1"; shift
 cargo "${sub}" --manifest-path "${ROOT_DIR}/golem-rs/Cargo.toml" "$@"
@@ -61,7 +62,12 @@ if [[ "${sub}" == "build" || ( "${sub}" == "test" && ! -f "${root_bin}" ) ]]; th
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*) bin="golem.exe"; copy="golem.exe" ;;
     esac
+    # target/<triple>/<profile>/ when a target triple is configured (the
+    # Windows GNU setup), else target/<profile>/ (Linux, macOS).
     built="$(ls -1 "${ROOT_DIR}/golem-rs/target"/*/"${profile}/${bin}" 2>/dev/null | head -n1 || true)"
+    if [[ -z "${built}" && -f "${ROOT_DIR}/golem-rs/target/${profile}/${bin}" ]]; then
+        built="${ROOT_DIR}/golem-rs/target/${profile}/${bin}"
+    fi
     if [[ -n "${built}" ]]; then
         cp -f "${built}" "${ROOT_DIR}/${copy}"
         echo "[ OK ] ${copy} at the repository root (git-ignored) from ${built#"${ROOT_DIR}/"}"

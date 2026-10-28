@@ -50,14 +50,21 @@ pub fn apply(home: &Path, setting: &str, value: &str) -> std::io::Result<&'stati
 /// This is what the console's engine dropdown offers, so it lists what is
 /// actually installed rather than what the code knows about: an adapter
 /// dropped into the folder appears without a rebuild, and one that was never
-/// fetched does not.
+/// fetched does not. The default engine is always there: its adapter is
+/// compiled in (`paths::adapter`).
 pub fn engines(home: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(home.join("engines")) else { return Vec::new() };
-    let mut names: Vec<String> = entries
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
+    let mut names: Vec<String> = std::fs::read_dir(home.join("engines"))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    if !names.iter().any(|n| n == paths::DEFAULT_ENGINE) {
+        names.push(paths::DEFAULT_ENGINE.to_string());
+    }
     // The filesystem's order is not part of any contract; the dropdown is
     // easier to use when it does not move between machines.
     names.sort();
@@ -243,9 +250,11 @@ mod tests {
     }
 
     #[test]
-    fn no_engines_folder_is_an_empty_list_not_an_error() {
+    fn no_engines_folder_still_lists_the_compiled_in_default() {
+        // A release folder has no engines/ at all; the default's adapter is
+        // in the binary, so it is still the one engine on offer.
         let dir = home("no-engines");
-        assert!(engines(&dir).is_empty());
+        assert_eq!(engines(&dir), vec![crate::paths::DEFAULT_ENGINE.to_string()]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

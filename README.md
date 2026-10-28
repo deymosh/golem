@@ -108,7 +108,7 @@ commands.
 | `service [--up\|stop]` | run the engine owner, and the console it hosts, in the foreground (a container's PID 1), or stop it |
 | `logs` | follow the inference log |
 | `bench [--runs N] [--prefill TOKENS]` | speed: decode best/median + MTP acceptance, prefill on a ~30K prompt |
-| `eval [--long TOKENS]` | quality gate: arithmetic, tool calls, throughput, needle + decode at depth |
+| `eval [--long TOKENS]` | quality gate: arithmetic, tool calls, a picture when the model has vision, throughput, needle + decode at depth |
 | `report [--no-open] [--md]` | build `bench/report.html` (self-contained) from the recorded runs; `--md` writes `bench/RESULTS.md` for GitHub instead |
 | `app` | the Golem window and tray, showing the console (a build with `--features desktop`; the release for Windows and macOS has it, and `golem-linux-x86_64-desktop` on Linux, which needs WebKitGTK). On Windows `golemw.exe` beside `golem.exe` starts it without a console window - point shortcuts at it |
 | `tui` | the full-screen screen in the terminal (what a bare `golem` opens there): the actions, the model list (Tab; Enter makes the default or downloads, `t` tunes, `x` deletes the file, Del removes the preset), `p` pull, `e` engine, `w` console |

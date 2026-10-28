@@ -22,7 +22,7 @@ NVIDIA GeForce RTX 4090 · windows/docker
 
 | ctx | engine | setup | decode t/s | prefill t/s | t/s / active B | VRAM GB | RAM GB | MTP acc. | needle | measured |
 |---:|---|---|---:|---:|---:|---:|---:|---:|---|---|
-| 231K | llama.cpp `b11379-1537a0a8b` | threads=16 n-cpu-moe=36 | **59.8** | 840 | 17.0 | 10.9 | 19.5 | 68% | PASS | 2026-10-19 |
+| 231K | llama.cpp `b11379-1537a0a8b` | threads=16 n-cpu-moe=36 | **59.8** | 840 | 17.0 | 10.9 | 19.5 | 68% | - | 2026-10-19 |
 
 ### Rejected, with the measured reason
 

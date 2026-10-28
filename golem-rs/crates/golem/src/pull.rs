@@ -261,7 +261,15 @@ fn pull_ref(home: &Path, reference: &hub::Ref, name: Option<&str>, log: &mut Log
         log.warn(&format!("cannot write {}: {e}", provenance.display()));
     }
 
-    let block = format!("\n{}", hub::section(&name, &repo, quant, projector, &sampling));
+    // A file that carries its own MTP head drafts for itself: speculative
+    // decoding is switched on, and the tuner measures it against off.
+    let mut keys = sampling;
+    let mtp = golem_core::gguf::read(&models_dir.join(quant.files[0].name())).is_ok_and(|f| f.mtp_tensors > 0);
+    if mtp {
+        log.ok("the file carries an MTP head: speculative decoding on (the tuner measures it against off)");
+        keys.insert(0, ("spec-type", "draft-mtp".to_string()));
+    }
+    let block = format!("\n{}", hub::section(&name, &repo, quant, projector, &keys));
     let mut written: Vec<&PathBuf> = vec![&base];
     if served != base {
         written.push(&served);

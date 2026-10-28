@@ -101,12 +101,15 @@ fn run_with(
     }
 
     // Warmup: it proves the API key before the runs are spent on 401s, and
-    // it warms the model. Any non-2xx answer - a rejected key - stops here.
+    // it warms the model. Any non-2xx answer stops here, in the engine's own
+    // words: a rejected key and a model that failed to load look alike
+    // otherwise.
     let warmup = warmup_body(&model);
     match engine::post_json(&base, "/v1/chat/completions", &warmup, REQUEST_TIMEOUT) {
         Some(reply) if reply.ok() => {}
-        _ => {
-            let _ = writeln!(out, "[FAIL] warmup request failed (API key?)");
+        reply => {
+            let said = reply.map_or_else(|| "no answer".to_string(), |r| r.error_message());
+            let _ = writeln!(out, "[FAIL] warmup request failed: {said}");
             return 1;
         }
     }

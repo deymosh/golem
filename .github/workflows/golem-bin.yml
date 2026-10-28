@@ -5,12 +5,16 @@
 
 name: golem-bin
 
+# The paths are the code and every file the binary compiles in (the page,
+# the configuration template, the presets, the library, the default
+# adapter). A tag push ignores the path filter: a release always builds.
 on:
   push:
-    branches: [master, experiment/token-machine]
-    paths: [golem-rs/**, .github/workflows/golem-bin.yml]
+    branches: [master]
+    tags: ['v*']
+    paths: [golem-rs/**, bench/report.template.html, config/**, engines/**, golem.toml.example, .github/workflows/golem-bin.yml]
   pull_request:
-    paths: [golem-rs/**, .github/workflows/golem-bin.yml]
+    paths: [golem-rs/**, bench/report.template.html, config/**, engines/**, golem.toml.example, .github/workflows/golem-bin.yml]
 
 env:
   CARGO_TERM_COLOR: always
@@ -64,6 +68,9 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: test
     runs-on: ${{ matrix.os }}
+    # Attaching the assets writes to the release.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:

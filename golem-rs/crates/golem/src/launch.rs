@@ -689,9 +689,8 @@ pub fn plan(home: &Path, overrides: &Overrides) -> Result<Startup, String> {
     // candidate was once "gated" against the 35B coder's numbers.
     let engine = overrides.get(home, "ENGINE")
         .unwrap_or_else(|| "llama.cpp".to_string());
-    let adapter_path = home.join("engines").join(&engine).join("engine.ini");
-    let adapter_text = std::fs::read_to_string(&adapter_path)
-        .map_err(|e| format!("cannot read {}: {e}", adapter_path.display()))?;
+    let adapter_text = paths::adapter(home, &engine)
+        .map_err(|e| format!("cannot read {}: {e}", paths::adapter_path(home, &engine).display()))?;
     let adapter = ini::parse(&adapter_text);
 
     let backend = resolve_backend(home, adapter.global("backend").unwrap_or("cuda"));

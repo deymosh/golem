@@ -207,6 +207,15 @@ impl Reply {
     pub fn ok(&self) -> bool {
         (200..300).contains(&self.status)
     }
+
+    /// What an unhappy reply says about itself: the engine's `error.message`
+    /// (the router's "model name=... failed to load"), else the status code.
+    pub fn error_message(&self) -> String {
+        golem_core::json::parse(&self.body)
+            .ok()
+            .and_then(|v| v.get("error")?.get("message")?.as_str().map(str::to_string))
+            .unwrap_or_else(|| format!("HTTP {}", self.status))
+    }
 }
 
 /// `POST` a JSON body and read the answer, with `timeout` as the whole

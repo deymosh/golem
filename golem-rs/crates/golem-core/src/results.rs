@@ -376,13 +376,16 @@ pub fn best_per_configuration(rows: &[Row]) -> Vec<Best> {
     // reference box the tuner sweeps ik_llama.cpp and llama.cpp and gates
     // only the winner - so a PASS on the ik_llama.cpp row would be a claim
     // nothing measured.
-    let mut needles: Vec<((String, String), String)> = Vec::new();
+    //
+    // And by host: a gate passed on one machine says nothing about another,
+    // and machines never share a table.
+    let mut needles: Vec<((String, String, String), String)> = Vec::new();
     for row in rows {
         if row.kind != Kind::Eval {
             continue;
         }
         if let Some(n) = row.eval.as_ref().and_then(|e| e.needle.clone()) {
-            let key = (row.model.clone(), row.engine.clone());
+            let key = (row.host.clone(), row.model.clone(), row.engine.clone());
             match needles.iter_mut().find(|(k, _)| k == &key) {
                 Some((_, existing)) => *existing = n,
                 None => needles.push((key, n)),
@@ -411,7 +414,7 @@ pub fn best_per_configuration(rows: &[Row]) -> Vec<Best> {
     let mut out: Vec<Best> = best
         .into_iter()
         .map(|(_, _, row)| {
-            let key = (row.model.clone(), row.engine.clone());
+            let key = (row.host.clone(), row.model.clone(), row.engine.clone());
             let needle = needles.iter().find(|(k, _)| k == &key).map(|(_, n)| n.clone());
             Best { row, needle }
         })
@@ -487,7 +490,7 @@ mod tests {
     /// A bench row shaped like the ones the recorder writes.
     const BENCH: &str = r#"{"ts": "2026-10-19T18:02:22Z", "kind": "bench", "host": "rtx-3060_12g_32g_i7-12700kf", "gpu": "NVIDIA GeForce RTX 3060", "os": "windows", "mode": "windows", "engine": "llama.cpp", "engine_build": "b11379-1537a0a8b", "model": "ornith-1.5-35b", "model_file": "Ornith-1.5-35B-Q4_K_M.gguf", "ctx": 236544, "threads": 16, "params_b": 35.51, "params_active_b": 3.52, "moe": true, "experts": "256x8", "n_layer": 40, "ctx_train": 262144, "flags": {"jinja": "true", "ctx-size": 236544}, "decode_best": 59.6, "decode_median": 59.3, "draft_accept": 0.66, "prefill": 832, "vram_mib": 11000, "ram_used_gib": 19.4, "ram_free_gib": 8.1, "quiet": true, "note": ""}"#;
 
-    const EVAL: &str = r#"{"ts": "2026-10-20T00:00:38Z", "kind": "eval", "model": "ornith-1.5-35b", "engine": "llama.cpp", "engine_build": "b11379-1537a0a8b", "ctx": 236544, "eval": {"tools": "PASS", "needle": "PASS", "needle_tokens": 211818, "depth_decode": 30.6, "decode_best": 58.1}, "quiet": true, "note": ""}"#;
+    const EVAL: &str = r#"{"ts": "2026-10-20T00:00:38Z", "kind": "eval", "host": "rtx-3060_12g_32g_i7-12700kf", "model": "ornith-1.5-35b", "engine": "llama.cpp", "engine_build": "b11379-1537a0a8b", "ctx": 236544, "eval": {"tools": "PASS", "needle": "PASS", "needle_tokens": 211818, "depth_decode": 30.6, "decode_best": 58.1}, "quiet": true, "note": ""}"#;
 
     #[test]
     fn parses_a_bench_row() {
@@ -612,6 +615,17 @@ mod tests {
         assert_eq!(llama.needle.as_deref(), Some("PASS"));
         let ik = best.iter().find(|b| b.row.engine == "ik_llama.cpp").expect("ik_llama.cpp");
         assert_eq!(ik.needle, None, "never gated, so nothing to claim");
+    }
+
+    #[test]
+    fn a_needle_verdict_does_not_cross_hosts() {
+        let other = BENCH.replace(r#""host": "rtx-3060_12g_32g_i7-12700kf""#, r#""host": "rtx-4090_24g_64g_i9-13900k""#);
+        let rows: Vec<Row> = [BENCH, &other, EVAL].iter().map(|l| Row::parse(l).expect("should parse")).collect();
+        let best = best_per_configuration(&rows);
+        let gated = best.iter().find(|b| b.row.host.starts_with("rtx-3060")).expect("3060");
+        assert_eq!(gated.needle.as_deref(), Some("PASS"));
+        let elsewhere = best.iter().find(|b| b.row.host.starts_with("rtx-4090")).expect("4090");
+        assert_eq!(elsewhere.needle, None, "gated on another machine");
     }
 
     #[test]

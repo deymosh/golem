@@ -339,8 +339,10 @@ pub fn sampling(text: &str) -> Vec<(&'static str, String)> {
 pub const START_CTX: u64 = 32768;
 
 /// The preset section for a pulled model, with the `; Download:` lines
-/// `up`, `pull` and the console fetch its files from.
-pub fn section(name: &str, repo: &Repo, quant: &Quant, projector: Option<&File>, sampling: &[(&str, String)]) -> String {
+/// `up`, `pull` and the console fetch its files from. `keys` are the flags
+/// the pull settled beyond the file and the context: speculative decoding
+/// when the file carries an MTP head, then the sampling defaults.
+pub fn section(name: &str, repo: &Repo, quant: &Quant, projector: Option<&File>, keys: &[(&str, String)]) -> String {
     let mut out = String::new();
     out.push_str(&format!("; Pulled from {} ({}).\n", repo.id, quant.label));
     for file in quant.files.iter().chain(projector) {
@@ -353,7 +355,7 @@ pub fn section(name: &str, repo: &Repo, quant: &Quant, projector: Option<&File>,
     }
     let ctx = repo.ctx_train.map_or(START_CTX, |c| c.min(START_CTX));
     out.push_str(&format!("ctx-size = {ctx}\n"));
-    for (key, value) in sampling {
+    for (key, value) in keys {
         out.push_str(&format!("{key} = {value}\n"));
     }
     out
