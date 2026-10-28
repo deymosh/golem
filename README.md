@@ -92,6 +92,16 @@ resident and the engine goes when the service does. `golem up` starts a service 
 none; `golem service` runs one in the foreground (which is what a container's PID 1 needs, and
 what `docker stop` stops cleanly); `golem service stop` ends the service and the engine.
 
+### Updating
+
+Golem offers a new release of itself in the console (a banner over the tabs), and in a
+terminal before `up` and `tui`, at most once a day; `golem update` does it on demand
+(`--check` only looks, `--yes` skips the question). It downloads this platform's asset,
+verifies it against the release's `.sha256`, and replaces its own binary — close the app
+window or run `golem service stop` and start Golem again to run the new one.
+`UPDATE_CHECK = "off"` in `golem.toml` stops the automatic checks. A checkout never updates
+this way: `git pull` and `./scripts/cargo.sh build`.
+
 ### The same stack in a container
 
 `Dockerfile` builds one image per GPU vendor — `docker build --build-arg GPU_BACKEND=cuda -t
