@@ -74,7 +74,10 @@ Linux), it starts the service if needed and opens the console - in the Golem win
 build with the desktop feature, in the browser otherwise; in a terminal, the full-screen
 screen; with neither, the usage. golem.exe is a console program, so on Windows a
 double-click still opens a console window for a moment; `golemw.exe`, a windowed
-launcher built beside it, starts the app with none.
+launcher built beside it, starts the app with none. The window starts the service as its
+own child when none is running, so the tree is `golem app` → `golem service` →
+`Golem engine (llama.cpp)`, which Task Manager lists as one app; the service outlives the
+window.
 
 Why a long-lived owner rather than an `up` that spawns and exits:
 
