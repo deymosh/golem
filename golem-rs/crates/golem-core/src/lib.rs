@@ -72,12 +72,22 @@ pub mod joblog;
 pub mod mark;
 
 /// The graphics card: its vendor from a PCI ID, the backend that vendor
-/// serves, and the reading the Windows GPU probe left.
+/// serves, the reading the Windows GPU probe left, and Apple Silicon's share
+/// of the shared memory.
 pub mod gpu;
 
 /// SHA-256, streamed: the check `golem update` runs a downloaded release
-/// against.
+/// against, and the `.sha256` a pulled model gets.
 pub mod sha256;
+
+/// HTML as the web tools read it: a page's main content as Markdown, and
+/// DuckDuckGo's results page as its results.
+pub mod html;
+
+/// Golem's web tools as the API sees them: the tools offered, the text the
+/// model gets back, the request edits, and the stream relays that hide
+/// golem's own calls from the client.
+pub mod webtools;
 
 /// Golem's own updates, decided: release tags and assets, the releases
 /// answer, and the state file that remembers what was checked and skipped.
