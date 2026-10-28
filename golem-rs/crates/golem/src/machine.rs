@@ -11,6 +11,7 @@
 //! machine's locale - `19,2` on this box - which `f64::from_str` rejects.
 
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 use golem_core::gpu;
 use golem_core::record;
@@ -250,6 +251,30 @@ pub fn host_slug(gpu: &str, vram_total_mib: u64, ram_total_gb: u64, cpu: &str) -
     )
 }
 
+/// The machine's offset from UTC, in minutes east, read once per process:
+/// Windows asks .NET's own zone table, elsewhere `date +%z` says it. A probe
+/// that fails answers 0, and the stamps are UTC - an hour or so out, never
+/// a day.
+pub fn utc_offset_minutes() -> i32 {
+    static OFFSET: OnceLock<i32> = OnceLock::new();
+    *OFFSET.get_or_init(|| {
+        if cfg!(windows) {
+            powershell("[int][TimeZoneInfo]::Local.GetUtcOffset([DateTime]::Now).TotalMinutes")
+                .and_then(|line| line.parse().ok())
+                .unwrap_or(0)
+        } else {
+            Command::new("date")
+                .arg("+%z")
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .ok()
+                .and_then(|out| golem_core::time::offset_minutes(String::from_utf8_lossy(&out.stdout).trim()))
+                .unwrap_or(0)
+        }
+    })
+}
+
 /// One PowerShell one-liner's first line, with a comma decimal turned back
 /// into a dot. `None` off Windows, or when it fails.
 pub fn powershell(script: &str) -> Option<String> {
@@ -288,5 +313,12 @@ mod tests {
             "rtx-3060_12g_32g_i7-12700kf"
         );
         assert_eq!(host_slug("unknown", 0, 32, ""), "unknown_0g_32g_");
+    }
+
+    #[test]
+    fn the_utc_offset_is_minutes_east_or_zero() {
+        // The zone itself is the machine's; only the shape is the contract.
+        let offset = utc_offset_minutes();
+        assert!((-840..=840).contains(&offset), "{offset}");
     }
 }

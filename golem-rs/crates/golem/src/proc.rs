@@ -1,8 +1,10 @@
 //! Running a child: this binary's own verbs, with their output in a file,
 //! and the shared curl plumbing a download watches.
 
+use std::io::{BufRead, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use golem_core::progress::Progress;
@@ -67,6 +69,62 @@ pub fn run_to_file(mut command: Command, log: &Path) -> std::io::Result<i32> {
         .stderr(Stdio::from(err))
         .status()?;
     Ok(status.code().unwrap_or(-1))
+}
+
+/// Run a prepared command to completion with its stdout and stderr piped,
+/// each complete line written to the shared `log` as it arrives - appended,
+/// where [`run_to_file`] truncates - and return its exit code.
+///
+/// A thread per pipe keeps both streams live while the child runs; the log
+/// is shared because a stdout line and a stderr one can land together. What
+/// a line says is the writer's business: the job log's writer stamps each
+/// one.
+pub fn run_to_log<W>(mut command: Command, log: Arc<Mutex<W>>) -> std::io::Result<i32>
+where
+    W: Write + Send + 'static,
+{
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let out = child.stdout.take().map(|pipe| lines_to(pipe, Arc::clone(&log)));
+    let err = child.stderr.take().map(|pipe| lines_to(pipe, log));
+    let status = child.wait()?;
+    if let Some(out) = out {
+        let _ = out.join();
+    }
+    if let Some(err) = err {
+        let _ = err.join();
+    }
+    Ok(status.code().unwrap_or(-1))
+}
+
+/// Every complete line of `pipe`, written to `log` as it arrives.
+fn lines_to<R, W>(pipe: R, log: Arc<Mutex<W>>) -> std::thread::JoinHandle<()>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(pipe);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    // A poisoned lock still holds a working log: keep
+                    // writing to it rather than losing the child's output.
+                    let mut log = match log.lock() {
+                        Ok(log) => log,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    let _ = writeln!(log, "{}", line.trim_end_matches(['\n', '\r']));
+                }
+            }
+        }
+    })
 }
 
 #[cfg(test)]

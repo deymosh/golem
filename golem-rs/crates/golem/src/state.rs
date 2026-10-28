@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use golem_core::ini;
+use golem_core::joblog;
 use golem_core::progress::{self, Progress};
 
 use crate::config;
@@ -71,8 +72,9 @@ pub fn engines(home: &Path) -> Vec<String> {
     names
 }
 
-/// The tail of the last job's log, for the console's job pane, without its
-/// `PROGRESS` lines - those are the bar's ([`job_progress`]).
+/// The tail of the newest job's log, for the console's job pane: from its
+/// `===` header to the end of the file, without its `PROGRESS` lines - those
+/// are the bar's ([`job_progress`]).
 ///
 /// Empty when nothing has ever run, which is how the page decides whether to
 /// show the pane at all.
@@ -80,7 +82,8 @@ pub fn job_tail(home: &Path, lines: usize) -> String {
     let Some(text) = read_end(&paths::job_log(home), TAIL_BYTES) else {
         return String::new();
     };
-    let all: Vec<&str> = text.lines().filter(|line| !progress::is_line(line)).collect();
+    let all: Vec<&str> =
+        joblog::last_job(&text).lines().filter(|line| !progress::is_line(line)).collect();
     let start = all.len().saturating_sub(lines);
     all[start..].join("\n")
 }
@@ -191,8 +194,9 @@ pub fn snapshot(home: &Path, job: &SharedJob) -> Snapshot {
         job_action,
         // The page shows the pane whenever there is anything in it: a
         // finished job's log is still worth
-        // reading, and that is usually the one you came back for.
-        job_tail: job_tail(home, 14),
+        // reading, and that is usually the one you came back for. A tail of
+        // 200 lines, because the pane scrolls.
+        job_tail: job_tail(home, 200),
         job_progress: if job_running { job_progress(home) } else { None },
     }
 }
@@ -283,6 +287,25 @@ mod tests {
         std::fs::write(&log, "PROGRESS 5/10 bytes pull: x\n[ OK ] x downloaded\nPROGRESS -\n").expect("write");
         assert_eq!(job_progress(&dir), None);
         assert_eq!(job_tail(&dir, 14), "[ OK ] x downloaded");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_tail_is_the_newest_job_not_the_whole_log() {
+        let dir = home("job-last");
+        std::fs::create_dir_all(dir.join("logs")).expect("logs");
+        let log = dir.join("logs/web-job.log");
+        // Two jobs, appended: the pane shows the newest one, stamps and all.
+        std::fs::write(
+            &log,
+            "=== bench · 2026-10-27 ===\n\
+             07:00:00 [ OK ] old job\n\
+             === tune ornith · 2026-10-28 ===\n\
+             14:05:09 working\n\
+             14:05:15 === tune: done in 6s ===\n",
+        )
+        .expect("write");
+        assert_eq!(job_tail(&dir, 14), "=== tune ornith · 2026-10-28 ===\n14:05:09 working\n14:05:15 === tune: done in 6s ===");
         std::fs::remove_dir_all(&dir).ok();
     }
 

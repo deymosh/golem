@@ -13,9 +13,14 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use golem_core::joblog;
 use golem_core::progress;
+use golem_core::time;
 
 use crate::config::Overrides;
+use crate::machine;
 use crate::proc;
 use crate::service;
 
@@ -102,10 +107,15 @@ pub fn plan(action: &str, arg: &str) -> Option<Plan> {
 /// The log is the console's job pane (`logs/web-job.log`): the page polls it
 /// through `api/state`, so it is where a service's streamed lines belong.
 ///
-/// A job starts and ends with the progress clear, so the bar the page and
+/// A job opens with a `===` header naming what ran and the day, and closes
+/// with a `===` footer carrying the verdict and the time it took, so a pane
+/// that keeps every job still shows where one ends and the next begins. A
+/// job also starts and ends with the progress clear, so the bar the page and
 /// the screen draw is always this job's, and goes when it is done.
 pub fn run(home: &Path, action: &str, arg: &str, log: &Path) -> i32 {
     let _ = line(log, progress::CLEAR);
+    let started = Instant::now();
+    let _ = line(log, &joblog::header(action, arg, &today()));
     let code = match plan(action, arg) {
         Some(Plan::Read(verb)) => read(home, verb, log),
         Some(Plan::Engine(verb)) => through_service(home, verb, log),
@@ -115,8 +125,15 @@ pub fn run(home: &Path, action: &str, arg: &str, log: &Path) -> i32 {
             2
         }
     };
+    let _ = line(log, &joblog::footer(action, code, started.elapsed().as_secs()));
     let _ = line(log, progress::CLEAR);
     code
+}
+
+/// Today, in the machine's own timezone: the day a job header names.
+fn today() -> String {
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    time::local_date(secs, machine::utc_offset_minutes())
 }
 
 /// A read of the engine's state, answered here rather than by the service.
@@ -151,8 +168,14 @@ fn through_service(home: &Path, verb: &str, log: &Path) -> i32 {
 
 /// Everything else: this binary's own verb, as a child process with the same
 /// home, its output to the log and its exit code back.
+///
+/// The log is appended to, not truncated - the lines of this verb land after
+/// the previous job's - and each line the child prints is stamped as it
+/// arrives ([`proc::run_to_log`]).
 fn self_run(home: &Path, args: &[String], log: &Path) -> i32 {
-    match proc::golem(home, args).and_then(|command| proc::run_to_file(command, log)) {
+    let Some(out) = open(log) else { return 1 };
+    let out = Arc::new(Mutex::new(out));
+    match proc::golem(home, args).and_then(|command| proc::run_to_log(command, out)) {
         Ok(code) => code,
         Err(e) => {
             let _ = line(log, &format!("[FAIL] cannot run golem {}: {e}", args[0]));
@@ -166,8 +189,9 @@ fn self_run(home: &Path, args: &[String], log: &Path) -> i32 {
 ///
 /// Append rather than truncate: the lines of one verb land after the
 /// previous one's rather than replacing them, and a reader of the job pane
-/// wants the run they just started.
-fn open(log: &Path) -> Option<File> {
+/// wants the run they just started. What is written is stamped on the way
+/// in ([`Stamped`]).
+fn open(log: &Path) -> Option<Stamped<File>> {
     let file = match File::options().create(true).append(true).open(log) {
         Ok(file) => Ok(file),
         Err(_) => match log.parent() {
@@ -180,7 +204,7 @@ fn open(log: &Path) -> Option<File> {
         },
     };
     match file {
-        Ok(file) => Some(file),
+        Ok(file) => Some(Stamped::new(file)),
         Err(e) => {
             eprintln!("[FAIL] cannot write {}: {e}", log.display());
             None
@@ -196,12 +220,98 @@ fn line(log: &Path, text: &str) -> std::io::Result<()> {
     writeln!(out, "{text}")
 }
 
+/// A job-log writer that puts the local clock in front of every complete
+/// line it is given, and flushes a trailing partial one when flushed or
+/// dropped. The grammar is `golem_core::joblog`'s; this is the bytes.
+struct Stamped<W: Write> {
+    inner: W,
+    buf: Vec<u8>,
+    clock: fn() -> String,
+}
+
+impl<W: Write> Stamped<W> {
+    fn new(inner: W) -> Stamped<W> {
+        Stamped { inner, buf: Vec::new(), clock: clock_now }
+    }
+
+    /// Every complete line in the buffer, stamped, into `inner`.
+    fn drain_lines(&mut self) -> std::io::Result<()> {
+        while let Some(nl) = self.buf.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = self.buf.drain(..=nl).collect();
+            let text = String::from_utf8_lossy(&line[..line.len() - 1]);
+            let text = text.trim_end_matches('\r');
+            let stamped = joblog::stamp(&(self.clock)(), text);
+            self.inner.write_all(stamped.as_bytes())?;
+            self.inner.write_all(b"\n")?;
+        }
+        Ok(())
+    }
+}
+
+impl<W: Write> Write for Stamped<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(bytes);
+        self.drain_lines()?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // A partial line is flushed as one, stamped: it is what there is.
+        if !self.buf.is_empty() {
+            let rest = std::mem::take(&mut self.buf);
+            let stamped = joblog::stamp(&(self.clock)(), &String::from_utf8_lossy(&rest));
+            self.inner.write_all(stamped.as_bytes())?;
+        }
+        self.inner.flush()
+    }
+}
+
+impl<W: Write> Drop for Stamped<W> {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
+/// The local clock, `HH:MM:SS`, right now.
+fn clock_now() -> String {
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    time::clock(secs, machine::utc_offset_minutes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn command(words: &[&str]) -> Plan {
         Plan::Command(words.iter().map(|w| w.to_string()).collect())
+    }
+
+    fn fixed_clock() -> String {
+        "07:00:00".to_string()
+    }
+
+    #[test]
+    fn a_writer_stamps_each_line_and_flushes_the_partial_one() {
+        let mut log = Stamped { inner: Vec::<u8>::new(), buf: Vec::new(), clock: fixed_clock };
+        write!(log, "[ OK ] one\n[FAIL] two").expect("write");
+        log.flush().expect("flush");
+        assert_eq!(
+            String::from_utf8(log.inner.clone()).unwrap(),
+            "07:00:00 [ OK ] one\n07:00:00 [FAIL] two"
+        );
+    }
+
+    #[test]
+    fn a_progress_line_passes_through_untouched() {
+        // The bar readers parse a PROGRESS line exactly, and an empty line
+        // is not worth stamping.
+        let mut log = Stamped { inner: Vec::<u8>::new(), buf: Vec::new(), clock: fixed_clock };
+        write!(log, "PROGRESS -\n\nsecond\n").expect("write");
+        log.flush().expect("flush");
+        assert_eq!(
+            String::from_utf8(log.inner.clone()).unwrap(),
+            "PROGRESS -\n\n07:00:00 second\n"
+        );
     }
 
     #[test]
