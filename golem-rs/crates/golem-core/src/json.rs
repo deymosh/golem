@@ -10,10 +10,12 @@
 //! of what makes the file readable, and rows are small enough that a linear
 //! lookup costs nothing.
 //!
-//! [`quote`] is the other direction, and the only writer here: the console
-//! serves a handful of small objects built by hand, and the one thing it
-//! cannot hand-roll is the escaping - a Windows path or a model name with a
-//! quote in it would otherwise produce a payload the browser refuses.
+//! [`quote`] is the other direction for the console, which serves a handful
+//! of small objects built by hand and cannot hand-roll the escaping - a
+//! Windows path or a model name with a quote in it would otherwise produce a
+//! payload the browser refuses. [`Value::to_json`] writes a whole value back,
+//! for the API front, which edits a client's request and the engine's answer
+//! and has to hand on everything else exactly as it came.
 
 use std::fmt;
 
@@ -94,6 +96,100 @@ impl Value {
     /// mean "no value" to every consumer.
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
+    }
+
+    /// The items of an array, or `None` for any other kind of value.
+    pub fn as_array(&self) -> Option<&Vec<Value>> {
+        match self {
+            Value::Array(items) => Some(items),
+            _ => None,
+        }
+    }
+
+    /// A string value.
+    pub fn str(text: &str) -> Value {
+        Value::String(text.to_string())
+    }
+
+    /// A whole number, written as such.
+    pub fn int(n: u64) -> Value {
+        Value::Number { text: n.to_string(), value: n as f64 }
+    }
+
+    /// An object from its members, in order.
+    pub fn object(members: Vec<(&str, Value)>) -> Value {
+        Value::Object(members.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    }
+
+    /// A member to change in place, or `None` when this is not an object or
+    /// has no such key.
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
+        match self {
+            Value::Object(members) => members.iter_mut().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    /// Set a member of an object: an existing key keeps its place and takes
+    /// the value, a new one is appended. Anything but an object is left alone.
+    pub fn set(&mut self, key: &str, value: Value) {
+        if let Value::Object(members) = self {
+            match members.iter_mut().find(|(k, _)| k == key) {
+                Some((_, existing)) => *existing = value,
+                None => members.push((key.to_string(), value)),
+            }
+        }
+    }
+
+    /// Take a member out of an object.
+    pub fn remove(&mut self, key: &str) -> Option<Value> {
+        match self {
+            Value::Object(members) => {
+                let at = members.iter().position(|(k, _)| k == key)?;
+                Some(members.remove(at).1)
+            }
+            _ => None,
+        }
+    }
+
+    /// The value as compact JSON. Numbers are written as they were read, so
+    /// a document that is parsed and written back changes only where it was
+    /// changed.
+    pub fn to_json(&self) -> String {
+        let mut out = String::new();
+        self.write_to(&mut out);
+        out
+    }
+
+    fn write_to(&self, out: &mut String) {
+        match self {
+            Value::Null => out.push_str("null"),
+            Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Value::Number { text, .. } => out.push_str(text),
+            Value::String(s) => out.push_str(&quote(s)),
+            Value::Array(items) => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    item.write_to(out);
+                }
+                out.push(']');
+            }
+            Value::Object(members) => {
+                out.push('{');
+                for (i, (key, value)) in members.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&quote(key));
+                    out.push(':');
+                    value.write_to(out);
+                }
+                out.push('}');
+            }
+        }
     }
 }
 
@@ -498,6 +594,32 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "should have failed: {bad}");
         }
+    }
+
+    #[test]
+    fn a_document_written_back_reads_the_same_and_keeps_its_numbers() {
+        let text = r#"{"model":"m","temperature":0.70,"max_tokens":1024,"stream":false,
+                       "messages":[{"role":"user","content":"a \"quote\"\nand é"}],"x":null,"e":1e-3}"#;
+        let value = obj(text);
+        let written = value.to_json();
+        assert_eq!(parse(&written).expect("parses back"), value);
+        assert!(written.contains("\"temperature\":0.70"), "{written}");
+        assert!(written.contains("\"e\":1e-3"), "{written}");
+    }
+
+    #[test]
+    fn members_are_set_in_place_appended_and_removed() {
+        let mut v = obj(r#"{"a":1,"b":2}"#);
+        v.set("a", Value::str("one"));
+        v.set("c", Value::int(3));
+        assert_eq!(v.to_json(), r#"{"a":"one","b":2,"c":3}"#);
+        assert_eq!(v.remove("b"), Some(Value::Number { text: "2".into(), value: 2.0 }));
+        assert_eq!(v.remove("b"), None);
+        if let Some(c) = v.get_mut("c") {
+            *c = Value::Bool(true);
+        }
+        assert_eq!(v.to_json(), r#"{"a":"one","c":true}"#);
+        assert_eq!(Value::object(vec![("k", Value::Null)]).to_json(), r#"{"k":null}"#);
     }
 
     #[test]
