@@ -10,8 +10,9 @@ same-session pairs, best-of-3 on a quiet desktop, and nothing becomes a default 
 
 ### The filter that decides everything
 
-Golem has no gateway, so the engine itself must serve the **Anthropic `/v1/messages`
-API** for Claude Code to connect, plus OpenAI for everything else. That one requirement
+Golem translates no API - its front only adds its own web tools - so the engine itself
+must serve the **Anthropic `/v1/messages` API** for Claude Code to connect, plus OpenAI
+for everything else. That one requirement
 eliminates most of the field:
 
 | Engine | `/v1/messages` | GGUF | Verdict |

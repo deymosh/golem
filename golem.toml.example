@@ -95,12 +95,24 @@ GPU_BACKEND = "auto"
 # Inference server (OpenAI AND Anthropic compatible)
 # ------------------------------------------------------------
 
-# Where the engine listens. 0.0.0.0 = reachable from the LAN, which is what a
-# client on another machine needs; 127.0.0.1 keeps it local. A container
-# publishes its port, so compose sets GOLEM_LOCAL_AI_HOST=0.0.0.0 there
-# rather than changing this file.
+# Where clients reach the model. Golem answers this port itself and hands
+# each request to the engine, which listens on 127.0.0.1 only. 0.0.0.0 =
+# reachable from the LAN, which is what a client on another machine needs;
+# 127.0.0.1 keeps it local. A container publishes its port, so compose sets
+# GOLEM_LOCAL_AI_HOST=0.0.0.0 there rather than changing this file.
 LOCAL_AI_HOST = "127.0.0.1"
 LOCAL_AI_PORT = "8000"
+
+# The engine's own port, on 127.0.0.1. Unset, it is the one after
+# LOCAL_AI_PORT.
+#ENGINE_PORT = "8001"
+
+# Golem's web search on every chat request: two read-only tools the model
+# may call (golem_web_search, golem_web_fetch), and Claude Code's WebSearch
+# answered. Searches go to DuckDuckGo from this machine - no key, no
+# account - and each one is labelled "Golem web search" and logged in
+# logs/web.log. "off" hands requests to the engine without them.
+WEB_SEARCH = "on"
 
 # The console `golem service` hosts beside the engine. It has no login, and
 # its buttons start engines and delete model files: keep it on 127.0.0.1

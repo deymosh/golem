@@ -31,6 +31,20 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 /// it; a slow *answer* is the read timeout's business.
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// The port clients use: `LOCAL_AI_PORT`, 8000 by default. Golem answers it
+/// (`api.rs`) and hands requests on to the engine.
+pub fn api_port(home: &Path) -> u16 {
+    golem_core::config::value(home, "LOCAL_AI_PORT").and_then(|v| v.parse().ok()).unwrap_or(8000)
+}
+
+/// The engine's own port, on loopback only: `ENGINE_PORT`, else the one
+/// after [`api_port`].
+pub fn engine_port(home: &Path) -> u16 {
+    golem_core::config::value(home, "ENGINE_PORT")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| api_port(home).wrapping_add(1))
+}
+
 /// Where the local engine listens, and the key it wants.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Endpoint {
@@ -40,21 +54,16 @@ pub struct Endpoint {
 
 impl Default for Endpoint {
     fn default() -> Self {
-        Endpoint { port: 8000, api_key: String::new() }
+        Endpoint { port: 8001, api_key: String::new() }
     }
 }
 
 impl Endpoint {
-    /// `LOCAL_AI_PORT` and `LOCAL_AI_API_KEY` from `golem.toml`. A missing
-    /// key or a malformed value falls back to the default rather than
-    /// failing: `status` should say "down", not die.
+    /// The engine's port ([`engine_port`]) and `LOCAL_AI_API_KEY` from
+    /// `golem.toml`. A missing key or a malformed value falls back to the
+    /// default rather than failing: `status` should say "down", not die.
     pub fn from_home(home: &Path) -> Endpoint {
-        let mut endpoint = Endpoint::default();
-        if let Some(port) = golem_core::config::value(home, "LOCAL_AI_PORT")
-            .and_then(|value| value.parse().ok())
-        {
-            endpoint.port = port;
-        }
+        let mut endpoint = Endpoint { port: engine_port(home), ..Endpoint::default() };
         if let Some(key) = golem_core::config::value(home, "LOCAL_AI_API_KEY") {
             endpoint.api_key = key;
         }
@@ -156,7 +165,8 @@ pub struct Base {
 }
 
 impl Base {
-    /// `LOCAL_AI_BASE_URL` when set, else `http://<LOCAL_AI_HOST>:<PORT>`.
+    /// `LOCAL_AI_BASE_URL` when set, else golem's own port on the loopback:
+    /// a measurement goes the way a client's request goes, through golem.
     ///
     /// Each part of the rule matters: the base URL wins
     /// over host and port; `0.0.0.0` is a bind address and not a destination,
@@ -168,8 +178,7 @@ impl Base {
     /// base would connect and then fail in a way that reads like a broken
     /// server. `None` says so, and the caller says it out loud.
     pub fn from_home(home: &Path) -> Option<Base> {
-        let endpoint = Endpoint::from_home(home);
-        let (port, api_key) = (endpoint.port, endpoint.api_key);
+        let (port, api_key) = (api_port(home), Endpoint::from_home(home).api_key);
         let configured = golem_core::config::value(home, "LOCAL_AI_BASE_URL")
             .filter(|value| !value.is_empty());
 
@@ -378,9 +387,13 @@ mod tests {
             "# a comment\nLOCAL_AI_PORT=\"8123\"\nLOCAL_AI_API_KEY=\"secret\"\n",
         )
         .expect("write");
+        // The engine sits behind golem, on the port after the public one.
         let endpoint = Endpoint::from_home(&dir);
-        assert_eq!(endpoint.port, 8123);
+        assert_eq!(endpoint.port, 8124);
         assert_eq!(endpoint.api_key, "secret");
+        assert_eq!(api_port(&dir), 8123);
+        std::fs::write(dir.join("golem.toml"), "LOCAL_AI_PORT=\"8123\"\nENGINE_PORT=\"9100\"\n").expect("write");
+        assert_eq!(Endpoint::from_home(&dir).port, 9100, "ENGINE_PORT names it outright");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -456,7 +469,7 @@ mod tests {
         std::fs::write(dir.join("golem.toml"), "LOCAL_AI_PORT = 8123\nLOCAL_AI_API_KEY = \"k\"\n")
             .expect("write");
         let endpoint = Endpoint::from_home(&dir);
-        assert_eq!(endpoint.port, 8123);
+        assert_eq!(endpoint.port, 8124);
         assert_eq!(endpoint.api_key, "k");
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -3,7 +3,9 @@
 **A local AI construct for coding agents.**
 One GPU, one llama.cpp server, zero tokens leaving your LAN. It speaks both the
 **Anthropic Messages API** and the **OpenAI API**, so Claude Code — or any OpenAI client —
-plugs straight in.
+plugs straight in. The model can search the web: golem runs the search itself, from your
+machine, on DuckDuckGo with no key and no account, and labels every search it runs. The
+search query and the pages fetched are all that leave your machine.
 
 ```
         ▟█▙   forge  ->  animate (load a model)  ->  it works
@@ -17,7 +19,9 @@ plugs straight in.
         │ OpenAI    :8000/v1
         ▼
   ┌───────────────────┐
-  │ llama-server :8000│
+  │ golem :8000       │──── web search and fetch (DuckDuckGo, from this machine)
+  ├───────────────────┤
+  │ llama-server :8001│
   │ local GGUF model  │
   └───────────────────┘
 ```
@@ -138,7 +142,7 @@ commands.
 ### Claude Code (direct)
 
 `llama-server` exposes the **Anthropic Messages API natively** (`POST /v1/messages`), so Claude
-Code talks to it without any translation layer:
+Code talks to it without any translation layer, through golem's port:
 
 ```bash
 export ANTHROPIC_BASE_URL="http://<golem-host>:8000"
@@ -158,6 +162,18 @@ Bearer = `LOCAL_AI_API_KEY`.
 OpenCode and Aider have much smaller per-turn overheads than Claude Code (~6-10K tokens vs
 15-20K) — on a constrained context window that meaningfully increases the usable working
 context. See [docs/models.md](docs/models.md).
+
+### Web search
+
+Every chat request through golem's port gets two tools the model may call,
+`golem_web_search` and `golem_web_fetch`, and Claude Code's own **WebSearch** works
+unchanged: golem answers it. A search goes to DuckDuckGo from your machine (no key, no
+account) and comes back to the model as a short numbered list; a fetch comes back as the
+page's main text in Markdown, never HTML, and only public pages are fetched - never this
+machine or your network. Each one shows in the answer as `🔎 Golem web search: ...` or
+`🌐 Golem web fetch: ...`, and is a line in `logs/web.log`. `WEB_SEARCH = "off"` in
+`golem.toml` turns it off. The details are in
+[docs/architecture.md](docs/architecture.md#web-search).
 
 ---
 

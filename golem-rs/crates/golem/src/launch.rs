@@ -238,6 +238,13 @@ pub fn status(home: &Path, out: &mut dyn Write) -> i32 {
             let _ = writeln!(out, "[ OK ] engine up on http://127.0.0.1:{}", status.port);
         }
     }
+    let api = engine::api_port(home);
+    let web = if crate::api::web_tools_on(home) { "web search on" } else { "web search off" };
+    if listening(api) {
+        let _ = writeln!(out, "       API on port {api} (golem, {web})");
+    } else {
+        let _ = writeln!(out, "[WARN] nothing answers the API port {api} - is the golem service running?");
+    }
     let models = engine::models(&endpoint);
     if models.is_empty() {
         let _ = writeln!(out, "       no models listed");
@@ -416,22 +423,24 @@ fn start(home: &Path, plan: &Startup, endpoint: &engine::Endpoint, out: &mut dyn
 
     // The closing line, one per mode: a router loads its
     // models on demand, so what is healthy is the router and not a model.
+    let api = engine::api_port(home);
     match plan.router {
         true => {
             let _ = writeln!(
                 out,
-                "[ OK ] router healthy on http://{}:{} (presets: {}; models load on first request)",
-                plan.host, endpoint.port, plan.preset
+                "[ OK ] router healthy on http://{}:{api} (presets: {}; models load on first request)",
+                plan.host, plan.preset
             );
         }
         false => {
             let _ = writeln!(
                 out,
-                "[ OK ] healthy on http://{}:{} (model: {})",
-                plan.host, endpoint.port, plan.served
+                "[ OK ] healthy on http://{}:{api} (model: {})",
+                plan.host, plan.served
             );
         }
     }
+    let _ = writeln!(out, "       golem answers that port; the engine is on 127.0.0.1:{}", endpoint.port);
     let _ = writeln!(out);
     // The shell that typed this reads one of these two: `$env:` on Windows,
     // `export` everywhere else. That is a fact about the platform, not a mode
@@ -635,9 +644,9 @@ pub struct Startup {
     /// - and the executable's name inside it.
     pub bin: PathBuf,
     pub server: String,
-    /// The address the server is told to bind. The closing banner names it,
-    /// and the export block that follows is in the syntax of the platform's
-    /// shell.
+    /// The address golem's front answers clients on (the engine itself binds
+    /// the loopback). The closing banner names it, and the export block that
+    /// follows is in the syntax of the platform's shell.
     pub host: String,
     /// The preset, in router mode: what the closing line names as the thing
     /// that was served. `None` means a single model, and `served` names it.
@@ -705,14 +714,16 @@ pub fn plan(home: &Path, overrides: &Overrides) -> Result<Startup, String> {
     let bin = home.join(".local").join("engines").join(&engine).join(format!("{build}-{backend}"));
     let server = server_name(&adapter);
 
-    let port = config::get(home, "LOCAL_AI_PORT").unwrap_or_else(|| "8000".to_string());
+    // The engine answers golem alone: loopback, on its own port. Clients
+    // reach golem's front on `LOCAL_AI_PORT` (`api.rs`), which hands their
+    // requests on.
+    let port = engine::engine_port(home).to_string();
     let key = config::get(home, "LOCAL_AI_API_KEY").unwrap_or_else(|| "local-ai-key".to_string());
-    // `LOCAL_AI_HOST` through the override, because a container is the one
-    // caller that must *not* take it from the file: the file is a host-side
-    // setting (127.0.0.1 keeps the LAN out), while a container's port is
-    // published and its engine has to bind 0.0.0.0 whatever the mounted
-    // golem.toml says. Same idiom as the three above, same reason: the
-    // environment of the process that starts the engine is the per-run word.
+    // Where the front listens, for the closing line: `LOCAL_AI_HOST` through
+    // the override, because a container is the one caller that must *not*
+    // take it from the file - the file is a host-side setting (127.0.0.1
+    // keeps the LAN out), while a container's port is published and has to
+    // be bound on 0.0.0.0 whatever the mounted golem.toml says.
     let host = overrides.get(home, "LOCAL_AI_HOST")
         .unwrap_or_else(|| "127.0.0.1".to_string());
     let alias = overrides.get(home, "MODEL_ALIAS")
@@ -738,7 +749,7 @@ pub fn plan(home: &Path, overrides: &Overrides) -> Result<Startup, String> {
     let router = adapter.global("router").as_deref() != Some("false");
 
     let mut flags: Vec<(String, String)> = vec![
-        ("host".to_string(), host.clone()),
+        ("host".to_string(), "127.0.0.1".to_string()),
         ("port".to_string(), port.clone()),
     ];
     // These two come from golem.toml onto the command line, and both
@@ -985,8 +996,8 @@ mod tests {
         assert!(plan.program.ends_with(format!("engines/llama.cpp/b11379-cuda/{}", server())), "{:?}", plan.program);
         assert!(plan.args.iter().any(|a| a == "--models-preset"), "{:?}", plan.args);
         assert!(plan.args.iter().any(|a| a == "--models-max"), "one model resident at a time");
-        assert!(plan.args.contains(&"--port".to_string()), "{:?}", plan.args);
-        assert!(plan.args.contains(&"8000".to_string()), "{:?}", plan.args);
+        assert!(plan.args.contains(&"--port".to_string()), "the engine is on the port after golem's: {:?}", plan.args);
+        assert!(plan.args.contains(&"8001".to_string()), "{:?}", plan.args);
         assert!(plan.args.contains(&"--api-key".to_string()));
         assert_eq!(plan.served, "router (config/models.ini)");
         std::fs::remove_dir_all(&dir).ok();
@@ -1071,7 +1082,7 @@ mod tests {
             "[*]\njinja = true\n[model-a]\nmodel = a.gguf\n",
             &format!(
                 "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"cuda\"\n\
-                 LOCAL_AI_PORT = \"{port}\"\nLOCAL_AI_API_KEY = \"k\"\n\
+                 LOCAL_AI_PORT = \"{port}\"\nENGINE_PORT = \"{port}\"\nLOCAL_AI_API_KEY = \"k\"\n\
                  MODEL_ALIAS = \"model-a\"\nMODELS_PRESET = \"config/models.ini\"\n"
             ),
         )

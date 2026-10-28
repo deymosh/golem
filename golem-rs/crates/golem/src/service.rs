@@ -415,6 +415,23 @@ fn start_engine(home: &Path) -> i32 {
     }
 }
 
+/// Answer the API port in front of the engine, for as long as the service
+/// runs (`api.rs`). On the service's own `LOCAL_AI_HOST`, which is how a
+/// container binds every interface. A port that is taken is a warning, said
+/// with what it means: clients cannot reach the engine without it.
+fn start_api(home: &Path) {
+    match crate::api::start(home, &Overrides::from_env()) {
+        Ok(address) => {
+            let web = if crate::api::web_tools_on(home) { "web search on" } else { "web search off (WEB_SEARCH)" };
+            println!(
+                "[ OK ] API on http://{address}/ ({web}; the engine answers on 127.0.0.1:{})",
+                engine::engine_port(home)
+            );
+        }
+        Err(e) => println!("[WARN] the API front {e} - clients cannot reach the engine until it is free"),
+    }
+}
+
 /// Host the console beside the engine, for as long as the service runs.
 ///
 /// On `CONSOLE_HOST`, loopback unless the configuration says otherwise. The
@@ -483,8 +500,9 @@ fn serve(home: &Path, start_now: bool) -> i32 {
             return 1;
         }
     };
-    // The console first: once the endpoint file says the service is up, a
-    // client may open the console straight away.
+    // The API front and the console first: once the endpoint file says the
+    // service is up, a client may use either straight away.
+    start_api(home);
     start_console(home);
     let endpoint = Endpoint { port, token: new_token() };
     if let Err(e) = Endpoint::write(home, &endpoint) {

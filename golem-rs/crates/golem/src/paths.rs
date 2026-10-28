@@ -135,6 +135,11 @@ pub fn engine_log(home: &Path) -> PathBuf {
     home.join("logs").join("llama-server.log")
 }
 
+/// One line per search and fetch golem's web tools ran.
+pub fn web_log(home: &Path) -> PathBuf {
+    home.join("logs").join("web.log")
+}
+
 /// The console's job log: what the last action from the page or the screen
 /// printed, which the job pane tails.
 pub fn job_log(home: &Path) -> PathBuf {

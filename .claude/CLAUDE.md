@@ -45,7 +45,10 @@ tuner), `docs/roadmap.md` (the work, in order), `golem-rs/README.md` (code conve
 
 ## Hard constraints
 
-- No MCP server, no gateway or translation proxy, no web search in the repo, ever.
+- No MCP server and no API translation, ever. Golem may answer the API in front of the
+  engine (`api.rs`) for its own read-only web tools, search and fetch; every other
+  request passes through unchanged, and an Anthropic request still goes to the engine's
+  Anthropic endpoint.
 - Backend-agnostic: model, engine and flags come from `golem.toml`, presets and adapters,
   never hard-coded to one machine.
 - Public repo: no personal data, LAN IPs or hostnames in code, docs, fixtures or commits.

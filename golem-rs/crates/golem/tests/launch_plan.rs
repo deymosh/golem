@@ -120,17 +120,16 @@ fn a_per_run_alias_override_reaches_the_command_line() {
 }
 
 #[test]
-fn a_per_run_host_override_reaches_the_command_line() {
-    // The container's case: the mounted `golem.toml` carries a host-side
-    // `LOCAL_AI_HOST` (127.0.0.1 keeps the LAN out), but a container's port
-    // is published, so its engine has to bind 0.0.0.0 whatever the file
-    // says - compose sets this override in the process environment.
+fn the_engine_binds_the_loopback_whatever_the_host() {
+    // The engine answers golem's front alone, on the port after golem's. A
+    // container's published port is bound by the front (`GOLEM_LOCAL_AI_HOST
+    // = 0.0.0.0`, which compose sets); the engine stays on the loopback.
     let dir = home("host-override");
     let plain = dry_run(&dir, &[]);
-    assert!(plain.contains("--host 127.0.0.1"), "the file's host by default: {plain}");
+    assert!(plain.contains("--host 127.0.0.1 --port 2"), "loopback, the port after 1: {plain}");
     let out = dry_run(&dir, &[("GOLEM_LOCAL_AI_HOST", "0.0.0.0")]);
-    assert!(out.contains("--host 0.0.0.0"), "the override's host: {out}");
-    assert!(!out.contains("--host 127.0.0.1"), "and not the file's: {out}");
+    assert!(out.contains("--host 127.0.0.1"), "the override is the front's, not the engine's: {out}");
+    assert!(!out.contains("--host 0.0.0.0"), "{out}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
