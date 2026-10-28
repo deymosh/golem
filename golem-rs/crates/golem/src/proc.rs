@@ -79,6 +79,13 @@ pub fn run_to_file(mut command: Command, log: &Path) -> std::io::Result<i32> {
 /// is shared because a stdout line and a stderr one can land together. What
 /// a line says is the writer's business: the job log's writer stamps each
 /// one.
+///
+/// The child's exit ends the run, not the pipes' end: a process the child
+/// starts and leaves running - `golem service`, started on demand - inherits
+/// the pipe's write end (on Windows every inheritable handle goes along,
+/// whatever the grandchild's own stdio), and the readers would wait on it
+/// for as long as the service lives. They get [`PIPE_GRACE`] to drain what
+/// the child wrote, and a reader still blocked after that is left behind.
 pub fn run_to_log<W>(mut command: Command, log: Arc<Mutex<W>>) -> std::io::Result<i32>
 where
     W: Write + Send + 'static,
@@ -91,14 +98,20 @@ where
     let out = child.stdout.take().map(|pipe| lines_to(pipe, Arc::clone(&log)));
     let err = child.stderr.take().map(|pipe| lines_to(pipe, log));
     let status = child.wait()?;
-    if let Some(out) = out {
-        let _ = out.join();
-    }
-    if let Some(err) = err {
-        let _ = err.join();
+    let deadline = Instant::now() + PIPE_GRACE;
+    for reader in [out, err].into_iter().flatten() {
+        while !reader.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if reader.is_finished() {
+            let _ = reader.join();
+        }
     }
     Ok(status.code().unwrap_or(-1))
 }
+
+/// How long [`run_to_log`] lets the readers drain after the child exits.
+const PIPE_GRACE: Duration = Duration::from_secs(2);
 
 /// Every complete line of `pipe`, written to `log` as it arrives.
 fn lines_to<R, W>(pipe: R, log: Arc<Mutex<W>>) -> std::thread::JoinHandle<()>
@@ -165,5 +178,24 @@ mod tests {
         assert_eq!(first.total, 100);
         assert!(first.done <= 100, "{first:?}");
         assert_eq!(first.label, "test");
+    }
+
+    #[test]
+    fn a_grandchild_holding_the_pipe_does_not_hold_the_run() {
+        // The child prints, leaves a sleeper running with the pipe, and
+        // exits: the run ends with the child, and its line is in the log.
+        let mut command = Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        if cfg!(windows) {
+            command.args(["/C", "echo said& start /B ping -n 8 127.0.0.1 >NUL"]);
+        } else {
+            command.args(["-c", "echo said; sleep 8 & exit 0"]);
+        }
+        let log = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let started = Instant::now();
+        let code = run_to_log(command, Arc::clone(&log)).expect("run");
+        assert_eq!(code, 0);
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        let text = String::from_utf8(log.lock().expect("lock").clone()).expect("utf8");
+        assert!(text.contains("said"), "{text:?}");
     }
 }
