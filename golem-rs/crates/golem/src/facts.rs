@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use golem_core::record::{self, Facts, Flag, FlagValue};
+use golem_core::record::{self, Facts};
 use golem_core::results::Kind;
 use golem_core::time;
 
