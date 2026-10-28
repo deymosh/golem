@@ -52,7 +52,7 @@ pub fn platform() -> &'static str {
 pub struct Pinned {
     pub engine: String, // "llama.cpp"
     pub build: String,  // "b11379", or "latest" to follow upstream
-    pub backend: String, // "cuda" | "rocm"
+    pub backend: String, // "cuda" | "rocm" | "vulkan" | "metal"
     /// `home/.local/engines/<engine>` - *not* the directory the build ends up
     /// in. `latest` is only a tag once GitHub has been asked, so the build's
     /// directory is named after the resolved tag (see [`install_dir`]).

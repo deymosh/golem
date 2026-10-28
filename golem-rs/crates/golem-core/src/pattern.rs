@@ -276,10 +276,12 @@ fn one(atom: &Atom, chars: &[char], pos: usize) -> Option<usize> {
 mod tests {
     use super::*;
 
-    /// The three patterns `engines/llama.cpp/engine.ini` actually carries.
+    /// The patterns `engines/llama.cpp/engine.ini` actually carries.
     const CUDA_ASSET: &str = r"^llama-.*bin-win-cuda-13\.\d+-x64\.zip$";
     const CUDA_RUNTIME: &str = r"^cudart-llama-bin-win-cuda-13\.\d+-x64\.zip$";
     const ROCM_ASSET: &str = r"^llama-.*bin-win-rocm-\d+\.\d+-x64\.zip$";
+    const VULKAN_ASSET: &str = r"^llama-.*bin-win-vulkan-x64\.zip$";
+    const VULKAN_LINUX_ASSET: &str = r"^llama-.*bin-ubuntu-vulkan-x64\.tar\.gz$";
 
     #[test]
     fn the_real_cuda_pattern_picks_the_server_zip_and_not_its_neighbours() {
@@ -296,6 +298,17 @@ mod tests {
         assert!(matches(ROCM_ASSET, "llama-b11379-bin-win-rocm-6.4-x64.zip").unwrap());
         // The `.` in `\d+\.\d+` is literal, so a two-part version is required.
         assert!(!matches(ROCM_ASSET, "llama-b11379-bin-win-rocm-64-x64.zip").unwrap());
+    }
+
+    #[test]
+    fn the_real_vulkan_patterns_match_their_assets() {
+        // The vulkan build carries no runtime version, unlike the cuda ones.
+        assert!(matches(VULKAN_ASSET, "llama-b11379-bin-win-vulkan-x64.zip").unwrap());
+        assert!(matches(VULKAN_LINUX_ASSET, "llama-b11379-bin-ubuntu-vulkan-x64.tar.gz").unwrap());
+        // Neither the cuda nor the rocm asset answers to these.
+        assert!(!matches(VULKAN_ASSET, "llama-b11379-bin-win-cuda-13.1-x64.zip").unwrap());
+        assert!(!matches(VULKAN_ASSET, "llama-b11379-bin-win-vulkan-x64.tar.gz").unwrap());
+        assert!(!matches(VULKAN_LINUX_ASSET, "llama-b11379-bin-ubuntu-vulkan-x64.zip").unwrap());
     }
 
     #[test]

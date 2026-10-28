@@ -150,8 +150,9 @@ fn basename(path: &str) -> &str {
 /// The engine build, taken from the running server's own install path.
 ///
 /// Some servers (ik_llama.cpp) report no build in `/props`; their command
-/// line names it instead, as `<home>/.local/engines/<engine>/<build>` with a
-/// `-cuda`/`-rocm` suffix. The pid comes from the launcher's pid file.
+/// line names it instead, as `<home>/.local/engines/<engine>/<build>` with
+/// a `-cuda`/`-rocm`/`-vulkan` suffix. The pid comes from the launcher's
+/// pid file.
 fn build_from_pid_file(home: &Path, engine_name: &str) -> Option<String> {
     let pid = engine::pid(home)?;
     let cmdline = if cfg!(windows) { windows_cmdline(pid) } else { unix_cmdline(pid) };
@@ -175,6 +176,9 @@ fn build_from_token(token: &str, engine: &str) -> Option<String> {
         build = stripped;
     }
     if let Some(stripped) = build.strip_suffix("-rocm") {
+        build = stripped;
+    }
+    if let Some(stripped) = build.strip_suffix("-vulkan") {
         build = stripped;
     }
     Some(build.to_string())
@@ -440,6 +444,9 @@ mod tests {
         assert_eq!(build_from_cmdline(windows, "llama.cpp").as_deref(), Some("b11379"));
         let unix = "/home/x/.local/engines/llama.cpp/b4400-rocm/llama-server -m a.gguf";
         assert_eq!(build_from_cmdline(unix, "llama.cpp").as_deref(), Some("b4400"));
+        // The vulkan install dir's suffix comes off like the others.
+        let vulkan = r"C:\golem\.local\engines\llama.cpp\b11379-vulkan\llama-server.exe";
+        assert_eq!(build_from_cmdline(vulkan, "llama.cpp").as_deref(), Some("b11379"));
         // The path must be the named engine's.
         assert_eq!(build_from_cmdline(windows, "ik_llama.cpp"), None);
         // No engines path at all: nothing to take.

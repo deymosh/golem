@@ -81,9 +81,10 @@ GATE_TOKENS = 200000
 # `/v1/messages`, so the tuner never adopts it).
 ENGINE = "llama.cpp"
 
-# GPU vendor. `auto` (the default) detects it - NVIDIA to cuda, AMD to rocm,
-# macOS to metal - so most machines need nothing here. Set it when detection
-# cannot work or guesses wrong (a headless box, a remote host, two GPUs).
+# GPU backend: cuda | rocm | vulkan | metal. `auto` (the default) reads the
+# card's vendor - NVIDIA to cuda, AMD to rocm, Intel to vulkan, macOS to
+# metal - so most machines need nothing here. Set it when detection cannot
+# work or guesses wrong (a headless box, a remote host, two GPUs).
 GPU_BACKEND = "auto"
 
 # Pin a different engine build than the adapter names. "latest" follows
