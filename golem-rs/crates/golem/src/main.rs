@@ -417,7 +417,7 @@ fn cmd_report(args: &[String]) -> ExitCode {
 
     // The page is the template with the records inlined: the raw lines, not
     // a re-serialization, so the page can never disagree with the file.
-    let template = paths::PAGE;
+    let template = paths::page();
     let raw = match std::fs::read_to_string(&results) {
         Ok(r) => r,
         Err(e) => {

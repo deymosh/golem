@@ -117,6 +117,7 @@ pub fn router(cfg: Config) -> axum::Router {
         .route("/api/addmodel", post(api_addmodel))
         .route("/api/delmodel", post(api_delmodel))
         .route("/api/delpreset", post(api_delpreset))
+        .route("/api/settings", get(api_settings).post(api_set))
         .fallback(not_found)
         .layer(axum::middleware::from_fn(move |request: axum::extract::Request, next: axum::middleware::Next| {
             let bind_host = bind_host.clone();
@@ -207,7 +208,7 @@ pub async fn serve_on(listener: tokio::net::TcpListener, cfg: Config) -> std::io
 /// but cannot be read is a real error and says so.
 async fn index(State(app): State<Arc<App>>) -> Response {
     let template = match &app.cfg.template {
-        None => crate::paths::PAGE.to_string(),
+        None => crate::paths::page().to_string(),
         Some(path) => match tokio::fs::read_to_string(path).await {
             Ok(t) => t,
             Err(e) => return read_error(path, &e),
@@ -414,6 +415,39 @@ async fn api_delmodel(State(app): State<Arc<App>>, body: Bytes) -> Response {
 async fn api_delpreset(State(app): State<Arc<App>>, body: Bytes) -> Response {
     let name = parse_form(&body).get("arg").cloned().unwrap_or_default();
     edit(app, move |home| models::delete_preset(home, &name)).await
+}
+
+/// `GET /api/settings`: the keys the Settings tab edits
+/// (`golem_core::settings`) with their values in golem.toml.
+async fn api_settings(State(app): State<Arc<App>>) -> Response {
+    let home = app.cfg.home.clone();
+    match tokio::task::spawn_blocking(move || golem_core::settings::to_json(|key| crate::config::get(&home, key))).await {
+        Ok(body) => json(StatusCode::OK, body),
+        Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "settings unavailable"),
+    }
+}
+
+/// `POST /api/settings` with `key=<KEY>&value=<value>`: check the value
+/// against the key's shape and write it to golem.toml, comments kept. Answers
+/// `{"result": "saved", "applies": "..."}`, or a 400 with what the value has
+/// to look like.
+async fn api_set(State(app): State<Arc<App>>, body: Bytes) -> Response {
+    let form = parse_form(&body);
+    let key = form.get("key").cloned().unwrap_or_default();
+    let value = match golem_core::settings::check(&key, form.get("value").map(String::as_str).unwrap_or("")) {
+        Ok(value) => value,
+        Err(why) => return plain(StatusCode::BAD_REQUEST, why),
+    };
+    let applies = golem_core::settings::find(&key).map_or("now", |s| s.applies.word());
+    let home = app.cfg.home.clone();
+    match tokio::task::spawn_blocking(move || crate::config::set(&home, &key, &value)).await {
+        Ok(Ok(())) => json(
+            StatusCode::OK,
+            format!("{{\"result\": \"saved\", \"applies\": {}}}", json::quote(applies)),
+        ),
+        Ok(Err(e)) => plain(StatusCode::INTERNAL_SERVER_ERROR, format!("cannot write golem.toml: {e}")),
+        Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "the setting did not run"),
+    }
 }
 
 /// One of the preset edits, off the async runtime.

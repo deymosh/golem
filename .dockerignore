@@ -5,8 +5,7 @@
 .local
 data
 logs
-bench/*
-!bench/report.template.html
+bench
 golem-rs/target
 golem.exe
 .env

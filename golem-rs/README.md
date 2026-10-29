@@ -67,7 +67,7 @@ byte-identical to it.
 **The home is `GOLEM_HOME` if set, otherwise the directory the binary lives in.**
 Everything lives under it and is created on first run - `bench/`, `data/models`,
 `data/cache`, `data/tuned`, `logs/`, and `golem.toml`, compiled in and written out only
-when missing (an existing copy always wins). The page (`bench/report.template.html` in
-the checkout) and the library (`config/library.ini`) are compiled in too; the page is never
+when missing (an existing copy always wins). The page (`golem-rs/crates/golem/console/`:
+the markup, its stylesheet and its script, put together at build) and the library (`config/library.ini`) are compiled in too; the page is never
 written into the home, so an upgrade always serves its own. A release unpacked anywhere
 populates its own folder; the dev build at the repository root uses the checkout's files.

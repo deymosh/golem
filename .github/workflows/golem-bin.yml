@@ -12,9 +12,9 @@ on:
   push:
     branches: [master]
     tags: ['v*']
-    paths: [golem-rs/**, bench/report.template.html, config/**, engines/**, golem.toml.example, .github/workflows/golem-bin.yml]
+    paths: [golem-rs/**, config/**, engines/**, golem.toml.example, .github/workflows/golem-bin.yml]
   pull_request:
-    paths: [golem-rs/**, bench/report.template.html, config/**, engines/**, golem.toml.example, .github/workflows/golem-bin.yml]
+    paths: [golem-rs/**, config/**, engines/**, golem.toml.example, .github/workflows/golem-bin.yml]
 
 env:
   CARGO_TERM_COLOR: always

@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Golem</title>
+<!-- One page, three places. Served by `golem service` it is the console:
+     models, controls, results and the engine log, live. In the Golem window
+     (`golem app`) the same page also draws the window's title bar. Written
+     by `golem report` it is a snapshot of the results alone. The binary
+     compiles in this file, console.css and console.js, puts the two in
+     place of the GOLEM_STYLE and GOLEM_SCRIPT markers, and replaces the
+     GOLEM_DATA marker with the results.jsonl lines. Self-contained once
+     assembled: no CDN, no web fonts, opens from file://. -->
+<style>
+/*GOLEM_STYLE*/
+</style>
+</head>
+<body>
+<header class="bar" id="bar">
+  <div class="brand">
+    <!-- On a phone the mark opens the sections, as a panel from the left. -->
+    <button class="nav-toggle" id="nav-toggle" aria-controls="sections" aria-expanded="false" aria-label="Sections">
+      <svg class="menu" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12"/></svg>
+      <svg id="mark" viewBox="0 0 64 68" role="img" aria-label="Golem"></svg>
+    </button>
+    <span>Golem</span><small id="c-version" title="The running Golem version"></small>
+  </div>
+  <div class="scrim" id="scrim" hidden></div>
+  <nav class="tabs" id="sections" aria-label="Sections">
+    <a href="#models" data-tab="models" hidden>Models</a>
+    <a href="#chat" data-tab="chat" hidden>Chat</a>
+    <a href="#results" data-tab="results">Results</a>
+    <a href="#log" data-tab="log" hidden>Engine log</a>
+    <a href="#settings" data-tab="settings" hidden>Settings</a>
+  </nav>
+  <div class="right">
+    <!-- On the Chat tab: the chat asks once for the API key, and keeps it. -->
+    <div class="chat-tools" id="chat-tools" hidden>
+      <button class="btn quiet" id="chat-copy" title="The chat asks for it once, then keeps it">Copy API key</button>
+      <a class="btn quiet" id="chat-open" target="_blank" rel="noopener">Open in a new tab</a>
+    </div>
+    <div class="state" id="c-state"><i></i><span id="c-state-text">Snapshot</span></div>
+    <div class="winbtns" aria-label="Window">
+      <button data-win="minimize" title="Minimize" aria-label="Minimize"><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></button>
+      <button data-win="maximize" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9"/></svg></button>
+      <button data-win="close" class="x" title="Close to the tray" aria-label="Close"><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></button>
+    </div>
+  </div>
+</header>
+<div class="edge n" data-edge="n"></div><div class="edge s" data-edge="s"></div><div class="edge e" data-edge="e"></div><div class="edge w" data-edge="w"></div>
+<div class="edge ne" data-edge="ne"></div><div class="edge nw" data-edge="nw"></div><div class="edge se" data-edge="se"></div><div class="edge sw" data-edge="sw"></div>
+
+<main>
+  <!-- The update banner: shown only when api/state has an update to name.
+       The job it starts shows its progress in the job pane under Models. -->
+  <div class="update" id="update" role="status" hidden>
+    <span id="update-text"></span>
+    <span id="update-msg" class="bad-text" hidden></span>
+    <span class="spacer"></span>
+    <button class="btn go" id="update-go">Update</button>
+    <a class="btn quiet" id="update-link" target="_blank" rel="noopener" hidden>What's new</a>
+    <button class="btn quiet" id="update-skip">Not now</button>
+  </div>
+  <section id="tab-models" hidden>
+    <div class="surface">
+      <div class="serving">
+        <div>
+          <span class="lead" id="sv-lead">Stopped</span>
+          <h1 id="sv-name">–</h1>
+          <div class="seals"><span class="seal" id="sv-seal"></span><span class="seal" id="sv-agent" hidden></span></div>
+        </div>
+        <dl class="numbers" id="sv-numbers"></dl>
+      </div>
+      <div class="strip" id="control">
+        <div class="group">
+          <button class="btn" data-run="start">Start</button>
+          <button class="btn" data-run="restart">Restart</button>
+          <button class="btn danger" data-run="stop">Stop</button>
+        </div>
+        <div class="group">
+          <button class="btn" data-run="bench">Bench</button>
+          <button class="btn" data-run="eval">Run the 200K eval</button>
+        </div>
+        <div class="group">
+          <label for="c-engine">Engine</label>
+          <select id="c-engine"></select>
+          <button class="btn quiet" data-apply="c-engine">Use</button>
+        </div>
+      </div>
+      <p class="msg" id="c-msg" role="status" aria-live="polite" hidden></p>
+      <div class="progress" id="c-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" hidden>
+        <div class="head"><b id="c-progress-label"></b><span id="c-progress-amount"></span></div>
+        <div class="track"><i id="c-progress-fill"></i></div>
+      </div>
+      <details class="joblog" id="c-log-box" hidden>
+        <summary id="c-log-sum"></summary>
+        <pre class="log" id="c-log"></pre>
+      </details>
+    </div>
+
+    <div class="surface connect" id="connect">
+      <div class="top">
+        <h2>Connect an agent</h2>
+        <div class="seg" role="tablist" aria-label="Agent" id="cx-tabs">
+          <button role="tab" data-cx="claude">Claude Code</button>
+          <button role="tab" data-cx="opencode">OpenCode</button>
+          <button role="tab" data-cx="codex">Codex</button>
+          <button role="tab" data-cx="other">Any other client</button>
+        </div>
+      </div>
+      <dl class="endpoints">
+        <dt>Anthropic API</dt><dd id="cx-anthropic"></dd><button class="btn quiet" data-copy="cx-anthropic">Copy</button>
+        <dt>OpenAI API</dt><dd id="cx-openai"></dd><button class="btn quiet" data-copy="cx-openai">Copy</button>
+        <dt>API key</dt><dd id="cx-key"></dd><button class="btn quiet" id="cx-key-copy">Copy</button>
+      </dl>
+      <pre class="snippet" id="cx-snippet" role="tabpanel" aria-labelledby="cx-tabs"></pre>
+      <div class="row">
+        <span class="sub" id="cx-note"></span>
+        <button class="btn quiet" id="cx-show">Show key</button>
+        <button class="btn go" id="cx-copy">Copy setup</button>
+      </div>
+      <p class="sub" id="cx-web" style="margin:0"></p>
+    </div>
+
+    <form class="surface pull" id="pull-form">
+      <input type="text" id="pull-ref" placeholder="unsloth/Qwen3.5-9B-GGUF" aria-label="Model to pull from Hugging Face: owner/repo, owner/repo:quant, or a library name" autocomplete="off" spellcheck="false">
+      <button class="btn go" type="submit">Pull</button>
+      <span class="sub" id="pull-msg">Any GGUF repo on Hugging Face, with :quant to choose one, or a library name. Golem picks the quant this machine can hold and writes the preset.</span>
+    </form>
+
+    <ul class="surface models" id="m-list"></ul>
+  </section>
+
+  <section id="tab-results">
+    <div class="surface filters">
+      <label>Host <select id="f-host"></select></label>
+      <label>Engine <select id="f-engine"></select></label>
+      <label>Model <select id="f-model"></select></label>
+      <label>Size <select id="f-class"></select></label>
+      <label><input type="checkbox" id="f-quiet" checked> Quiet runs only</label>
+    </div>
+
+    <h2>Best decode per model and engine build</h2>
+    <div class="surface scroll"><table id="board"></table></div>
+
+    <h2>Decode against prefill <span class="sub" id="chart-class"></span></h2>
+    <div class="surface chart">
+      <div class="filters" style="padding:6px 8px 0"><label>Show <select id="f-class-chart"></select></label></div>
+      <div id="scatter"></div><div class="legend" id="legend"></div>
+      <p class="sub" style="margin:0;padding:0 14px 12px">Models of different sizes do not compare: a 0.5B at 269 t/s says nothing
+        about a 35B at 59. Pick a size, or read t/s per active B in the table.</p>
+    </div>
+
+    <h2>All runs <span class="sub" id="meta"></span></h2>
+    <div class="surface scroll"><table id="runs"></table></div>
+  </section>
+
+  <section id="tab-chat" hidden>
+    <div class="surface">
+      <p class="msg" id="chat-msg" role="status" aria-live="polite" hidden></p>
+      <iframe id="chat-frame" title="Chat" allow="clipboard-read; clipboard-write; microphone" hidden></iframe>
+    </div>
+  </section>
+
+  <section id="tab-log" hidden>
+    <div class="surface">
+      <div class="strip sub" id="log-strip"><span id="log-file"></span>
+        <button class="btn quiet" id="log-raw" type="button" aria-pressed="false" title="Show llama.cpp's own lines">Raw</button></div>
+      <pre class="log" id="engine-log"></pre>
+    </div>
+  </section>
+  <section id="tab-settings" hidden>
+    <p class="sub" style="margin:4px 2px 0">Golem's settings, written to golem.toml with its comments kept. Each says when a change takes effect;
+      an empty field puts the default back.</p>
+    <div id="set-groups"></div>
+  </section>
+  <div id="tip" hidden></div>
+</main>
+
+<script id="golem-data" type="application/json">/*GOLEM_DATA*/</script>
+<script>
+/*GOLEM_SCRIPT*/
+</script>
+</body>
+</html>

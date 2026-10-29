@@ -22,12 +22,14 @@ ARG GPU_BACKEND=cuda
 # dependencies beyond cargo.
 FROM ${RUST_IMAGE} AS build
 WORKDIR /src
-# golem.toml.example and bench/report.template.html are compiled in with
-# include_str!(), resolved relative to paths.rs - so the layout here has to
-# match the checkout's.
+# golem.toml.example, the presets, the library and the default adapter are
+# compiled in with include_str!(), resolved relative to the sources - so the
+# layout here has to match the checkout's. The console page is the crate's
+# own (golem-rs/crates/golem/console/).
 COPY golem-rs golem-rs
 COPY golem.toml.example golem.toml.example
-COPY bench/report.template.html bench/report.template.html
+COPY config config
+COPY engines engines
 RUN cargo build --release --manifest-path golem-rs/Cargo.toml
 
 # One runtime per vendor; the final stage picks between them. The CUDA tag

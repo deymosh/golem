@@ -43,6 +43,10 @@ pub mod pattern;
 /// read and written line by line so the comments survive.
 pub mod config;
 
+/// The `golem.toml` keys the console edits: shape, default, and when a
+/// change takes effect.
+pub mod settings;
+
 /// The row builder: a captured bench or eval output, plus what was measured
 /// on, becomes one line of
 /// `bench/results.jsonl`.

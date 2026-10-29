@@ -78,7 +78,8 @@ runs, alternating pairs, build trials, adoption.
 - llama.cpp b11879 and b11936 fail `load-mode = mlock` on load (b11755 does not);
   `mmap+mlock` pins the same way and loads. A failed CUDA load blanks a Windows screen
   for a moment.
-- The console page (`bench/report.template.html`) is compiled in: change it, rebuild,
+- The console page (`golem-rs/crates/golem/console/`: index.html, console.css, console.js)
+  is compiled in: change it, rebuild,
   restart the service. The presets, library and default adapter are compiled in too, for
   a release folder; a checkout's own files win.
 

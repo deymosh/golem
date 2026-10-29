@@ -117,8 +117,10 @@ the request is still taken out: the engine cannot read it).
 ```
 golem-rs/crates/
   golem-core/   pure and tested: JSON, golem.toml, INI presets and overlays, GGUF header,
-                results.jsonl, RESULT lines, the report, and every tuner decision
-  golem/        the binary: commands, engine, service, measurement, console, screen
+                results.jsonl, RESULT lines, the report, every tuner decision, the agent
+                suite's tasks and grading, the settings the console edits
+  golem/        the binary: commands, engine, service, measurement, console, screen;
+                console/ is the page (markup, stylesheet, script) compiled in
 ```
 
 `golem` is a library (`lib.rs`, every module below) and a thin `main.rs` that parses the
@@ -139,7 +141,10 @@ need a GPU are thin.
 
 `golem service` is the only process that starts the engine, and it hosts the API front
 (`LOCAL_AI_HOST`:`LOCAL_AI_PORT`) and the console (`CONSOLE_HOST`:`CONSOLE_PORT`,
-`127.0.0.1:8787` by default) for as long as it runs. The
+`127.0.0.1:8787` by default) for as long as it runs. The console is one page - Models,
+Chat, Results, the engine log and Settings - whose source is the crate's `console/`
+(markup, stylesheet, script), put together into one self-contained file by
+`paths::page`; `golem report` writes the same page as a snapshot of the results. The
 console has no login; listening beyond loopback is a configuration choice the service
 warns about at every start. `up`, `down`,
 `restart` and `status` from the CLI, the screen's menu and the console's buttons are all
@@ -280,7 +285,11 @@ adapter and the preset, and spawns nothing - `golem up --dry-run` prints it.
 `config::set`, which replaces one line and keeps every comment. It is git-ignored - it
 holds the port, the API key and the model this machine serves - and
 `golem.toml.example` is the tracked template, compiled into the binary and written out on
-first run.
+first run. The console's Settings tab edits the keys `golem_core::settings` lists - each
+checked against its shape before `config::set` writes it, each marked with when a change
+takes effect (at once, on the next run, on the engine's or the service's next start). The
+model, the engine and the preset file are not among them: the Models tab and
+`tune --adopt` own those.
 
 The **home** is `GOLEM_HOME` if set, otherwise the directory the binary lives in. A
 release folder populates itself; the dev build that `./scripts/cargo.sh` drops at the

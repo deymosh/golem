@@ -1,452 +1,3 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Golem</title>
-<!-- One page, three places. Served by `golem service` it is the console:
-     models, controls, results and the engine log, live. In the Golem window
-     (`golem app`) the same page also draws the window's title bar. Written
-     by `golem report` it is a snapshot of the results alone. The generator
-     replaces the GOLEM_DATA marker with the results.jsonl lines.
-     Self-contained: no CDN, no web fonts, opens from file://. -->
-<style>
-/* The title bar is the header: mark and name, the tabs, the state, and in
-   the app the window's own buttons. Under it one working column. Dark only:
-   graphite stone like the mark's body, and the mark's spark - its amber -
-   as the one accent. Green means one thing, a model serving or a check
-   passed. What a number is worth is said by its seal: proven by the 200K
-   gate on this machine, measured, or not measured at all. */
-:root {
-  --ground: #15171b; --surface: #1c1f24; --raised: #24282f; --ink: #e7e9ed; --soft: #969ca7;
-  --hair: #2e333b; --clay: #80868f; --accent: #e9a23b; --spark: #e9a23b;
-  --ok: #5fc48a; --busy: #e9a23b; --bad: #ef7a6a;
-  --s1: #e9a23b; --s2: #6ea9f0; --s3: #b58ce0; --s4: #5cc4b4; --s5: #ef7a6a; --s6: #969ca7;
-  --ui: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", sans-serif;
-  --display: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
-  --code: "Cascadia Mono", "Cascadia Code", ui-monospace, Consolas, monospace;
-  --bar: 44px;
-  color-scheme: dark;
-}
-* { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--soft) 45%, transparent) transparent; }
-html, body { height: 100%; }
-/* An app, not a document: the title bar and the controls stay, and each
-   content area - the model list, the results, the log - scrolls itself. */
-body { margin: 0; background: var(--ground); color: var(--ink); font: 14px/1.5 var(--ui); -webkit-font-smoothing: antialiased;
-  display: flex; flex-direction: column; overflow: hidden; }
-code, .code { font-family: var(--code); font-size: 12.5px; }
-button, select, input { font: inherit; color: inherit; }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-/* ---- title bar --------------------------------------------------------- */
-.bar { flex: none; position: relative; z-index: 20; height: var(--bar); display: grid; grid-template-columns: 1fr auto 1fr;
-  align-items: center; background: var(--surface); border-bottom: 1px solid var(--hair); user-select: none;
-  padding-left: max(14px, env(safe-area-inset-left, 0px)); }
-.brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
-.brand svg { width: 22px; height: 22px; flex: none; }
-.brand span { font: 600 14px/1 var(--display); letter-spacing: .01em; }
-.brand small { font: 12px/1 var(--code); color: var(--soft); }
-.tabs { display: flex; gap: 2px; padding: 4px; background: var(--ground); border-radius: 8px; }
-.tabs a { padding: 5px 14px; border-radius: 6px; color: var(--soft); text-decoration: none; font-size: 13px; }
-.tabs a:hover { color: var(--ink); }
-.tabs a[aria-current="page"] { background: var(--raised); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / .08); }
-.right { display: flex; align-items: center; justify-content: flex-end; gap: 14px; min-width: 0; height: 100%;
-  padding-right: max(14px, env(safe-area-inset-right, 0px)); }
-/* Padded so the serving dot's ring is not cut by the clip that ellipsizes
-   the text. */
-.state { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--soft); white-space: nowrap; overflow: hidden; padding-left: 4px; min-width: 0; }
-.state i { width: 8px; height: 8px; border-radius: 50%; background: var(--soft); flex: none; }
-.state.up i { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
-.state.busy i { background: var(--busy); }
-.state b { color: var(--ink); font-weight: 600; }
-.winbtns { display: none; height: 100%; }
-.winbtns button { width: 46px; height: 100%; border: 0; background: transparent; color: var(--soft); cursor: default; display: grid; place-items: center; }
-.winbtns button:hover { background: color-mix(in srgb, var(--ink) 8%, transparent); color: var(--ink); }
-.winbtns button.x:hover { background: #c42b1c; color: #fff; }
-.winbtns svg { width: 10px; height: 10px; stroke: currentColor; fill: none; stroke-width: 1; }
-html.app .winbtns { display: flex; }
-html.app .right { padding-right: 0; }
-.edge { position: fixed; z-index: 30; display: none; }
-html.app .edge { display: block; }
-.edge.n { top: 0; left: 6px; right: 6px; height: 4px; cursor: n-resize; }
-.edge.s { bottom: 0; left: 6px; right: 6px; height: 5px; cursor: s-resize; }
-.edge.e { right: 0; top: 6px; bottom: 6px; width: 5px; cursor: e-resize; }
-.edge.w { left: 0; top: 6px; bottom: 6px; width: 5px; cursor: w-resize; }
-.edge.ne { top: 0; right: 0; width: 8px; height: 8px; cursor: ne-resize; }
-.edge.nw { top: 0; left: 0; width: 8px; height: 8px; cursor: nw-resize; }
-.edge.se { bottom: 0; right: 0; width: 10px; height: 10px; cursor: se-resize; }
-.edge.sw { bottom: 0; left: 0; width: 10px; height: 10px; cursor: sw-resize; }
-.nav-toggle { display: flex; align-items: center; gap: 8px; padding: 0; border: 0; background: none; color: inherit; pointer-events: none; }
-.nav-toggle .menu { display: none; width: 16px; height: 16px; stroke: var(--soft); stroke-width: 1.6; fill: none; }
-.scrim { display: none; }
-/* On a phone the bar is one line - the mark, the name, the state - and the
-   sections are a panel from the left, opened by the mark like llama.cpp's
-   own chat opens its list. */
-@media (max-width: 760px) {
-  .bar { grid-template-columns: auto 1fr; }
-  .nav-toggle { pointer-events: auto; cursor: pointer; padding: 6px 4px; margin: -6px -4px; border-radius: 6px; }
-  .nav-toggle .menu { display: block; }
-  .tabs { position: fixed; z-index: 50; top: 0; bottom: 0; left: 0; width: min(280px, 82vw); flex-direction: column; gap: 2px;
-    padding: calc(var(--bar) + 10px) 10px 16px; border-radius: 0; background: var(--surface); border-right: 1px solid var(--hair);
-    transform: translateX(-102%); visibility: hidden; }
-  .tabs a { padding: 10px 14px; font-size: 15px; border-radius: 8px; }
-  html.nav-open .tabs { transform: none; visibility: visible; box-shadow: 12px 0 32px rgb(0 0 0 / .35); }
-  .scrim:not([hidden]) { display: block; position: fixed; inset: 0; z-index: 45; background: rgb(0 0 0 / .45); }
-  .brand { position: relative; z-index: 55; }
-  .state span { overflow: hidden; text-overflow: ellipsis; } .state .extra { display: none; }
-}
-@media (max-width: 760px) and (prefers-reduced-motion: no-preference) {
-  .tabs { transition: transform .2s ease-out, visibility .2s; }
-}
-
-/* ---- page -------------------------------------------------------------- */
-/* Under the title bar, which never moves, the page scrolls: Models and
-   Results are pages, their scrollbar at the window's edge and the column
-   centred inside. The engine log and the chat are panes instead - they
-   fill what is left of the window, the page stays put, and the log scrolls
-   itself. */
-main { flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column; overflow-y: auto; scrollbar-gutter: stable;
-  padding: 22px max(18px, env(safe-area-inset-right, 0px)) 28px max(18px, env(safe-area-inset-left, 0px)); }
-main > * { width: 100%; max-width: 1240px; margin-inline: auto; }
-section { flex: none; display: flex; flex-direction: column; gap: 16px; }
-section[hidden] { display: none; }
-section > * { flex: none; }
-main:has(#tab-log:not([hidden])), main:has(#tab-chat:not([hidden])) { overflow: hidden; }
-#tab-log:not([hidden]), #tab-chat:not([hidden]) { flex: 1; min-height: 0; }
-/* The update banner, a full-width strip above whichever tab is open. */
-.update { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
-  padding: 10px 14px; margin-bottom: 16px; background: var(--surface); border: 1px solid var(--hair); border-radius: 10px; }
-.update[hidden] { display: none; }
-.update span b { color: var(--ink); font-weight: 600; }
-.update span { color: var(--soft); font-size: 13px; }
-.update .spacer { flex: 1; }
-.update .bad-text { color: var(--bad); font-size: 13px; }
-/* What scrolls in each tab. */
-#tab-log > .surface { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-#engine-log { flex: 1; min-height: 0; }
-#tab-chat > .surface { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-#chat-frame { flex: 1; min-height: 0; width: 100%; border: 0; border-top: 1px solid var(--hair); background: var(--surface); }
-#chat-open { text-decoration: none; }
-/* The chat is the engine's own app, so it gets the window: edge to edge
-   under the title bar, and above it one quiet line for the key, which the
-   chat asks for once and then keeps. On a phone the line is its two
-   buttons. */
-main:has(#tab-chat:not([hidden])) { padding: 0; scrollbar-gutter: auto; }
-main:has(#tab-chat:not([hidden])) > * { max-width: none; }
-#tab-chat > .surface { border: 0; border-radius: 0; background: var(--ground); }
-#chat-frame { background: var(--ground); border-top: 0; }
-#chat-msg { margin: auto; border: 0; text-align: center; padding: 40px 18px; }
-.chat-tools { display: flex; align-items: center; gap: 2px; padding-right: 12px; border-right: 1px solid var(--hair); flex: none; }
-.chat-tools[hidden] { display: none; }
-.chat-tools .btn { padding: 4px 9px; }
-@media (max-width: 620px) { #chat-open { display: none; } }
-h2 { font: 600 15px/1.3 var(--display); margin: 14px 0 -6px; }
-.sub { color: var(--soft); font-size: 13px; }
-.surface { background: var(--surface); border: 1px solid var(--hair); border-radius: 10px; min-width: 0; }
-.scroll { overflow-x: auto; }
-
-.btn { font-size: 13px; background: var(--raised); border: 1px solid var(--hair); border-radius: 6px; padding: 5px 12px; cursor: pointer; white-space: nowrap; }
-.btn:hover { border-color: color-mix(in srgb, var(--accent) 60%, var(--hair)); }
-.btn:disabled { opacity: .45; cursor: default; }
-.btn.go { background: var(--accent); border-color: var(--accent); color: var(--surface); font-weight: 600; }
-.btn.quiet { background: transparent; border-color: transparent; color: var(--soft); }
-.btn.quiet:hover { color: var(--ink); border-color: var(--hair); }
-.btn.danger:hover { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 50%, var(--hair)); }
-select, input[type=text] { background: var(--raised); border: 1px solid var(--hair); border-radius: 6px; padding: 5px 9px; font-size: 13px; max-width: 100%; }
-
-/* the engine strip */
-.strip { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; }
-.strip .group { display: flex; gap: 6px; align-items: center; }
-.strip .group + .group { padding-left: 10px; border-left: 1px solid var(--hair); }
-.strip label { color: var(--soft); font-size: 13px; }
-.msg { margin: 0; padding: 8px 14px; border-top: 1px solid var(--hair); font-size: 13px; color: var(--soft); }
-.msg.bad { color: var(--bad); }
-pre.log { margin: 0; padding: 12px 14px; font: 12px/1.55 var(--code); color: var(--soft); white-space: pre-wrap; overflow-y: auto; }
-#c-log { border-top: 1px solid var(--hair); max-height: 420px; }
-/* A finished job folds to its last line; a running one is open. */
-.joblog { border-top: 1px solid var(--hair); }
-.joblog summary { padding: 8px 14px; font-size: 13px; color: var(--soft); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.joblog summary:hover { color: var(--ink); }
-.joblog summary b { color: var(--ink); font-weight: 600; }
-/* One job-log line. The clock stamp dims; the === strips stand apart; a
-   verdict tag takes the colour the badges use. */
-:is(#c-log, #engine-log) .jl { min-height: 18px; }
-:is(#c-log, #engine-log) .jt { color: color-mix(in srgb, var(--soft) 55%, transparent); }
-:is(#c-log, #engine-log) .jf { color: var(--ink); font-weight: 600; background: color-mix(in srgb, var(--accent) 10%, transparent);
-  margin: 2px -14px; padding: 0 14px; }
-:is(#c-log, #engine-log) .ok { color: var(--ok); }
-:is(#c-log, #engine-log) .warn { color: var(--busy); }
-:is(#c-log, #engine-log) .bad { color: var(--bad); }
-/* The engine pane: the model a line is about, as a quiet tag before it. */
-#engine-log .em { display: inline-block; min-width: 14ch; color: var(--soft); opacity: .8;
-  overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; white-space: nowrap; max-width: 24ch; }
-#engine-log.raw { color: var(--soft); }
-#log-strip { justify-content: space-between; }
-.progress { padding: 10px 14px 12px; border-top: 1px solid var(--hair); }
-.progress .head { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--soft); font-variant-numeric: tabular-nums; }
-.progress .head b { color: var(--ink); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.progress .track { height: 4px; margin-top: 7px; border-radius: 99px; overflow: hidden; background: color-mix(in srgb, var(--accent) 15%, transparent); }
-.progress .track i { display: block; height: 100%; width: 0; border-radius: inherit; background: var(--accent); }
-@media (prefers-reduced-motion: no-preference) { .progress .track i { transition: width .5s ease-out; } }
-
-/* what is serving: the model, its seal, its numbers, and the engine's buttons */
-.serving { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px 28px; padding: 18px 18px 14px; }
-.serving h1 { margin: 2px 0 6px; font: 600 26px/1.15 var(--display); letter-spacing: -.01em; overflow-wrap: anywhere; }
-.serving .lead { font-size: 13px; color: var(--soft); }
-.serving .lead.up { color: var(--ok); }
-.numbers { display: flex; gap: 26px; margin: 0; font-variant-numeric: tabular-nums; }
-.numbers div { text-align: right; }
-.numbers dt { font-size: 12px; color: var(--soft); }
-.numbers dd { margin: 0; font: 300 30px/1.05 var(--display); letter-spacing: -.02em; }
-.numbers dd small { font-size: 13px; font-weight: 400; color: var(--soft); margin-left: 3px; letter-spacing: 0; }
-#control { border-top: 1px solid var(--hair); }
-@media (max-width: 760px) { .serving { grid-template-columns: minmax(0, 1fr); } .numbers { gap: 20px; } .numbers div { text-align: left; } .numbers dd { font-size: 24px; } }
-
-/* A seal says what a number is worth: proven by the 200K gate on this
-   machine and engine build, measured by a bench, or not measured. */
-.seal { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--soft); }
-.seal svg { width: 16px; height: 16px; flex: none; }
-.seal.proven { color: var(--ink); }
-.seal.proven svg { color: var(--accent); }
-.seal.failed { color: var(--bad); }
-.seal b { font-weight: 600; }
-
-/* connecting an agent: one client at a time, its exact setup to copy */
-.connect { padding: 14px 18px 16px; display: grid; gap: 12px; }
-.connect .top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
-.connect h2 { margin: 0; }
-.seg { display: flex; flex-wrap: wrap; gap: 2px; padding: 3px; background: var(--ground); border-radius: 8px; }
-.seg button { border: 0; background: transparent; color: var(--soft); padding: 4px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; }
-.seg button[aria-selected="true"] { background: var(--raised); color: var(--ink); }
-.endpoints { display: grid; grid-template-columns: max-content minmax(0, 1fr) auto; gap: 6px 14px; align-items: center; margin: 0; font-size: 13px; }
-.endpoints dt { color: var(--soft); }
-.endpoints dd { margin: 0; font: 12.5px var(--code); overflow-wrap: anywhere; }
-.snippet { position: relative; margin: 0; padding: 12px 14px; background: var(--ground); border: 1px solid var(--hair); border-radius: 8px;
-  font: 12.5px/1.6 var(--code); color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow-y: auto; }
-.connect .row { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
-.connect .row .sub { flex: 1 1 260px; }
-.web-on { color: var(--ink); }
-@media (max-width: 620px) { .endpoints { grid-template-columns: minmax(0, 1fr) auto; } .endpoints dt { grid-column: 1 / -1; margin-top: 4px; } }
-
-/* pull */
-.pull { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 10px 12px; }
-.pull input { flex: 1 1 300px; font-family: var(--code); font-size: 12.5px; padding: 7px 10px; }
-.pull .sub { flex-basis: 100%; padding-left: 2px; }
-
-/* the model list: one surface, one row per preset */
-.models { padding: 0; margin: 0; list-style: none; }
-.model { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 24px; padding: 16px 18px; border-top: 1px solid var(--hair); }
-.model:first-child { border-top: 0; }
-.model .name { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
-.model .name strong { font: 600 16px/1.3 var(--display); }
-.model .facts { display: flex; flex-wrap: wrap; gap: 2px 16px; color: var(--soft); font-size: 13px; }
-.model .facts .code { color: var(--soft); }
-.model .seal { margin-top: 2px; }
-.model .speed { grid-column: 2; grid-row: 1 / span 4; align-self: center; text-align: right; font-variant-numeric: tabular-nums; }
-.model .speed b { display: block; font: 300 34px/1 var(--display); letter-spacing: -.02em; }
-.model .speed b small { font-size: 14px; font-weight: 400; color: var(--soft); letter-spacing: 0; margin-left: 3px; }
-.model .speed span { font-size: 12px; color: var(--soft); }
-.model .speed.none b { color: var(--hair); }
-.model .acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.model.serving .name strong::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 9px; border-radius: 50%;
-  background: var(--ok); vertical-align: 3px; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
-.chip { font-size: 12px; padding: 1px 8px; border-radius: 99px; color: var(--soft); background: color-mix(in srgb, var(--soft) 12%, transparent); }
-.chip.role { color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, transparent); }
-.chip.away { background: transparent; border: 1px dashed var(--hair); }
-.empty { padding: 28px 18px; color: var(--soft); text-align: center; }
-@media (max-width: 620px) { .model { grid-template-columns: minmax(0, 1fr); } .model .speed { grid-column: 1; grid-row: auto; text-align: left; } }
-
-/* results */
-.filters { display: flex; flex-wrap: wrap; gap: 10px 18px; padding: 10px 12px; }
-.filters label { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--soft); }
-table { border-collapse: collapse; width: 100%; font-size: 13px; }
-th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--hair); white-space: nowrap; }
-th { font-weight: 600; color: var(--soft); font-size: 12px; background: var(--surface); }
-/* Only the runs table sorts. */
-#runs th { cursor: pointer; user-select: none; }
-th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
-tr:last-child td { border-bottom: 0; }
-tr.suspect td { opacity: .45; }
-tr.classrow td { color: var(--soft); font-size: 12px; font-weight: 600; padding-top: 16px; background: var(--ground); }
-.badge { display: inline-block; padding: 0 8px; border-radius: 99px; font-size: 12px; font-weight: 600; }
-.PASS { color: var(--ok); background: color-mix(in srgb, var(--ok) 13%, transparent); }
-.FAIL { color: var(--bad); background: color-mix(in srgb, var(--bad) 13%, transparent); }
-.none { color: var(--soft); border: 1px dashed var(--hair); }
-.best { font-weight: 700; color: var(--accent); }
-.swatch { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 7px; }
-.flags { color: var(--soft); font-family: var(--code); font-size: 12px; }
-.note { color: var(--soft); max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
-/* Drawn 900 wide; on a narrow screen it keeps a readable size and scrolls
-   sideways rather than shrinking its labels to nothing. */
-.chart { padding: 10px 6px 4px; overflow-x: auto; }
-.chart svg { width: 100%; min-width: 600px; height: auto; display: block; }
-.chart text { fill: var(--soft); font-size: 11px; }
-.chart .grid { stroke: var(--hair); }
-.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 4px 14px 12px; font-size: 12px; }
-#tip { position: fixed; z-index: 40; width: auto; max-width: 420px; padding: 8px 10px; border: 1px solid var(--hair); border-radius: 8px;
-  background: var(--raised); color: var(--ink); font-size: 12px; line-height: 1.5; box-shadow: 0 8px 24px rgb(0 0 0 / .18); pointer-events: none; }
-#tip i { color: var(--soft); }
-@media (prefers-reduced-motion: no-preference) { .btn, .tabs a { transition: background-color .12s, border-color .12s, color .12s; } }
-</style>
-</head>
-<body>
-<header class="bar" id="bar">
-  <div class="brand">
-    <!-- On a phone the mark opens the sections, as a panel from the left. -->
-    <button class="nav-toggle" id="nav-toggle" aria-controls="sections" aria-expanded="false" aria-label="Sections">
-      <svg class="menu" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12"/></svg>
-      <svg id="mark" viewBox="0 0 64 68" role="img" aria-label="Golem"></svg>
-    </button>
-    <span>Golem</span><small id="c-version" title="The running Golem version"></small>
-  </div>
-  <div class="scrim" id="scrim" hidden></div>
-  <nav class="tabs" id="sections" aria-label="Sections">
-    <a href="#models" data-tab="models" hidden>Models</a>
-    <a href="#chat" data-tab="chat" hidden>Chat</a>
-    <a href="#results" data-tab="results">Results</a>
-    <a href="#log" data-tab="log" hidden>Engine log</a>
-  </nav>
-  <div class="right">
-    <!-- On the Chat tab: the chat asks once for the API key, and keeps it. -->
-    <div class="chat-tools" id="chat-tools" hidden>
-      <button class="btn quiet" id="chat-copy" title="The chat asks for it once, then keeps it">Copy API key</button>
-      <a class="btn quiet" id="chat-open" target="_blank" rel="noopener">Open in a new tab</a>
-    </div>
-    <div class="state" id="c-state"><i></i><span id="c-state-text">Snapshot</span></div>
-    <div class="winbtns" aria-label="Window">
-      <button data-win="minimize" title="Minimize" aria-label="Minimize"><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></button>
-      <button data-win="maximize" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9"/></svg></button>
-      <button data-win="close" class="x" title="Close to the tray" aria-label="Close"><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></button>
-    </div>
-  </div>
-</header>
-<div class="edge n" data-edge="n"></div><div class="edge s" data-edge="s"></div><div class="edge e" data-edge="e"></div><div class="edge w" data-edge="w"></div>
-<div class="edge ne" data-edge="ne"></div><div class="edge nw" data-edge="nw"></div><div class="edge se" data-edge="se"></div><div class="edge sw" data-edge="sw"></div>
-
-<main>
-  <!-- The update banner: shown only when api/state has an update to name.
-       The job it starts shows its progress in the job pane under Models. -->
-  <div class="update" id="update" role="status" hidden>
-    <span id="update-text"></span>
-    <span id="update-msg" class="bad-text" hidden></span>
-    <span class="spacer"></span>
-    <button class="btn go" id="update-go">Update</button>
-    <a class="btn quiet" id="update-link" target="_blank" rel="noopener" hidden>What's new</a>
-    <button class="btn quiet" id="update-skip">Not now</button>
-  </div>
-  <section id="tab-models" hidden>
-    <div class="surface">
-      <div class="serving">
-        <div>
-          <span class="lead" id="sv-lead">Stopped</span>
-          <h1 id="sv-name">–</h1>
-          <span class="seal" id="sv-seal"></span>
-        </div>
-        <dl class="numbers" id="sv-numbers"></dl>
-      </div>
-      <div class="strip" id="control">
-        <div class="group">
-          <button class="btn" data-run="start">Start</button>
-          <button class="btn" data-run="restart">Restart</button>
-          <button class="btn danger" data-run="stop">Stop</button>
-        </div>
-        <div class="group">
-          <button class="btn" data-run="bench">Bench</button>
-          <button class="btn" data-run="eval">Run the 200K eval</button>
-        </div>
-        <div class="group">
-          <label for="c-engine">Engine</label>
-          <select id="c-engine"></select>
-          <button class="btn quiet" data-apply="c-engine">Use</button>
-        </div>
-      </div>
-      <p class="msg" id="c-msg" role="status" aria-live="polite" hidden></p>
-      <div class="progress" id="c-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" hidden>
-        <div class="head"><b id="c-progress-label"></b><span id="c-progress-amount"></span></div>
-        <div class="track"><i id="c-progress-fill"></i></div>
-      </div>
-      <details class="joblog" id="c-log-box" hidden>
-        <summary id="c-log-sum"></summary>
-        <pre class="log" id="c-log"></pre>
-      </details>
-    </div>
-
-    <div class="surface connect" id="connect">
-      <div class="top">
-        <h2>Connect an agent</h2>
-        <div class="seg" role="tablist" aria-label="Agent" id="cx-tabs">
-          <button role="tab" data-cx="claude">Claude Code</button>
-          <button role="tab" data-cx="opencode">OpenCode</button>
-          <button role="tab" data-cx="codex">Codex</button>
-          <button role="tab" data-cx="other">Any other client</button>
-        </div>
-      </div>
-      <dl class="endpoints">
-        <dt>Anthropic API</dt><dd id="cx-anthropic"></dd><button class="btn quiet" data-copy="cx-anthropic">Copy</button>
-        <dt>OpenAI API</dt><dd id="cx-openai"></dd><button class="btn quiet" data-copy="cx-openai">Copy</button>
-        <dt>API key</dt><dd id="cx-key"></dd><button class="btn quiet" id="cx-key-copy">Copy</button>
-      </dl>
-      <pre class="snippet" id="cx-snippet" role="tabpanel" aria-labelledby="cx-tabs"></pre>
-      <div class="row">
-        <span class="sub" id="cx-note"></span>
-        <button class="btn quiet" id="cx-show">Show key</button>
-        <button class="btn go" id="cx-copy">Copy setup</button>
-      </div>
-      <p class="sub" id="cx-web" style="margin:0"></p>
-    </div>
-
-    <form class="surface pull" id="pull-form">
-      <input type="text" id="pull-ref" placeholder="unsloth/Qwen3.5-9B-GGUF" aria-label="Model to pull from Hugging Face: owner/repo, owner/repo:quant, or a library name" autocomplete="off" spellcheck="false">
-      <button class="btn go" type="submit">Pull</button>
-      <span class="sub" id="pull-msg">Any GGUF repo on Hugging Face, with :quant to choose one, or a library name. Golem picks the quant this machine can hold and writes the preset.</span>
-    </form>
-
-    <ul class="surface models" id="m-list"></ul>
-  </section>
-
-  <section id="tab-results">
-    <div class="surface filters">
-      <label>Host <select id="f-host"></select></label>
-      <label>Engine <select id="f-engine"></select></label>
-      <label>Model <select id="f-model"></select></label>
-      <label>Size <select id="f-class"></select></label>
-      <label><input type="checkbox" id="f-quiet" checked> Quiet runs only</label>
-    </div>
-
-    <h2>Best decode per model and engine build</h2>
-    <div class="surface scroll"><table id="board"></table></div>
-
-    <h2>Decode against prefill <span class="sub" id="chart-class"></span></h2>
-    <div class="surface chart">
-      <div class="filters" style="padding:6px 8px 0"><label>Show <select id="f-class-chart"></select></label></div>
-      <div id="scatter"></div><div class="legend" id="legend"></div>
-      <p class="sub" style="margin:0;padding:0 14px 12px">Models of different sizes do not compare: a 0.5B at 269 t/s says nothing
-        about a 35B at 59. Pick a size, or read t/s per active B in the table.</p>
-    </div>
-
-    <h2>All runs <span class="sub" id="meta"></span></h2>
-    <div class="surface scroll"><table id="runs"></table></div>
-  </section>
-
-  <section id="tab-chat" hidden>
-    <div class="surface">
-      <p class="msg" id="chat-msg" role="status" aria-live="polite" hidden></p>
-      <iframe id="chat-frame" title="Chat" allow="clipboard-read; clipboard-write; microphone" hidden></iframe>
-    </div>
-  </section>
-
-  <section id="tab-log" hidden>
-    <div class="surface">
-      <div class="strip sub" id="log-strip"><span id="log-file"></span>
-        <button class="btn quiet" id="log-raw" type="button" aria-pressed="false" title="Show llama.cpp's own lines">Raw</button></div>
-      <pre class="log" id="engine-log"></pre>
-    </div>
-  </section>
-  <div id="tip" hidden></div>
-</main>
-
-<script id="golem-data" type="application/json">/*GOLEM_DATA*/</script>
-<script>
 "use strict";
 let ROWS = [];
 try { ROWS = JSON.parse(document.getElementById("golem-data").textContent); } catch (e) { ROWS = []; }
@@ -466,6 +17,10 @@ const SEALS = {
   measured: `<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.8a6.2 6.2 0 0 1 0 12.4z" fill="currentColor"/></svg>`,
   none: `<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2.4 2.2"/></svg>`,
 };
+// The agent floor the page judges a suite by (TUNE_MIN_AGENT's default),
+// and the APIs by the names a person knows them by.
+const AGENT_FLOOR = 0.75;
+const API_NAMES = { anthropic: "Messages", openai: "Chat Completions" };
 // The records, one per line; a line that will not parse (a write cut short)
 // is skipped rather than costing the page every other row.
 const parseRows = (text) => text.split("\n").filter((l) => l.trim().startsWith("{")).flatMap((l) => {
@@ -518,9 +73,10 @@ function showTab(name) {
     if (a.dataset.tab === name) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   });
-  ["models", "chat", "results", "log"].forEach((t) => { $("tab-" + t).hidden = t !== name; });
+  ["models", "chat", "results", "log", "settings"].forEach((t) => { $("tab-" + t).hidden = t !== name; });
   $("chat-tools").hidden = name !== "chat";
   if (name === "chat") showChat();
+  if (name === "settings") loadSettings();
 }
 window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
 
@@ -607,12 +163,14 @@ function renderBoard(rows) {
   const groups = {};
   rows.forEach((r) => {
     const k = [r.host, r.engine, r.engine_build, r.model].join("|");
-    (groups[k] = groups[k] || { bench: [], eval: [] })[r.kind === "eval" ? "eval" : "bench"].push(r);
+    const g = (groups[k] = groups[k] || { bench: [], eval: [], agent: [] });
+    if (r.kind === "eval") g.eval.push(r); else if (r.kind !== "agent") g.bench.push(r);
+    if (agentOf(r)) g.agent.push(r);
   });
+  const newest = (list) => list.sort((a, b) => (a.ts < b.ts ? 1 : -1))[0];
   const lines = Object.values(groups).filter((g) => g.bench.length).map((g) => {
     const best = g.bench.reduce((a, b) => ((b.decode_median ?? 0) > (a.decode_median ?? 0) ? b : a));
-    const ev = g.eval.sort((a, b) => (a.ts < b.ts ? 1 : -1))[0];
-    return { best, ev };
+    return { best, ev: newest(g.eval), ag: newest(g.agent) };
   }).sort((a, b) => {
     const ca = CLASSES.indexOf(classOf(a.best)), cb = CLASSES.indexOf(classOf(b.best));
     return ca - cb || (b.best.decode_median ?? 0) - (a.best.decode_median ?? 0);
@@ -625,11 +183,12 @@ function renderBoard(rows) {
   });
   let lastClass = null;
   $("board").innerHTML = `<thead><tr><th>Model</th><th>Engine</th><th>Params</th><th class="num">Ctx</th><th class="num">Threads</th><th class="num">Decode</th><th class="num">Best</th>
-    <th class="num">MTP</th><th class="num">Prefill</th><th class="num">t/s per active B</th><th class="num">VRAM GB</th><th class="num">RAM GB</th><th>200K needle</th><th class="num">At depth</th><th>Date</th><th>Flags</th></tr></thead><tbody>` +
-    lines.map(({ best: r, ev }) => {
+    <th class="num">MTP</th><th class="num">Prefill</th><th class="num">t/s per active B</th><th class="num">VRAM GB</th><th class="num">RAM GB</th><th>200K needle</th><th class="num">At depth</th><th>Agent</th><th>Date</th><th>Flags</th></tr></thead><tbody>` +
+    lines.map(({ best: r, ev, ag }) => {
       const needle = ev?.eval?.needle;
+      const work = agentOf(ag);
       const cls = classOf(r);
-      const head = cls !== lastClass ? `<tr class="classrow"><td colspan="16">${esc(cls)}</td></tr>` : "";
+      const head = cls !== lastClass ? `<tr class="classrow"><td colspan="17">${esc(cls)}</td></tr>` : "";
       lastClass = cls;
       return head + `<tr><td><span class="swatch" style="background:${colorOf(r.model)}"></span>${esc(r.model)}</td>
         <td>${esc(r.engine)} <span class="flags">${esc(r.engine_build)}</span></td>
@@ -644,7 +203,9 @@ function renderBoard(rows) {
         <td>${needle === "PASS" ? `<span class="seal proven">${SEALS.proven}<span>Proven</span></span>`
           : needle ? `<span class="seal failed">${SEALS.failed}<span>Failed</span></span>`
           : `<span class="seal none">${SEALS.none}<span>Not gated</span></span>`}${ev?.eval?.tools === "FAIL" ? ` <span class="badge FAIL">Tools</span>` : ""}</td>
-        <td class="num">${fmt(ev?.eval?.depth_decode)}</td><td>${esc(day(r.ts))}</td><td class="flags">${esc(flagStr(r.flags))}</td></tr>`;
+        <td class="num">${fmt(ev?.eval?.depth_decode)}</td>
+        <td>${work ? `<span class="seal ${work.pass ? "proven" : "failed"}" title="${esc(work.apis)}, ${esc(day(ag.ts))}">${work.pass ? SEALS.proven : SEALS.failed}<span>${work.solved}/${work.total}</span></span>` : "–"}</td>
+        <td>${esc(day(r.ts))}</td><td class="flags">${esc(flagStr(r.flags))}</td></tr>`;
     }).join("") + "</tbody>";
 }
 
@@ -720,7 +281,8 @@ const COLS = [
   ["prefill", "Prefill", (r) => fmt(r.kind === "eval" ? r.eval?.needle_prefill : r.prefill, 0), true],
   ["vram_mib", "VRAM GB", (r) => (r.vram_mib ? fmt(r.vram_mib / 1024) : "–"), true],
   ["ram_used_gib", "RAM GB", (r) => (r.ram_used_gib != null ? fmt(r.ram_used_gib) : "–"), true],
-  ["result", "Eval", (r) => (r.kind === "eval" ? `<span class="badge ${verdict(r.eval?.needle)}">${r.eval?.needle === "PASS" ? "Pass" : r.eval?.needle === "FAIL" ? "Fail" : "–"}</span>` : "")],
+  ["result", "Eval", (r) => (r.kind === "eval" ? `<span class="badge ${verdict(r.eval?.needle)}">${r.eval?.needle === "PASS" ? "Pass" : r.eval?.needle === "FAIL" ? "Fail" : "–"}</span>` : "")
+    + (agentOf(r) ? ` <span class="badge ${agentOf(r).pass ? "PASS" : "FAIL"}" title="${esc(agentOf(r).apis)}">Agent ${agentOf(r).solved}/${agentOf(r).total}</span>` : "")],
   ["flags", "Flags", (r) => `<span class="flags">${esc(flagStr(r.flags))}</span>`],
   ["note", "Note", (r) => `<span class="note" title="${esc(r.note)}">${esc(r.note)}</span>`],
 ];
@@ -777,6 +339,25 @@ function evidence(name) {
 }
 const sealHtml = (ev) => SEALS[ev.tier] + `<span>${ev.text}</span>`;
 
+// The agent suite on a row - `eval --agent`'s own, or a gate that ran it -
+// summed over its APIs, and whether each API cleared the gate's floor
+// (TUNE_MIN_AGENT's default).
+function agentOf(r) {
+  const runs = Object.entries(r?.agent || {});
+  if (!runs.length) return null;
+  const solved = runs.reduce((s, [, a]) => s + (a.solved || 0), 0), total = runs.reduce((s, [, a]) => s + (a.total || 0), 0);
+  const pass = runs.every(([, a]) => a.total && a.solved >= AGENT_FLOOR * a.total);
+  return { solved, total, pass, apis: runs.map(([k, a]) => `${API_NAMES[k] || k} ${a.solved}/${a.total}`).join(", ") };
+}
+// A model's newest agent verdict on this machine, as a seal, or null.
+function agentEvidence(name) {
+  const r = ROWS.filter((x) => x.model === name && (!topHost || x.host === topHost) && agentOf(x))
+    .sort((a, b) => (a.ts < b.ts ? 1 : -1))[0];
+  const a = agentOf(r);
+  if (!a) return null;
+  return { tier: a.pass ? "proven" : "failed", text: `<b>Agent work</b>: ${a.solved} of ${a.total} tasks solved (${esc(a.apis)}), ${esc(day(r.ts))}` };
+}
+
 // The strip on top of Models: what serves (or would), what it is worth, how
 // fast it ran here.
 function renderServing(models, state) {
@@ -790,6 +371,10 @@ function renderServing(models, state) {
   const ev = evidence(name);
   $("sv-seal").className = "seal " + ev.tier;
   $("sv-seal").innerHTML = name ? sealHtml(ev) : "";
+  const ag = name ? agentEvidence(name) : null;
+  $("sv-agent").hidden = !ag;
+  $("sv-agent").className = "seal " + (ag?.tier || "");
+  $("sv-agent").innerHTML = ag ? sealHtml(ag) : "";
   const cell = (label, value, unit) => `<div><dt>${label}</dt><dd>${value}${unit ? `<small>${unit}</small>` : ""}</dd></div>`;
   $("sv-numbers").innerHTML = (run ? cell("Decode", fmt(run.decode_median), "t/s") + cell("Prefill", fmt(run.prefill, 0), "t/s") : "")
     + (m?.Ctx ? cell("Context", Math.round(m.Ctx / 1024), "K") : "");
@@ -920,7 +505,8 @@ function renderModels(models, state) {
     return `<li class="model${m.Name === serving ? " serving" : ""}">
       <div class="name"><strong>${esc(m.Name)}</strong>${chips}</div>
       <div class="facts">${facts}</div>
-      ${m.Present ? `<div class="seal ${evidence(m.Name).tier}">${sealHtml(evidence(m.Name))}</div>` : ""}
+      ${m.Present ? `<div class="seals"><div class="seal ${evidence(m.Name).tier}">${sealHtml(evidence(m.Name))}</div>${
+        agentEvidence(m.Name) ? `<div class="seal ${agentEvidence(m.Name).tier}">${sealHtml(agentEvidence(m.Name))}</div>` : ""}</div>` : ""}
       <div class="speed${run ? "" : " none"}">${run ? `<b>${fmt(run.decode_median)}<small>t/s</small></b><span>${fmt(run.prefill, 0)} prefill</span>` : `<b>–</b><span>not measured yet</span>`}</div>
       <div class="acts">${acts}</div></li>`;
   }).join("") : `<li class="empty">No models yet. Pull one above.</li>`;
@@ -1071,7 +657,7 @@ async function pollOnce() {
   } catch (e) { live = false; }
   if (live !== LIVE) {
     LIVE = live;
-    document.querySelectorAll('.tabs a[data-tab="models"], .tabs a[data-tab="chat"], .tabs a[data-tab="log"]').forEach((a) => { a.hidden = !live; });
+    document.querySelectorAll('.tabs a[data-tab="models"], .tabs a[data-tab="chat"], .tabs a[data-tab="log"], .tabs a[data-tab="settings"]').forEach((a) => { a.hidden = !live; });
     showTab(location.hash.slice(1) || (live ? "models" : "results"));
   }
   if (!live) return;
@@ -1131,6 +717,59 @@ $("log-raw").onclick = () => {
 };
 $("log-raw").setAttribute("aria-pressed", String(ENGINE_RAW));
 $("log-raw").classList.toggle("go", ENGINE_RAW);
+
+// ---- settings -----------------------------------------------------------
+// The golem.toml keys the service offers (api/settings), one row each,
+// saved one at a time. Read when the tab opens, never by the poll: a poll
+// would overwrite what someone is typing.
+const APPLIES = {
+  "now": "applies now",
+  "next-run": "next bench, eval or tune",
+  "engine-restart": "on the engine's next start",
+  "service-restart": "when the service restarts",
+};
+async function loadSettings() {
+  const box = $("set-groups");
+  let list;
+  try { list = await (await fetch("api/settings", { cache: "no-store" })).json(); }
+  catch (e) { box.innerHTML = `<div class="surface empty">This service has no settings to offer: update Golem.</div>`; return; }
+  const groups = [];
+  list.forEach((s) => { let g = groups.find((x) => x.name === s.group); if (!g) groups.push(g = { name: s.group, items: [] }); g.items.push(s); });
+  box.innerHTML = groups.map((g) => `<h2>${esc(g.name)}</h2><div class="surface settings">${g.items.map(settingRow).join("")}</div>`).join("");
+  box.querySelectorAll("form.set-row").forEach((f) => f.onsubmit = (e) => { e.preventDefault(); saveSetting(f); });
+}
+function settingRow(s) {
+  const id = "set-" + s.key;
+  const placeholder = s.default ? `default ${s.default}` : "unset";
+  const field = s.shape === "choice"
+    ? `<select id="${id}" name="value">${s.choices.map((c) => `<option${c === (s.value || s.default) ? " selected" : ""}>${esc(c)}</option>`).join("")}</select>`
+    : s.shape === "secret"
+      ? `<input type="password" id="${id}" name="value" autocomplete="off" placeholder="${s.set ? "set - type to replace" : "not set"}">`
+      : `<input type="${s.shape === "whole" || s.shape === "decimal" || s.shape === "port" ? "number" : "text"}" id="${id}" name="value"
+          ${s.min != null ? `min="${s.min}" max="${s.max}"` : ""} ${s.shape === "decimal" ? `step="any"` : ""}
+          value="${esc(s.value)}" placeholder="${esc(placeholder)}" spellcheck="false" autocomplete="off">`;
+  return `<form class="set-row" data-key="${esc(s.key)}">
+    <label for="${id}">${esc(s.label)} <span class="flags">${esc(s.key)}</span></label>
+    <span class="help">${esc(s.help)} <span class="chip">${esc(APPLIES[s.applies] || s.applies)}</span></span>
+    <div class="field">${field}<small aria-live="polite"></small></div>
+    <div class="acts"><button class="btn" type="submit">Save</button></div></form>`;
+}
+async function saveSetting(form) {
+  const key = form.dataset.key, input = form.querySelector("[name=value]"), note = form.querySelector("small"), btn = form.querySelector("button");
+  // An empty secret field is one nobody typed in, not a request to clear it.
+  if (input.type === "password" && !input.value) { note.className = "bad"; note.textContent = "Type the token to save it."; return; }
+  btn.disabled = true;
+  note.className = ""; note.textContent = "Saving...";
+  try {
+    const r = await post("api/settings", `key=${encodeURIComponent(key)}&value=${encodeURIComponent(input.value)}`);
+    if (r.ok) {
+      const a = await r.json();
+      note.className = "ok"; note.textContent = `Saved - ${APPLIES[a.applies] || a.applies}.`;
+      if (input.type === "password") { input.value = ""; input.placeholder = "set - type to replace"; }
+    } else { note.className = "bad"; note.textContent = (await r.text()).trim() || `Refused (HTTP ${r.status})`; }
+  } catch (e) { note.className = "bad"; note.textContent = "The service did not answer."; }
+  btn.disabled = false;
+}
 
 // ---- chat ---------------------------------------------------------------
 // The Chat tab frames the engine's own chat page (llama-server's, on the
@@ -1215,6 +854,3 @@ async function tick() {
   setTimeout(tick, jobRunning ? 1500 : 5000);
 }
 tick();
-</script>
-</body>
-</html>

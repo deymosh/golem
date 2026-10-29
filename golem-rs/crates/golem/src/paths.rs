@@ -13,14 +13,25 @@
 //!
 //! The page (the console and `golem report`) is compiled into the binary and
 //! never written into the home: it is the binary's own, so a copy in the
-//! home would keep serving an old page after an upgrade. In the checkout it
-//! is `bench/report.template.html`, which the build compiles in.
+//! home would keep serving an old page after an upgrade. Its source is the
+//! crate's `console/`: the markup, the stylesheet and the script, which
+//! [`page`] puts together.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-/// The page, compiled in: the console and `golem report` both render it, in
-/// a release and in the checkout alike.
-pub const PAGE: &str = include_str!("../../../../bench/report.template.html");
+const PAGE_HTML: &str = include_str!("../console/index.html");
+const PAGE_CSS: &str = include_str!("../console/console.css");
+const PAGE_JS: &str = include_str!("../console/console.js");
+
+/// The page, compiled in and assembled once: the markup with its stylesheet
+/// and script in place, one self-contained file that the console serves and
+/// `golem report` writes. Its `/*GOLEM_DATA*/` marker is left for the
+/// records.
+pub fn page() -> &'static str {
+    static PAGE: OnceLock<String> = OnceLock::new();
+    PAGE.get_or_init(|| PAGE_HTML.replacen("/*GOLEM_STYLE*/", PAGE_CSS, 1).replacen("/*GOLEM_SCRIPT*/", PAGE_JS, 1))
+}
 
 /// The configuration template, compiled in for the same reason: a release
 /// folder has no `golem.toml.example`, and without one every key would fall
@@ -214,8 +225,10 @@ mod tests {
         let dir = std::env::temp_dir().join("golem-rs-paths-template-test");
         let _ = std::fs::remove_dir_all(&dir);
         ensure(&dir).expect("first run");
-        assert!(!dir.join("bench/report.template.html").exists());
-        assert!(PAGE.contains("/*GOLEM_DATA*/"), "the page's data marker");
+        assert!(!dir.join("console").exists() && !dir.join("bench/index.html").exists());
+        assert_eq!(page().matches("/*GOLEM_DATA*/").count(), 1, "the page's data marker");
+        assert!(!page().contains("/*GOLEM_STYLE*/") && !page().contains("/*GOLEM_SCRIPT*/"), "assembled");
+        assert!(page().contains("function showTab(") && page().contains(".seal {"), "the script and the style are in");
         std::fs::remove_dir_all(&dir).ok();
     }
 

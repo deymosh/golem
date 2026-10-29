@@ -53,7 +53,7 @@ fn render_page_replaces_only_the_data_marker() {
 
 #[test]
 fn the_page_draws_the_same_mark_as_the_icon_and_the_screen() {
-    let template = include_str!("../../../../bench/report.template.html");
+    let template = golem::paths::page();
     let cells: Vec<String> = golem_core::mark::GRID.iter().map(|row| format!("\"{row}\"")).collect();
     let line = format!("const GRID = [{}];", cells.join(", "));
     assert!(template.contains(&line), "the page's GRID is not golem_core::mark::GRID ({line})");
@@ -61,7 +61,7 @@ fn the_page_draws_the_same_mark_as_the_icon_and_the_screen() {
 
 #[test]
 fn the_page_keeps_the_data_marker_the_generator_replaces() {
-    let template = include_str!("../../../../bench/report.template.html");
+    let template = golem::paths::page();
     assert_eq!(template.matches("/*GOLEM_DATA*/").count(), 1);
     assert!(template.contains(r#"<script id="golem-data" type="application/json">"#));
 }
@@ -133,7 +133,7 @@ const TEMPLATE: &str = "<html><script id=\"golem-data\">/*GOLEM_DATA*/</script><
 fn fixture(tag: &str) -> (TempDir, Config) {
     let dir = temp_dir(tag);
     let results = dir.join("results.jsonl");
-    let template = dir.join("report.template.html");
+    let template = dir.join("index.html");
     std::fs::write(&results, RECORDS).expect("write results");
     std::fs::write(&template, TEMPLATE).expect("write template");
     let cfg = Config {
