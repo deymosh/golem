@@ -116,14 +116,16 @@ file with search, recover from a tool error, two independent calls in one turn.
   recommends for Qwen-VL grounding.
 - **Measured** on the reference box, 2026-10-29 evening, busy desktop: the 9B and the
   35B both solve 10 of 11 on both APIs with no malformed call, both over the 75% floor.
-  Both miss the rename past a built name, differently: the 9B renames every `get_user`
-  it finds and leaves the dispatch broken after 8 turns; the 35B, in 4 turns, leaves a
-  `get_user` in `users.py` - by its turn count a compatibility alias, which keeps the
-  dispatch working and is not the rename asked for. The 35B solves the eleven in
-  309-341 s and 186K prompt tokens per API, the 9B in 413-421 s and 210K: on the same
-  work the 35B is quicker and leaner.
-- **Next:** the suite keeps each failed task's final files, so a miss can be read rather
-  than inferred; `--task` reruns one task. Then the first questions above.
+  Both miss the rename past a built name - the 9B for real (it renames every `get_user`
+  it finds and leaves the built name broken), the 35B because its fourth turn was cut at
+  the harness's 4096-token cap mid-thought, after reading every file it needed. The cap is
+  16384 now and a cut turn says so in the verdict; on that task alone the 35B then solves
+  it (8 turns, 329 s) and the 9B does not (it switches the lookup to `"fetch_" + kind`,
+  which breaks the teams, and its last turn runs past 16384 tokens). The 35B solves the
+  eleven in 309-341 s and 186K prompt tokens per API, the 9B in 413-421 s and 210K.
+- **Next:** the eleven again on both models at the new cap, recorded, for the item's
+  numbers; then the first questions above. A missed task leaves its calls, last answer and
+  changed files in `logs/agent/`, and `--task NAME` reruns one task.
 
 ## 3. Discovery: fit before download, rank by local results
 

@@ -17,8 +17,11 @@ use crate::json::{self, Value};
 /// The most turns a task may take before it counts as not done.
 pub const MAX_TURNS: usize = 12;
 
-/// The longest answer one turn may generate.
-pub const MAX_TOKENS: u64 = 4096;
+/// The longest answer one turn may generate, its reasoning included. A
+/// thinking model spends thousands of tokens before a call: at 4096 the 35B
+/// was cut off mid-thought on the dispatch rename, 2026-10-29, after reading
+/// every file it needed, and the cut turn read as a finished one.
+pub const MAX_TOKENS: u64 = 16384;
 
 /// The API a run speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -938,6 +941,8 @@ pub struct Turn {
     pub calls: Vec<Call>,
     pub prompt_tokens: u64,
     pub output_tokens: u64,
+    /// The answer stopped at [`MAX_TOKENS`] rather than ending.
+    pub cut: bool,
 }
 
 fn count(value: Option<&Value>) -> u64 {
@@ -969,6 +974,7 @@ pub fn read_turn(api: Api, answer: &Value) -> Result<Turn, String> {
                 .map(|key| count(usage.and_then(|u| u.get(key))))
                 .sum();
             turn.output_tokens = count(usage.and_then(|u| u.get("output_tokens")));
+            turn.cut = answer.get("stop_reason").and_then(Value::as_str) == Some("max_tokens");
             Ok(turn)
         }
         Api::OpenAi => {
@@ -993,6 +999,13 @@ pub fn read_turn(api: Api, answer: &Value) -> Result<Turn, String> {
             let usage = answer.get("usage");
             turn.prompt_tokens = count(usage.and_then(|u| u.get("prompt_tokens")));
             turn.output_tokens = count(usage.and_then(|u| u.get("completion_tokens")));
+            turn.cut = answer
+                .get("choices")
+                .and_then(Value::as_array)
+                .and_then(|c| c.first())
+                .and_then(|c| c.get("finish_reason"))
+                .and_then(Value::as_str)
+                == Some("length");
             Ok(turn)
         }
     }
@@ -1072,6 +1085,42 @@ pub fn result_line(api: Api, verdicts: &[Verdict]) -> String {
         verdicts.len(),
         if failed.is_empty() { "-".to_string() } else { failed.join(",") }
     )
+}
+
+/// What a missed task did, to read afterwards: why it failed, every call it
+/// made with the first line of its answer, its last answer, and each file it
+/// changed or added. A file under 200 lines is given whole; a longer one
+/// only by the lines that differ, numbered, as one-line edits mostly are.
+pub fn failure_report(verdict: &Verdict, start: &Workspace, end: &Workspace, calls: &[(Call, Outcome)], answer: &str) -> String {
+    let mut out = format!("{} - {}\n\ncalls:\n", verdict.task, verdict.reason);
+    for (call, outcome) in calls {
+        let args: String = call.arguments.chars().take(300).collect();
+        let more = if call.arguments.chars().count() > 300 { "..." } else { "" };
+        let said = outcome.text.lines().next().unwrap_or("");
+        out.push_str(&format!("  {}({args}{more})\n    -> {said}\n", call.name));
+    }
+    out.push_str(&format!("\nlast answer:\n{}\n", answer.trim()));
+    for (path, text) in end.files() {
+        let before = start.read(path);
+        if before == Some(text.as_str()) {
+            continue;
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        match before {
+            Some(before) if lines.len() >= 200 => {
+                out.push_str(&format!("\n--- {path} (changed; the lines that differ)\n"));
+                let old: Vec<&str> = before.lines().collect();
+                for i in 0..old.len().max(lines.len()) {
+                    if old.get(i) != lines.get(i) {
+                        out.push_str(&format!("{:>5} - {}\n{:>5} + {}\n", i + 1, old.get(i).unwrap_or(&""), i + 1, lines.get(i).unwrap_or(&"")));
+                    }
+                }
+            }
+            Some(_) => out.push_str(&format!("\n--- {path} (changed)\n{text}\n")),
+            None => out.push_str(&format!("\n--- {path} (new)\n{text}\n")),
+        }
+    }
+    out
 }
 
 /// One API's run of the suite, read back from its `RESULT` line.
@@ -1385,6 +1434,11 @@ mod tests {
         )
         .unwrap();
         let turn = read_turn(Api::OpenAi, &answer).unwrap();
+        assert!(!turn.cut);
+        let cut = json::parse(r#"{"choices":[{"finish_reason":"length","message":{"content":""}}]}"#).unwrap();
+        assert!(read_turn(Api::OpenAi, &cut).unwrap().cut);
+        let cut = json::parse(r#"{"content":[{"type":"thinking","thinking":"..."}],"stop_reason":"max_tokens"}"#).unwrap();
+        assert!(read_turn(Api::Anthropic, &cut).unwrap().cut);
         assert_eq!((turn.calls[0].name.as_str(), turn.output_tokens), ("run_tests", 2));
         let mut body = openai.clone();
         continue_request(Api::OpenAi, &mut body, &answer, &[(turn.calls[0].clone(), outcome)]);
@@ -1419,6 +1473,33 @@ mod tests {
         assert!(read[0].failed.is_empty());
         assert_eq!(read[1].failed, vec!["b".to_string()]);
         assert_eq!((read[1].calls, read[1].bad_calls, read[1].prompt_tokens), (10, 1, 2000));
+    }
+
+    #[test]
+    fn a_failure_report_shows_the_calls_and_only_what_changed() {
+        let start = dispatch_files();
+        let mut end = start.clone();
+        end.write("users.py", &DISPATCH_USERS.replace("def get_user", "def fetch_user"));
+        end.write("notes.md", "renamed\n");
+        let calls = vec![(call("search", r#"{"text":"get_user"}"#), Outcome { text: "users.py:1: def get_user(user_id):\nmore".into(), valid: true })];
+        let verdict = Verdict { task: "rename-past-a-dispatch", reason: "api.py still says get_user".into(), ..Verdict::default() };
+        let report = failure_report(&verdict, &start, &end, &calls, " Done. ");
+        assert!(report.starts_with("rename-past-a-dispatch - api.py still says get_user\n"), "{report}");
+        assert!(report.contains("  search({\"text\":\"get_user\"})\n    -> users.py:1: def get_user(user_id):\n"), "{report}");
+        assert!(report.contains("last answer:\nDone.\n"));
+        assert!(report.contains("--- users.py (changed)\ndef fetch_user"));
+        assert!(report.contains("--- notes.md (new)\nrenamed"));
+        assert!(!report.contains("--- jobs.py"), "unchanged files are left out");
+
+        // A long file by its differing lines alone.
+        let start = tables_files();
+        let mut end = start.clone();
+        let text = end.read("tables.py").unwrap().replace("% 255", "% 254");
+        end.write("tables.py", &text);
+        let report = failure_report(&verdict, &start, &end, &[], "");
+        assert!(report.contains("(changed; the lines that differ)\n"), "{report}");
+        assert!(report.contains(" -     return sum(data) % 255\n") && report.contains(" +     return sum(data) % 254\n"), "{report}");
+        assert!(report.lines().count() < 20, "{report}");
     }
 
     #[test]

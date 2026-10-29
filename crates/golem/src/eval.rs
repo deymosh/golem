@@ -316,7 +316,7 @@ pub fn run_with(home: &Path, args: &[String], out: &mut dyn Write, progress: boo
         // line, which the floor reads as not passed.
         section(out, "6. AGENT SUITE (both APIs)");
         steps.next(out, "agent suite");
-        let _ = crate::agent::suite(&base, &model, &[Api::Anthropic, Api::OpenAi], out);
+        let _ = crate::agent::suite(&base, &model, &[Api::Anthropic, Api::OpenAi], None, Some(&crate::agent::reports_dir(home)), out);
     }
 
     // ------------------------------------------------------------
