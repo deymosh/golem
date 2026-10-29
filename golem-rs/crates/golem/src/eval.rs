@@ -1,5 +1,5 @@
-//! `golem eval`: the quality gate - sanity, tool calls, and the long-context
-//! needle.
+//! `golem eval`: the quality gate - sanity, tool calls, the long-context
+//! needle, and with it the agent suite.
 //!
 //! It is the gate every adoption passes (`./golem eval --long 200000`) and
 //! the tuner's gate.
@@ -20,6 +20,7 @@ use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::time::Duration;
 
+use golem_core::agent::Api;
 use golem_core::json::{self, Value};
 use golem_core::progress::Progress;
 
@@ -303,6 +304,19 @@ pub fn run_with(home: &Path, args: &[String], out: &mut dyn Write, progress: boo
 
     if let Some(long) = long {
         long_context(out, &base, &model, &long, &mut steps);
+
+        // --------------------------------------------------------
+        // 6. AGENT SUITE (with --long: the gate)
+        // --------------------------------------------------------
+
+        // The gate asks whether an agent gets work done on the setup, not
+        // only whether the setup answers: the suite runs on both APIs, and
+        // its RESULT lines are what the tuner's agent floor reads. A suite
+        // the engine stopped answering prints why and leaves no RESULT
+        // line, which the floor reads as not passed.
+        section(out, "6. AGENT SUITE (both APIs)");
+        steps.next(out, "agent suite");
+        let _ = crate::agent::suite(&base, &model, &[Api::Anthropic, Api::OpenAi], out);
     }
 
     // ------------------------------------------------------------
@@ -321,7 +335,8 @@ pub fn run_with(home: &Path, args: &[String], out: &mut dyn Write, progress: boo
 // ---------------------------------------------------------------
 
 /// The run's requests as `PROGRESS` steps: health, warmup, tools, three
-/// timed runs, and with `--long` the needle and the depth request.
+/// timed runs, and with `--long` the needle, the depth request and the agent
+/// suite.
 ///
 /// Written when stdout is not a terminal - the console's job log, the
 /// tuner's gate file - because on a terminal the sections are the progress.
@@ -334,7 +349,7 @@ struct Steps {
 
 impl Steps {
     fn new(long: bool, on: bool) -> Steps {
-        Steps { on, done: 0, total: if long { 8 } else { 6 } }
+        Steps { on, done: 0, total: if long { 9 } else { 6 } }
     }
 
     /// The request about to run.

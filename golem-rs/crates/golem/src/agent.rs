@@ -36,13 +36,23 @@ pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
         return 1;
     };
     let model = config::resolved(home, "MODEL_ALIAS").unwrap_or_default();
+    match suite(&base, &model, &apis, out) {
+        Ok(()) => 0,
+        Err(()) => 1,
+    }
+}
+
+/// The suite on each of `apis`: a line per task and a `RESULT` line per API,
+/// to `out`. `Err` when a request got no answer at all, which is the engine,
+/// not the model, and leaves nothing to grade; the reason is in `out`.
+pub fn suite(base: &Base, model: &str, apis: &[Api], out: &mut dyn Write) -> Result<(), ()> {
     let _ = writeln!(out, "agent suite: {} tasks on {model}, through port {}", agent::TASKS.len(), base.port);
-    for api in apis {
+    for &api in apis {
         let _ = writeln!(out);
         let _ = writeln!(out, "{} ({})", api.name(), api.path());
         let mut verdicts = Vec::new();
         for task in &agent::TASKS {
-            match run_task(&base, api, &model, task) {
+            match run_task(base, api, model, task) {
                 Ok(verdict) => {
                     let _ = writeln!(
                         out,
@@ -59,13 +69,13 @@ pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
                 }
                 Err(e) => {
                     let _ = writeln!(out, "[FAIL] {}: {e}", task.name);
-                    return 1;
+                    return Err(());
                 }
             }
         }
         let _ = writeln!(out, "{}", agent::result_line(api, &verdicts));
     }
-    0
+    Ok(())
 }
 
 /// One task, to its end: an answer with no calls, or the turn limit.

@@ -94,6 +94,8 @@ pub struct Needle {
 pub struct Eval {
     pub gen_tok_s_best: Option<f64>,
     pub needle: Option<Needle>,
+    /// The agent suite per API, when the run went on to it.
+    pub agent: Vec<crate::agent::Summary>,
 }
 
 impl Eval {
@@ -101,11 +103,13 @@ impl Eval {
     /// last one carrying `long_ctx_<N>=...`.
     pub fn parse<'a>(lines: impl IntoIterator<Item = &'a str>) -> Eval {
         let mut out = Eval::default();
+        let mut results: Vec<&str> = Vec::new();
         for line in lines {
             let line = line.trim();
             if !line.starts_with("RESULT") {
                 continue;
             }
+            results.push(line);
             let f = fields(line);
             if let Some(v) = num(get(&f, "gen_tok_s_best")) {
                 out.gen_tok_s_best = Some(v);
@@ -128,6 +132,7 @@ impl Eval {
                 out.needle = needle;
             }
         }
+        out.agent = crate::agent::Summary::read(results);
         out
     }
 }

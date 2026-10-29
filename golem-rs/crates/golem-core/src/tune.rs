@@ -28,13 +28,17 @@ pub struct Floor {
     pub prefill: f64,
     /// Decode at full context (the gate's own measurement), tokens/s.
     pub depth_decode: f64,
+    /// The share of the agent suite's tasks the gate must see solved, on
+    /// each API (`agent::passes`).
+    pub agent: f64,
 }
 
 impl Default for Floor {
     fn default() -> Self {
         // 25 felt fine in real sessions where 16.7 did not; 350 refuses the
-        // ~80 s first prompt; 15 refuses a context that is unusable at depth.
-        Floor { decode: 25.0, prefill: 350.0, depth_decode: 15.0 }
+        // ~80 s first prompt; 15 refuses a context that is unusable at depth;
+        // 0.75 is nine of the suite's eleven tasks on each API.
+        Floor { decode: 25.0, prefill: 350.0, depth_decode: 15.0, agent: 0.75 }
     }
 }
 
@@ -732,26 +736,6 @@ mod tests {
         assert_eq!(rank(&points, &floor, WALL), vec![1, 0, 2]);
     }
 
-    #[test]
-    fn the_search_stops_when_a_probe_would_only_measure_the_noise() {
-        // The reference box's evening tune, 2026-10-29: the seed at 11115
-        // MiB under an 11264 wall, then 262144 and 242688 over it. The next
-        // prediction promised 2048 tokens - under what 128 MiB of noise is
-        // worth at that slope - and the search spent two more loads on it.
-        let mut search = ContextSearch::new(236544, 11115, 11264, 262144);
-        assert_eq!(search.next(), Rung::Grow(262144));
-        search.record(262144, 11730, false);
-        assert_eq!(search.next(), Rung::Grow(242688), "6144 tokens is worth a load");
-        search.record(242688, 11483, false);
-        assert_eq!(search.next(), Rung::Stop);
-    }
-
-    #[test]
-    fn the_default_floor_is_the_one_the_plan_agreed() {
-        let f = Floor::default();
-        assert_eq!((f.decode, f.prefill, f.depth_decode), (25.0, 350.0, 15.0));
-    }
-
     fn best(mut p: Point, decode_best: f64) -> Point {
         p.decode_best = decode_best;
         p
@@ -803,6 +787,26 @@ mod tests {
             best(point("llama.cpp", "c", 56.4, 800.0, 4096), 60.3),
         ];
         assert_eq!(rank(&points, &floor, WALL), vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn the_search_stops_when_a_probe_would_only_measure_the_noise() {
+        // The reference box's evening tune, 2026-10-29: the seed at 11115
+        // MiB under an 11264 wall, then 262144 and 242688 over it. The next
+        // prediction promised 2048 tokens - under what 128 MiB of noise is
+        // worth at that slope - and the search spent two more loads on it.
+        let mut search = ContextSearch::new(236544, 11115, 11264, 262144);
+        assert_eq!(search.next(), Rung::Grow(262144));
+        search.record(262144, 11730, false);
+        assert_eq!(search.next(), Rung::Grow(242688), "6144 tokens is worth a load");
+        search.record(242688, 11483, false);
+        assert_eq!(search.next(), Rung::Stop);
+    }
+
+    #[test]
+    fn the_default_floor_is_the_one_the_plan_agreed() {
+        let f = Floor::default();
+        assert_eq!((f.decode, f.prefill, f.depth_decode, f.agent), (25.0, 350.0, 15.0, 0.75));
     }
 
     #[test]

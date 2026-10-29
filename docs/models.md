@@ -126,7 +126,7 @@ and later, `mmap+mlock`); a sweep loads with mmap so a 32 GB box survives the re
 
 One section per machine. To add yours: configure the candidate in `golem.toml`, then run
 `golem bench` (decode best/median + MTP acceptance, prefill on a ~30K prompt) and
-`golem eval --long 200000` (tool calls, 200K needle, decode at 200K depth), and record the
+`golem eval --long 200000` (tool calls, 200K needle, decode at 200K depth, the agent suite), and record the
 `RESULT` lines in a new subsection. Measure best-of-3 on a quiet desktop.
 
 ## Setup A — 12 GB VRAM GPU + 32 GB RAM, Windows host (native, no container)

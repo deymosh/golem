@@ -35,11 +35,12 @@ TOP_P = 0.95
 # good it looks next to a worse one. The defaults are what real sessions
 # settled on - 30 t/s at full depth felt fine, 23 was sluggish, 16.7 was
 # rejected - and every one has a per-run flag (`--min-decode`, `--min-prefill`,
-# `--min-depth-decode`) so a single run can move it without editing this file.
-# docs/tuning.md has where the numbers come from.
+# `--min-depth-decode`, `--min-agent`) so a single run can move it without
+# editing this file. docs/tuning.md has where the numbers come from.
 TUNE_MIN_DECODE = 25          # median decode, tokens/s
 TUNE_MIN_PREFILL = 350        # prompt processing, tokens/s
 TUNE_MIN_DEPTH_DECODE = 15    # decode at full context, tokens/s
+TUNE_MIN_AGENT = 0.75         # share of the gate's agent suite solved, on each API
 
 # How far the tuner grows the context: "max" predicts the ceiling from the
 # points it has measured and confirms the prediction with one load, and stops

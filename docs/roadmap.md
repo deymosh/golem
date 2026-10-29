@@ -95,22 +95,27 @@ failed to parse or broke their schema, wall time, prompt and generated tokens. T
 tasks: fix a failing test from its output, rename across files, find a fact in a long
 file with search, recover from a tool error, two independent calls in one turn.
 
-- **In:** `golem eval --agent [anthropic|openai]` runs four of the tasks above (all but
-  the parallel calls) and prints a verdict per task and a `RESULT agent_<api>=solved/total`
-  line per API; it records no row yet. First runs, 2026-10-29: the 0.5B solves 1 of 4 on
-  both APIs, the 9B and the 35B all 4 with no malformed call, in 32-51 s per API. It
-  separates a toy model from a working one and not yet the two served models: harder
-  tasks (a bug that needs two files read, a test the model must run twice, a long
-  context to work in) come next.
+- **In:** eleven tasks: the first four above (all but the parallel calls), and seven that
+  ask more - a bug whose obvious fix breaks another module, so the tests have to run
+  twice; a setting at the end of a chain of included files, with a profile nothing
+  includes as a decoy; a translation to complete with its placeholders kept and the file
+  still JSON; a one-line fix in a 1,200-line file, which `edit_file` makes without
+  rewriting the file; a total over sixty rows of a table to the cent, refunds left out; a
+  rename a text search does not finish, because one caller builds the name from pieces;
+  a fix in one of two functions alike to the letter, in a long file. `golem eval --agent [anthropic|openai]` runs them and records a row
+  of kind `agent` (solved, turns, calls, malformed calls, seconds, tokens and the tasks it
+  missed, per API); `golem eval --long` runs them after the needle, so the gate's row
+  carries the same, and the tuner's gate holds each API to `TUNE_MIN_AGENT` (75%). The
+  console shows the newest verdict as a seal beside the gate's. The first four alone,
+  2026-10-29: the 0.5B solved 1 of 4 on both APIs, the 9B and the 35B all 4.
 - **First questions for it:** flags whose effect is on the work rather than the speed.
   The engine preserves reasoning across turns by default (its log says so at every load),
   which grows each turn's prompt in an agent loop; `--no-reasoning-preserve` saves the
   prefill, and only the suite can say what it costs in solved tasks. The same holds for
   the KV cache's quantization and for `--image-min-tokens 1024`, which the engine
   recommends for Qwen-VL grounding.
-- **Done when:** `golem eval --agent` runs the suite on both APIs, writes one row per run
-  with the solve rate and the times, the 35B and the 9B are measured on the reference box,
-  and the gate includes the suite at a floor the adopted models pass.
+- **Done when:** the 35B and the 9B are measured on the eleven tasks on the reference box,
+  and the floor is one both adopted models pass.
 
 ## 3. Discovery: fit before download, rank by local results
 

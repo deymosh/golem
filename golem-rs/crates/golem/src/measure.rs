@@ -25,10 +25,10 @@ pub fn bench(home: &Path, args: &[String]) -> i32 {
 }
 
 /// `golem eval [--long N]`, or `golem eval --agent [anthropic|openai]` for
-/// the agent suite, which prints its verdicts and records no row yet.
+/// the agent suite alone, recorded as a row of kind `agent`.
 pub fn eval(home: &Path, args: &[String]) -> i32 {
     if args.first().map(String::as_str) == Some("--agent") {
-        return crate::agent::run(home, &args[1..], &mut std::io::stdout());
+        return run(home, Kind::Agent, &args[1..], crate::agent::run);
     }
     run(home, Kind::Eval, args, eval::run)
 }
@@ -228,6 +228,7 @@ pub fn record_with(
 fn word(kind: Kind) -> &'static str {
     match kind {
         Kind::Eval => "eval",
+        Kind::Agent => "agent",
         _ => "bench",
     }
 }

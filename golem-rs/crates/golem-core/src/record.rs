@@ -154,6 +154,8 @@ pub fn row(facts: &Facts, captured: &str) -> Result<String, String> {
 enum Metrics {
     Bench,
     Eval,
+    /// The agent suite's object alone.
+    Agent,
 }
 
 /// The metrics a kind of row carries: bench metrics or eval metrics, with
@@ -162,8 +164,39 @@ enum Metrics {
 fn metrics_for(kind: Kind) -> Metrics {
     match kind {
         Kind::Eval => Metrics::Eval,
+        Kind::Agent => Metrics::Agent,
         _ => Metrics::Bench,
     }
+}
+
+/// `"agent": {"anthropic": {...}, "openai": {...}}` from the suite's
+/// `RESULT` lines, or `None` when the run printed none.
+fn agent_metrics(captured: &str) -> Option<String> {
+    let summaries = crate::agent::Summary::read(captured.lines());
+    if summaries.is_empty() {
+        return None;
+    }
+    let apis: Vec<String> = summaries
+        .iter()
+        .map(|s| {
+            let failed: Vec<String> = s.failed.iter().map(|t| json::quote(t)).collect();
+            format!(
+                "{}: {{\"solved\": {}, \"total\": {}, \"turns\": {}, \"calls\": {}, \"bad_calls\": {}, \
+                 \"seconds\": {:.0}, \"prompt_tokens\": {}, \"output_tokens\": {}, \"failed\": [{}]}}",
+                json::quote(&s.api),
+                s.solved,
+                s.total,
+                s.turns,
+                s.calls,
+                s.bad_calls,
+                s.seconds,
+                s.prompt_tokens,
+                s.output_tokens,
+                failed.join(", ")
+            )
+        })
+        .collect();
+    Some(format!("\"agent\": {{{}}}", apis.join(", ")))
 }
 
 fn row_with(facts: &Facts, captured: &str, metrics: Metrics) -> Result<String, String> {
@@ -198,10 +231,16 @@ fn row_with(facts: &Facts, captured: &str, metrics: Metrics) -> Result<String, S
     members.push(format!("\"flags\": {}", flags_json(&facts.flags)));
     // The kind-specific metrics object's members, inlined at this position
     // in the row.
-    members.push(match metrics {
-        Metrics::Bench => bench_metrics(captured),
-        Metrics::Eval => eval_metrics(captured),
-    });
+    match metrics {
+        Metrics::Bench => members.push(bench_metrics(captured)),
+        Metrics::Eval => members.push(eval_metrics(captured)),
+        Metrics::Agent => {}
+    }
+    // The agent suite's verdicts, on the row of the run that printed them:
+    // `eval --agent`'s own, or the gate's when it ran the suite too.
+    if let Some(agent) = agent_metrics(captured) {
+        members.push(agent);
+    }
     members.push(format!("\"vram_mib\": {}", num_opt_u64(facts.vram_mib)));
     members.push(format!("\"ram_used_gib\": {}", num_opt_f1(facts.ram_used_gib)));
     members.push(format!("\"ram_free_gib\": {}", num_opt_f1(facts.ram_free_gib)));
@@ -229,6 +268,7 @@ fn kind_name(kind: Kind) -> &'static str {
         Kind::Bench => "bench",
         Kind::Eval => "eval",
         Kind::Reject => "reject",
+        Kind::Agent => "agent",
         Kind::Unknown => "unknown",
     }
 }

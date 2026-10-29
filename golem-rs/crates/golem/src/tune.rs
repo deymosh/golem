@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 
 // `Verdict` here is this module's own (what the run settled on); the eval's
 // per-candidate verdict is the gate's, and is named for it.
+use golem_core::agent;
 use golem_core::evalparse::{self, Verdict as Gate};
 use golem_core::gguf;
 use golem_core::ini::{self, Entry};
@@ -180,6 +181,9 @@ impl Options {
         {
             opts.floor.depth_decode = v;
         }
+        if let Some(v) = config::get(home, "TUNE_MIN_AGENT").and_then(|v| v.parse().ok()) {
+            opts.floor.agent = v;
+        }
         if let Some(v) = config::get(home, "TUNE_CTX_POLICY") {
             if v == "ladder" {
                 opts.ctx = CtxPolicy::Ladder;
@@ -237,6 +241,14 @@ impl Options {
                 "--min-prefill" => opts.floor.prefill = number(&value("--min-prefill")?)? as f64,
                 "--min-depth-decode" => {
                     opts.floor.depth_decode = number(&value("--min-depth-decode")?)? as f64
+                }
+                "--min-agent" => {
+                    let share = value("--min-agent")?;
+                    opts.floor.agent = share
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|s| (0.0..=1.0).contains(s))
+                        .ok_or_else(|| format!("--min-agent takes a share from 0 to 1, not {share:?}"))?;
                 }
                 "--ctx" => {
                     let pin = value("--ctx")?;
@@ -1507,6 +1519,19 @@ impl<'a> Tuner<'a> {
                                 self.emit(format_args!("  [WARN] decode at depth {depth} t/s is under the {} t/s floor - trying the next candidate", floor.depth_decode));
                                 continue;
                             }
+                        }
+                        // A setup the agent cannot work on is not one to
+                        // serve, however well it holds the needle.
+                        if !agent::passes(&eval.agent, floor.agent) {
+                            let solved: Vec<String> =
+                                eval.agent.iter().map(|s| format!("{} {}/{}", s.api, s.solved, s.total)).collect();
+                            self.emit(format_args!(
+                                "  [WARN] the agent suite is under the {:.0}% floor ({}) - trying the next candidate",
+                                floor.agent * 100.0,
+                                if solved.is_empty() { "it did not run".to_string() } else { solved.join(", ") }
+                            ));
+                            self.points[key].passed_gate = Some(false);
+                            continue;
                         }
                         self.emit(format_args!("[ OK ] eval gate PASSED"));
                         self.promote(&engine, &overlay)?;

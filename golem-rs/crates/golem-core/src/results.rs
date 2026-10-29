@@ -26,6 +26,8 @@ pub enum Kind {
     Eval,
     /// A measured rejection, with the reason in the note.
     Reject,
+    /// `golem eval --agent`: the agent suite alone.
+    Agent,
     /// A kind this build does not know (a newer recorder, say).
     Unknown,
 }
@@ -36,6 +38,7 @@ impl Kind {
             "bench" => Kind::Bench,
             "eval" => Kind::Eval,
             "reject" => Kind::Reject,
+            "agent" => Kind::Agent,
             _ => Kind::Unknown,
         }
     }
@@ -95,6 +98,8 @@ pub struct Row {
     pub flags: Vec<(String, String)>,
     /// The eval verdicts, when this row came from an eval.
     pub eval: Option<Eval>,
+    /// The agent suite per API, when the run that wrote the row ran it.
+    pub agent: Vec<crate::agent::Summary>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -184,6 +189,29 @@ impl Row {
             })
         });
 
+        let agent = match value.get("agent") {
+            Some(Value::Object(apis)) => apis
+                .iter()
+                .map(|(api, run)| crate::agent::Summary {
+                    api: api.clone(),
+                    solved: u32_of(run.get("solved")).unwrap_or(0),
+                    total: u32_of(run.get("total")).unwrap_or(0),
+                    turns: u32_of(run.get("turns")).unwrap_or(0),
+                    calls: u32_of(run.get("calls")).unwrap_or(0),
+                    bad_calls: u32_of(run.get("bad_calls")).unwrap_or(0),
+                    seconds: num_of(run.get("seconds")).unwrap_or(0.0),
+                    prompt_tokens: u64_of(run.get("prompt_tokens")).unwrap_or(0),
+                    output_tokens: u64_of(run.get("output_tokens")).unwrap_or(0),
+                    failed: run
+                        .get("failed")
+                        .and_then(Value::as_array)
+                        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                        .unwrap_or_default(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+
         let flags = match value.get("flags") {
             Some(Value::Object(members)) => members
                 .iter()
@@ -221,6 +249,7 @@ impl Row {
             note: str_of(value.get("note")).unwrap_or_default(),
             flags,
             eval,
+            agent,
         })
     }
 

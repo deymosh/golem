@@ -6,7 +6,8 @@ this repo, written by the tools themselves so a number never travels without wha
 | Command | Writes |
 |---|---|
 | `golem bench` | decode best/median, MTP acceptance, prefill, VRAM, RAM |
-| `golem eval --long N` | tool calls, needle verdict, prefill and decode at depth |
+| `golem eval --long N` | tool calls, needle verdict, prefill and decode at depth, the agent suite |
+| `golem eval --agent` | the agent suite alone |
 | `golem tune [preset]` | one row per sweep point (offload split, batch, threads, spec) |
 
 The file is **append-only**: a correction is a new row with a `note`, never an edit. Rows taken
@@ -16,7 +17,7 @@ while something was downloading or building carry `"quiet": false` and the page 
 
 | Field | Meaning |
 |---|---|
-| `ts`, `kind`, `host` | UTC time; `bench` / `eval` / `reject`; anonymous hardware slug (`rtx-3060_12g_32g_i7-12700kf`) |
+| `ts`, `kind`, `host` | UTC time; `bench` / `eval` / `agent` / `reject`; anonymous hardware slug (`rtx-3060_12g_32g_i7-12700kf`) |
 | `engine`, `engine_build` | `llama.cpp b11379-1537a0a8b`, `ik_llama.cpp main-b5483…`, `strata v0.1.45` |
 | `model`, `model_file` | the preset (or alias) and the GGUF it served |
 | `ctx` | context actually served |
@@ -29,6 +30,7 @@ while something was downloading or building carry `"quiet": false` and the page 
 | `vram_mib`, `ram_used_gib` | GPU memory at record time; working set of the server process tree |
 | `ram_free_gib` | system RAM free |
 | `eval.{tools,needle,needle_tokens,depth_decode}` | the quality gate's verdicts |
+| `agent.<api>.{solved,total,turns,calls,bad_calls,seconds,prompt_tokens,output_tokens,failed}` | the agent suite per API (`anthropic`, `openai`): on `agent` rows, and on `eval` rows whose run went on to it |
 | `quiet`, `note` | measurement hygiene; free text (why a row exists, why something was rejected) |
 
 ## Reading the numbers

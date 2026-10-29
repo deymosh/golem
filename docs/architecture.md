@@ -127,7 +127,7 @@ command line. The binary's layers, top to bottom:
 | Layer | Modules | Owns |
 |---|---|---|
 | Front ends | `main`, `desktop`, `app`, `tui`, `web`, `runner` | the CLI, which front end a bare `golem` opens, the window and tray (`--features desktop`), the full-screen screen, the console; `runner` is the one path a menu entry or a page button takes |
-| Commands | `bench`, `eval`, `measure`, `tune`, `auto_tune`, `pull`, `install`, `setup`, `logs`, `client` | one command each; `measure` records a row after `bench`/`eval` |
+| Commands | `bench`, `eval`, `agent`, `measure`, `tune`, `auto_tune`, `pull`, `install`, `setup`, `logs`, `client` | one command each; `agent` runs the agent suite's loop; `measure` records a row after `bench`/`eval`/`agent` |
 | Engine | `service`, `api`, `launch`, `release`, `engine` | who owns the engine, the port clients reach it on, how it is started and stopped, how its build is installed, how it is spoken to |
 | Foundation | `config`, `paths`, `machine`, `proc`, `state`, `facts`, `models` | the configuration, the home's files, the hardware probes, child processes, what the console shows, what a row says |
 

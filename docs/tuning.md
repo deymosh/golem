@@ -35,9 +35,11 @@ worse one, and the run says which and why.
 | decode (median) | 25 t/s | ~30 t/s felt fine in real sessions, 23 was sluggish, 16.7 (ik_llama.cpp) was rejected as unusable |
 | prefill | 350 t/s | 820 t/s reads Claude Code's ~27K first prompt in ~35 s; 340 t/s took ~80 s - tolerated once, not a tuning result |
 | decode at depth | 15 t/s | a giant context that is unusable at depth is a fake win; the default coder does ~35 at 200K |
+| agent suite | 75% per API | nine of the gate's eleven agent tasks on `/v1/messages` and on `/v1/chat/completions`: a setup an agent cannot work on is not one to serve |
 
-`TUNE_MIN_DECODE`, `TUNE_MIN_PREFILL` and `TUNE_MIN_DEPTH_DECODE` in `golem.toml` move
-them; `--min-decode`, `--min-prefill` and `--min-depth-decode` move them for one run. The
+`TUNE_MIN_DECODE`, `TUNE_MIN_PREFILL`, `TUNE_MIN_DEPTH_DECODE` and `TUNE_MIN_AGENT` in
+`golem.toml` move them; `--min-decode`, `--min-prefill`, `--min-depth-decode` and
+`--min-agent` move them for one run. The
 context ceiling is the model's trained context: past it, extrapolation works per model
 rather than in general (a 0.5B passed a 211K needle on a 32K-trained model), so it has to
 be asked for with `--ctx N`.
@@ -101,8 +103,8 @@ and put back after the run on the configuration as it then stands.
    so. A pinned `--ctx` is the caller's choice and is not held to this.
 6. **Gate once**, in the serving configuration: the preset's own load mode (sweep points
    load with mmap so a 32 GB box survives the restarts; the gate keeps `mlock`), a needle
-   at 90% of the tuned context capped at `GATE_TOKENS`, tool calls, and decode at depth
-   against its floor. A failed gate moves to the next-ranked candidate - except a gate
+   at 90% of the tuned context capped at `GATE_TOKENS`, tool calls, decode at depth
+   against its floor, and the agent suite on both APIs against its own. A failed gate moves to the next-ranked candidate - except a gate
    whose model did not load at all: the next candidate loads the same way, so the run
    stops there and names the load mode as the suspect.
 
