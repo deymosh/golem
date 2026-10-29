@@ -636,12 +636,14 @@ fn post_body(base: &Base, body: &str, timeout: Duration) -> String {
 
 /// `POST` and hand back the body only for a 2xx - for the two long-context
 /// requests, where an unhappy status is read as no answer at all rather
-/// than as one.
-fn post_body_ok(base: &Base, body: &str, timeout: Duration) -> String {
-    engine::post_json(base, "/v1/chat/completions", body, timeout)
-        .filter(|reply| reply.ok())
-        .map(|reply| reply.body)
-        .unwrap_or_default()
+/// than as one. What went wrong instead comes back as the error, so the
+/// report says why the request failed.
+fn post_body_ok(base: &Base, body: &str, timeout: Duration) -> Result<String, String> {
+    match engine::post_json(base, "/v1/chat/completions", body, timeout) {
+        Some(reply) if reply.ok() => Ok(reply.body),
+        Some(reply) => Err(format!("HTTP {}: {}", reply.status, reply.error_message())),
+        None => Err("no answer: the connection failed or closed early".to_string()),
+    }
 }
 
 // ---------------------------------------------------------------
@@ -803,19 +805,27 @@ fn long_context(out: &mut dyn Write, base: &Base, model: &str, long: &str, steps
     // whole haystack as a cached prefix, which is how an agent turn looks -
     // long history, short new tail.
     steps.next(out, &format!("the {long}-token needle (minutes of prefill)"));
-    let needle = parse_body(&post_body_ok(base, &bodies.needle, NEEDLE_TIMEOUT));
+    let needle_reply = post_body_ok(base, &bodies.needle, NEEDLE_TIMEOUT);
+    let needle = parse_body(needle_reply.as_deref().unwrap_or(""));
     let mut answer = message_content_of(&needle);
     if answer.is_empty() {
-        answer = "(request failed)".to_string();
+        answer = match &needle_reply {
+            Err(why) => format!("(request failed: {why})"),
+            Ok(_) => "(no answer text)".to_string(),
+        };
     }
     let prompt_tps = timing(&needle, "prompt_per_second").unwrap_or(0.0);
     let prompt_n = number_of(&needle, "prompt_n").unwrap_or_else(|| "0".to_string());
     let _ = writeln!(out, "needle : prompt={prompt_n} tok @ {prompt_tps:.0} t/s; answer: {answer}");
 
     steps.next(out, "decode at depth");
-    let depth = parse_body(&post_body_ok(base, &bodies.depth, NEEDLE_TIMEOUT));
+    let depth_reply = post_body_ok(base, &bodies.depth, NEEDLE_TIMEOUT);
+    let depth = parse_body(depth_reply.as_deref().unwrap_or(""));
     let depth_tps = timing(&depth, "predicted_per_second").unwrap_or(0.0);
     let _ = writeln!(out, "depth  : {} (prefix from cache)", timings_line(&depth));
+    if let Err(why) = &depth_reply {
+        let _ = writeln!(out, "         the depth request failed: {why}");
+    }
 
     // The passphrase as a number of its own (`8127.`, `**8127**`), not a
     // run of digits that contains it. And when the server says how much it
