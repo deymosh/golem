@@ -18,9 +18,9 @@ pub const GRID: [&str; 4] = ["011110", "122221", "111111", "011110"];
 /// The mark as the terminal draws it, one line per row of glyphs.
 pub const GLYPHS: [&str; 2] = ["\u{259f}\u{2588}\u{2599}", "\u{259c}\u{2588}\u{259b}"];
 
-/// The body's colour: a mid stone grey, legible on a light and a dark
+/// The body's colour: a neutral stone grey, legible on a light and a dark
 /// taskbar alike.
-pub const CLAY: [u8; 3] = [0x7a, 0x88, 0x83];
+pub const CLAY: [u8; 3] = [0x80, 0x86, 0x8f];
 
 /// What the spark shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,7 +189,7 @@ mod tests {
         assert_eq!(svg.matches("<rect ").count(), filled);
         // The spark row in amber, the body in clay, nothing for an empty cell.
         assert_eq!(svg.matches("fill=\"#e3a33b\"").count(), 4);
-        assert!(svg.contains("<rect x=\"10\" y=\"0\" width=\"10\" height=\"16\" fill=\"#7a8883\"/>"), "{svg}");
+        assert!(svg.contains("<rect x=\"10\" y=\"0\" width=\"10\" height=\"16\" fill=\"#80868f\"/>"), "{svg}");
         assert!(!svg.contains("x=\"0\" y=\"0\""), "the top-left cell is empty");
         assert!(svg.starts_with("<svg ") && svg.ends_with("</svg>\n"));
     }

@@ -155,6 +155,9 @@ pub struct Facts {
     pub web_up: bool,
     /// The port the service hosts the console on.
     pub console_port: u16,
+    /// The port agents reach the model on: Anthropic at its root, OpenAI
+    /// under `/v1`.
+    pub api_port: u16,
 }
 
 impl Default for Facts {
@@ -170,6 +173,7 @@ impl Default for Facts {
             engine: "llama.cpp".to_string(),
             web_up: false,
             console_port: crate::desktop::CONSOLE_PORT,
+            api_port: 8000,
         }
     }
 }
@@ -452,6 +456,7 @@ impl App {
             engine: config::get(home, "ENGINE").unwrap_or_else(|| "llama.cpp".to_string()),
             web_up: state::web_up(crate::desktop::console_port(home)),
             console_port: crate::desktop::console_port(home),
+            api_port: crate::engine::api_port(home),
         };
         if expensive {
             self.read_at = Some(Instant::now());
@@ -564,9 +569,9 @@ fn screen(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
                 Span::styled("   y yes   any other key no", dim()),
             ]),
             (None, Some(text)) => Line::from(vec![
-                Span::styled("  pull ", Style::default().fg(PATINA).add_modifier(Modifier::BOLD)),
+                Span::styled("  pull ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
                 Span::raw(text.clone()),
-                Span::styled("\u{2588}", Style::default().fg(PATINA)),
+                Span::styled("\u{2588}", Style::default().fg(ACCENT)),
                 Span::styled("   owner/repo[:quant] or a library name, enter to pull, esc to cancel", dim()),
             ]),
             (None, None) => match app.progress.as_ref().filter(|_| app.busy) {
@@ -588,7 +593,7 @@ fn bar_line(progress: &Progress, width: usize) -> Line<'static> {
     let (filled, rest) = progress.cells(room.clamp(8, 32));
     Line::from(vec![
         Span::styled(label, Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled("\u{2501}".repeat(filled), Style::default().fg(PATINA)),
+        Span::styled("\u{2501}".repeat(filled), Style::default().fg(ACCENT)),
         Span::styled("\u{2500}".repeat(rest), dim()),
         Span::styled(tail, dim()),
     ])
@@ -604,7 +609,7 @@ fn grid_lines(app: &App, per: usize) -> Vec<Line<'static>> {
                 if *i == app.selected && app.focus == Focus::Actions {
                     spans.push(Span::styled(
                         format!("{POINTER} {label:<width$}", width = CELL - 2),
-                        Style::default().fg(PATINA).add_modifier(Modifier::BOLD),
+                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                     ));
                 } else {
                     spans.push(Span::raw(format!("  {label:<width$}", width = CELL - 2)));
@@ -640,7 +645,7 @@ fn models(app: &App, rows: usize) -> Vec<Line<'static>> {
             };
             let mut spans = vec![
                 if marked {
-                    Span::styled(format!("{POINTER} "), Style::default().fg(PATINA).add_modifier(Modifier::BOLD))
+                    Span::styled(format!("{POINTER} "), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
                 } else {
                     Span::raw("  ")
                 },
@@ -648,7 +653,7 @@ fn models(app: &App, rows: usize) -> Vec<Line<'static>> {
                 Span::styled(
                     format!("{name:<26}"),
                     if marked {
-                        Style::default().fg(PATINA).add_modifier(Modifier::BOLD)
+                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().add_modifier(Modifier::BOLD)
                     },
@@ -683,8 +688,8 @@ fn rule(width: usize) -> Line<'static> {
     Line::from(Span::styled("\u{2500}".repeat(width), dim()))
 }
 
-/// The selection's colour: the console's patina accent.
-const PATINA: Color = Color::Rgb(0x4d, 0xbf, 0xab);
+/// The selection's colour: the console's accent, the mark's spark.
+const ACCENT: Color = Color::Rgb(0xe9, 0xa2, 0x3b);
 /// Serving, as in the console and the tray.
 const SERVING: Color = Color::Rgb(0x55, 0xc2, 0x7a);
 
@@ -764,6 +769,7 @@ fn header(app: &App, width: usize) -> Vec<Line<'static>> {
     first.push((format!("   [{}]", facts.engine), dim()));
 
     let mut second: Vec<(String, Style)> = Vec::new();
+    second.push((format!(" API :{0} (Anthropic)  :{0}/v1 (OpenAI)  ", facts.api_port), dim()));
     second.push(if facts.web_up {
         (format!(" console :{}", facts.console_port), dim())
     } else {

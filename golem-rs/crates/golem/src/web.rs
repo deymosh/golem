@@ -313,7 +313,7 @@ async fn api_state(State(app): State<Arc<App>>) -> Response {
         format!(
             "{{\"up\": {}, \"vram\": {}, \"alias\": {}, \"engine\": {}, \"presets\": [{}], \
              \"engines\": [{}], \"job_running\": {}, \"job_action\": {}, \"job_tail\": {}, \
-             \"job_progress\": {}, \"update\": {}, \"version\": {}}}",
+             \"job_progress\": {}, \"update\": {}, \"web\": {}, \"version\": {}}}",
             snapshot.up,
             vram,
             json::quote(&snapshot.alias),
@@ -325,6 +325,9 @@ async fn api_state(State(app): State<Arc<App>>) -> Response {
             json::quote(&snapshot.job_tail),
             snapshot.job_progress.as_ref().map_or_else(|| "null".to_string(), |p| p.to_json()),
             update,
+            // Whether the API front adds golem's web tools, for the page's
+            // Connect panel.
+            crate::api::web_tools_on(&app.cfg.home),
             // The version of the service answering, which is the one the
             // page names beside the brand.
             json::quote(env!("CARGO_PKG_VERSION")),

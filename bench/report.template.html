@@ -12,34 +12,20 @@
      Self-contained: no CDN, no web fonts, opens from file://. -->
 <style>
 /* The title bar is the header: mark and name, the tabs, the state, and in
-   the app the window's own buttons. Under it one working column. Colours
-   follow the mark - clay greys, a patina accent, amber kept for "alive" -
-   and the one loud element is each model's decode speed. */
+   the app the window's own buttons. Under it one working column. Dark only:
+   graphite stone like the mark's body, and the mark's spark - its amber -
+   as the one accent. Green means one thing, a model serving or a check
+   passed. What a number is worth is said by its seal: proven by the 200K
+   gate on this machine, measured, or not measured at all. */
 :root {
-  --ground: #e8ebe8; --surface: #f7f8f7; --raised: #ffffff; --ink: #1b2321; --soft: #56635f;
-  --hair: #d5dbd8; --clay: #7a8883; --patina: #1d7466; --spark: #c98a24;
-  --ok: #2b8a4b; --busy: #b5731a; --bad: #b23a2e;
-  --s1: #1d7466; --s2: #2f67b1; --s3: #b5731a; --s4: #7a4fa6; --s5: #b23a2e; --s6: #56635f;
+  --ground: #15171b; --surface: #1c1f24; --raised: #24282f; --ink: #e7e9ed; --soft: #969ca7;
+  --hair: #2e333b; --clay: #80868f; --accent: #e9a23b; --spark: #e9a23b;
+  --ok: #5fc48a; --busy: #e9a23b; --bad: #ef7a6a;
+  --s1: #e9a23b; --s2: #6ea9f0; --s3: #b58ce0; --s4: #5cc4b4; --s5: #ef7a6a; --s6: #969ca7;
   --ui: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", sans-serif;
   --display: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
   --code: "Cascadia Mono", "Cascadia Code", ui-monospace, Consolas, monospace;
   --bar: 44px;
-  color-scheme: light;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --ground: #1f2523; --surface: #262d2b; --raised: #2c3431; --ink: #e3e9e6; --soft: #9aa7a2;
-    --hair: #36403d; --clay: #8f9d98; --patina: #52c2ae; --spark: #efb24c;
-    --ok: #5cc47e; --busy: #e8a845; --bad: #f07868;
-    --s1: #52c2ae; --s2: #6ea9f0; --s3: #e8a845; --s4: #b58ce0; --s5: #f07868; --s6: #9aa7a2;
-    color-scheme: dark;
-  }
-}
-:root[data-theme="dark"] {
-  --ground: #1f2523; --surface: #262d2b; --raised: #2c3431; --ink: #e3e9e6; --soft: #9aa7a2;
-  --hair: #36403d; --clay: #8f9d98; --patina: #52c2ae; --spark: #efb24c;
-  --ok: #5cc47e; --busy: #e8a845; --bad: #f07868;
-  --s1: #52c2ae; --s2: #6ea9f0; --s3: #e8a845; --s4: #b58ce0; --s5: #f07868; --s6: #9aa7a2;
   color-scheme: dark;
 }
 * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--soft) 45%, transparent) transparent; }
@@ -50,7 +36,7 @@ body { margin: 0; background: var(--ground); color: var(--ink); font: 14px/1.5 v
   display: flex; flex-direction: column; overflow: hidden; }
 code, .code { font-family: var(--code); font-size: 12.5px; }
 button, select, input { font: inherit; color: inherit; }
-:focus-visible { outline: 2px solid var(--patina); outline-offset: 2px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ---- title bar --------------------------------------------------------- */
 .bar { flex: none; position: relative; z-index: 20; height: var(--bar); display: grid; grid-template-columns: 1fr auto 1fr;
@@ -88,18 +74,43 @@ html.app .edge { display: block; }
 .edge.nw { top: 0; left: 0; width: 8px; height: 8px; cursor: nw-resize; }
 .edge.se { bottom: 0; right: 0; width: 10px; height: 10px; cursor: se-resize; }
 .edge.sw { bottom: 0; left: 0; width: 10px; height: 10px; cursor: sw-resize; }
-@media (max-width: 760px) { .bar { grid-template-columns: auto 1fr; } .tabs { grid-column: 1 / -1; grid-row: 2; justify-self: start; }
-  .bar { height: auto; padding-block: 8px; row-gap: 8px; } .state span { overflow: hidden; text-overflow: ellipsis; } .state .extra { display: none; } }
+.nav-toggle { display: flex; align-items: center; gap: 8px; padding: 0; border: 0; background: none; color: inherit; pointer-events: none; }
+.nav-toggle .menu { display: none; width: 16px; height: 16px; stroke: var(--soft); stroke-width: 1.6; fill: none; }
+.scrim { display: none; }
+/* On a phone the bar is one line - the mark, the name, the state - and the
+   sections are a panel from the left, opened by the mark like llama.cpp's
+   own chat opens its list. */
+@media (max-width: 760px) {
+  .bar { grid-template-columns: auto 1fr; }
+  .nav-toggle { pointer-events: auto; cursor: pointer; padding: 6px 4px; margin: -6px -4px; border-radius: 6px; }
+  .nav-toggle .menu { display: block; }
+  .tabs { position: fixed; z-index: 50; top: 0; bottom: 0; left: 0; width: min(280px, 82vw); flex-direction: column; gap: 2px;
+    padding: calc(var(--bar) + 10px) 10px 16px; border-radius: 0; background: var(--surface); border-right: 1px solid var(--hair);
+    transform: translateX(-102%); visibility: hidden; }
+  .tabs a { padding: 10px 14px; font-size: 15px; border-radius: 8px; }
+  html.nav-open .tabs { transform: none; visibility: visible; box-shadow: 12px 0 32px rgb(0 0 0 / .35); }
+  .scrim:not([hidden]) { display: block; position: fixed; inset: 0; z-index: 45; background: rgb(0 0 0 / .45); }
+  .brand { position: relative; z-index: 55; }
+  .state span { overflow: hidden; text-overflow: ellipsis; } .state .extra { display: none; }
+}
+@media (max-width: 760px) and (prefers-reduced-motion: no-preference) {
+  .tabs { transition: transform .2s ease-out, visibility .2s; }
+}
 
 /* ---- page -------------------------------------------------------------- */
-/* A column: the update banner on top, the open tab filling the rest. The
-   window never scrolls; the tab is held to the height left, so what is
-   long inside it (the model list, the results, a log) scrolls in place. */
-main { flex: 1; min-height: 0; width: 100%; max-width: 1240px; margin: 0 auto; display: flex; flex-direction: column;
-  padding: 22px max(18px, env(safe-area-inset-right, 0px)) 18px max(18px, env(safe-area-inset-left, 0px)); }
-section { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 16px; }
+/* Under the title bar, which never moves, the page scrolls: Models and
+   Results are pages, their scrollbar at the window's edge and the column
+   centred inside. The engine log and the chat are panes instead - they
+   fill what is left of the window, the page stays put, and the log scrolls
+   itself. */
+main { flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column; overflow-y: auto; scrollbar-gutter: stable;
+  padding: 22px max(18px, env(safe-area-inset-right, 0px)) 28px max(18px, env(safe-area-inset-left, 0px)); }
+main > * { width: 100%; max-width: 1240px; margin-inline: auto; }
+section { flex: none; display: flex; flex-direction: column; gap: 16px; }
 section[hidden] { display: none; }
 section > * { flex: none; }
+main:has(#tab-log:not([hidden])), main:has(#tab-chat:not([hidden])) { overflow: hidden; }
+#tab-log:not([hidden]), #tab-chat:not([hidden]) { flex: 1; min-height: 0; }
 /* The update banner, a full-width strip above whichever tab is open. */
 .update { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
   padding: 10px 14px; margin-bottom: 16px; background: var(--surface); border: 1px solid var(--hair); border-radius: 10px; }
@@ -109,26 +120,33 @@ section > * { flex: none; }
 .update .spacer { flex: 1; }
 .update .bad-text { color: var(--bad); font-size: 13px; }
 /* What scrolls in each tab. */
-#m-list { flex: 0 1 auto; min-height: 160px; overflow-y: auto; }
-/* A window too short for the controls, the job log and a few models scrolls
-   the tab itself rather than squeezing the list away. */
-#tab-models { overflow-y: auto; }
-#tab-results { overflow-y: auto; padding-right: 4px; margin-right: -4px; }
 #tab-log > .surface { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #engine-log { flex: 1; min-height: 0; }
 #tab-chat > .surface { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-#chat-key { font-family: var(--code); width: 22ch; }
 #chat-frame { flex: 1; min-height: 0; width: 100%; border: 0; border-top: 1px solid var(--hair); background: var(--surface); }
 #chat-open { text-decoration: none; }
+/* The chat is the engine's own app, so it gets the window: edge to edge
+   under the title bar, and above it one quiet line for the key, which the
+   chat asks for once and then keeps. On a phone the line is its two
+   buttons. */
+main:has(#tab-chat:not([hidden])) { padding: 0; scrollbar-gutter: auto; }
+main:has(#tab-chat:not([hidden])) > * { max-width: none; }
+#tab-chat > .surface { border: 0; border-radius: 0; background: var(--ground); }
+#chat-frame { background: var(--ground); border-top: 0; }
+#chat-msg { margin: auto; border: 0; text-align: center; padding: 40px 18px; }
+.chat-tools { display: flex; gap: 2px; }
+.chat-tools[hidden] { display: none; }
+.chat-tools .btn { padding: 4px 9px; }
+@media (max-width: 620px) { #chat-open { display: none; } }
 h2 { font: 600 15px/1.3 var(--display); margin: 14px 0 -6px; }
 .sub { color: var(--soft); font-size: 13px; }
 .surface { background: var(--surface); border: 1px solid var(--hair); border-radius: 10px; min-width: 0; }
 .scroll { overflow-x: auto; }
 
 .btn { font-size: 13px; background: var(--raised); border: 1px solid var(--hair); border-radius: 6px; padding: 5px 12px; cursor: pointer; white-space: nowrap; }
-.btn:hover { border-color: color-mix(in srgb, var(--patina) 60%, var(--hair)); }
+.btn:hover { border-color: color-mix(in srgb, var(--accent) 60%, var(--hair)); }
 .btn:disabled { opacity: .45; cursor: default; }
-.btn.go { background: var(--patina); border-color: var(--patina); color: var(--surface); font-weight: 600; }
+.btn.go { background: var(--accent); border-color: var(--accent); color: var(--surface); font-weight: 600; }
 .btn.quiet { background: transparent; border-color: transparent; color: var(--soft); }
 .btn.quiet:hover { color: var(--ink); border-color: var(--hair); }
 .btn.danger:hover { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 50%, var(--hair)); }
@@ -143,26 +161,70 @@ select, input[type=text] { background: var(--raised); border: 1px solid var(--ha
 .msg.bad { color: var(--bad); }
 pre.log { margin: 0; padding: 12px 14px; font: 12px/1.55 var(--code); color: var(--soft); white-space: pre-wrap; overflow-y: auto; }
 #c-log { border-top: 1px solid var(--hair); max-height: 420px; }
+/* A finished job folds to its last line; a running one is open. */
+.joblog { border-top: 1px solid var(--hair); }
+.joblog summary { padding: 8px 14px; font-size: 13px; color: var(--soft); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.joblog summary:hover { color: var(--ink); }
+.joblog summary b { color: var(--ink); font-weight: 600; }
 /* One job-log line. The clock stamp dims; the === strips stand apart; a
    verdict tag takes the colour the badges use. */
 :is(#c-log, #engine-log) .jl { min-height: 18px; }
 :is(#c-log, #engine-log) .jt { color: color-mix(in srgb, var(--soft) 55%, transparent); }
-:is(#c-log, #engine-log) .jf { color: var(--ink); font-weight: 600; background: color-mix(in srgb, var(--patina) 10%, transparent);
+:is(#c-log, #engine-log) .jf { color: var(--ink); font-weight: 600; background: color-mix(in srgb, var(--accent) 10%, transparent);
   margin: 2px -14px; padding: 0 14px; }
 :is(#c-log, #engine-log) .ok { color: var(--ok); }
 :is(#c-log, #engine-log) .warn { color: var(--busy); }
 :is(#c-log, #engine-log) .bad { color: var(--bad); }
 /* The engine pane: the model a line is about, as a quiet tag before it. */
-#engine-log .em { display: inline-block; min-width: 14ch; margin-right: 1ch; color: var(--soft); opacity: .8;
+#engine-log .em { display: inline-block; min-width: 14ch; color: var(--soft); opacity: .8;
   overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; white-space: nowrap; max-width: 24ch; }
 #engine-log.raw { color: var(--soft); }
 #log-strip { justify-content: space-between; }
 .progress { padding: 10px 14px 12px; border-top: 1px solid var(--hair); }
 .progress .head { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--soft); font-variant-numeric: tabular-nums; }
 .progress .head b { color: var(--ink); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.progress .track { height: 4px; margin-top: 7px; border-radius: 99px; overflow: hidden; background: color-mix(in srgb, var(--patina) 15%, transparent); }
-.progress .track i { display: block; height: 100%; width: 0; border-radius: inherit; background: var(--patina); }
+.progress .track { height: 4px; margin-top: 7px; border-radius: 99px; overflow: hidden; background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.progress .track i { display: block; height: 100%; width: 0; border-radius: inherit; background: var(--accent); }
 @media (prefers-reduced-motion: no-preference) { .progress .track i { transition: width .5s ease-out; } }
+
+/* what is serving: the model, its seal, its numbers, and the engine's buttons */
+.serving { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px 28px; padding: 18px 18px 14px; }
+.serving h1 { margin: 2px 0 6px; font: 600 26px/1.15 var(--display); letter-spacing: -.01em; overflow-wrap: anywhere; }
+.serving .lead { font-size: 13px; color: var(--soft); }
+.serving .lead.up { color: var(--ok); }
+.numbers { display: flex; gap: 26px; margin: 0; font-variant-numeric: tabular-nums; }
+.numbers div { text-align: right; }
+.numbers dt { font-size: 12px; color: var(--soft); }
+.numbers dd { margin: 0; font: 300 30px/1.05 var(--display); letter-spacing: -.02em; }
+.numbers dd small { font-size: 13px; font-weight: 400; color: var(--soft); margin-left: 3px; letter-spacing: 0; }
+#control { border-top: 1px solid var(--hair); }
+@media (max-width: 760px) { .serving { grid-template-columns: minmax(0, 1fr); } .numbers { gap: 20px; } .numbers div { text-align: left; } .numbers dd { font-size: 24px; } }
+
+/* A seal says what a number is worth: proven by the 200K gate on this
+   machine and engine build, measured by a bench, or not measured. */
+.seal { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--soft); }
+.seal svg { width: 16px; height: 16px; flex: none; }
+.seal.proven { color: var(--ink); }
+.seal.proven svg { color: var(--accent); }
+.seal.failed { color: var(--bad); }
+.seal b { font-weight: 600; }
+
+/* connecting an agent: one client at a time, its exact setup to copy */
+.connect { padding: 14px 18px 16px; display: grid; gap: 12px; }
+.connect .top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.connect h2 { margin: 0; }
+.seg { display: flex; flex-wrap: wrap; gap: 2px; padding: 3px; background: var(--ground); border-radius: 8px; }
+.seg button { border: 0; background: transparent; color: var(--soft); padding: 4px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; }
+.seg button[aria-selected="true"] { background: var(--raised); color: var(--ink); }
+.endpoints { display: grid; grid-template-columns: max-content minmax(0, 1fr) auto; gap: 6px 14px; align-items: center; margin: 0; font-size: 13px; }
+.endpoints dt { color: var(--soft); }
+.endpoints dd { margin: 0; font: 12.5px var(--code); overflow-wrap: anywhere; }
+.snippet { position: relative; margin: 0; padding: 12px 14px; background: var(--ground); border: 1px solid var(--hair); border-radius: 8px;
+  font: 12.5px/1.6 var(--code); color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow-y: auto; }
+.connect .row { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.connect .row .sub { flex: 1 1 260px; }
+.web-on { color: var(--ink); }
+@media (max-width: 620px) { .endpoints { grid-template-columns: minmax(0, 1fr) auto; } .endpoints dt { grid-column: 1 / -1; margin-top: 4px; } }
 
 /* pull */
 .pull { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 10px 12px; }
@@ -177,7 +239,8 @@ pre.log { margin: 0; padding: 12px 14px; font: 12px/1.55 var(--code); color: var
 .model .name strong { font: 600 16px/1.3 var(--display); }
 .model .facts { display: flex; flex-wrap: wrap; gap: 2px 16px; color: var(--soft); font-size: 13px; }
 .model .facts .code { color: var(--soft); }
-.model .speed { grid-column: 2; grid-row: 1 / span 3; align-self: center; text-align: right; font-variant-numeric: tabular-nums; }
+.model .seal { margin-top: 2px; }
+.model .speed { grid-column: 2; grid-row: 1 / span 4; align-self: center; text-align: right; font-variant-numeric: tabular-nums; }
 .model .speed b { display: block; font: 300 34px/1 var(--display); letter-spacing: -.02em; }
 .model .speed b small { font-size: 14px; font-weight: 400; color: var(--soft); letter-spacing: 0; margin-left: 3px; }
 .model .speed span { font-size: 12px; color: var(--soft); }
@@ -186,7 +249,7 @@ pre.log { margin: 0; padding: 12px 14px; font: 12px/1.55 var(--code); color: var
 .model.serving .name strong::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 9px; border-radius: 50%;
   background: var(--ok); vertical-align: 3px; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
 .chip { font-size: 12px; padding: 1px 8px; border-radius: 99px; color: var(--soft); background: color-mix(in srgb, var(--soft) 12%, transparent); }
-.chip.role { color: var(--patina); background: color-mix(in srgb, var(--patina) 13%, transparent); }
+.chip.role { color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, transparent); }
 .chip.away { background: transparent; border: 1px dashed var(--hair); }
 .empty { padding: 28px 18px; color: var(--soft); text-align: center; }
 @media (max-width: 620px) { .model { grid-template-columns: minmax(0, 1fr); } .model .speed { grid-column: 1; grid-row: auto; text-align: left; } }
@@ -207,7 +270,7 @@ tr.classrow td { color: var(--soft); font-size: 12px; font-weight: 600; padding-
 .PASS { color: var(--ok); background: color-mix(in srgb, var(--ok) 13%, transparent); }
 .FAIL { color: var(--bad); background: color-mix(in srgb, var(--bad) 13%, transparent); }
 .none { color: var(--soft); border: 1px dashed var(--hair); }
-.best { font-weight: 700; color: var(--patina); }
+.best { font-weight: 700; color: var(--accent); }
 .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 7px; }
 .flags { color: var(--soft); font-family: var(--code); font-size: 12px; }
 .note { color: var(--soft); max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
@@ -218,7 +281,7 @@ tr.classrow td { color: var(--soft); font-size: 12px; font-weight: 600; padding-
 .chart text { fill: var(--soft); font-size: 11px; }
 .chart .grid { stroke: var(--hair); }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 4px 14px 12px; font-size: 12px; }
-#tip { position: fixed; z-index: 40; max-width: 420px; padding: 8px 10px; border: 1px solid var(--hair); border-radius: 8px;
+#tip { position: fixed; z-index: 40; width: auto; max-width: 420px; padding: 8px 10px; border: 1px solid var(--hair); border-radius: 8px;
   background: var(--raised); color: var(--ink); font-size: 12px; line-height: 1.5; box-shadow: 0 8px 24px rgb(0 0 0 / .18); pointer-events: none; }
 #tip i { color: var(--soft); }
 @media (prefers-reduced-motion: no-preference) { .btn, .tabs a { transition: background-color .12s, border-color .12s, color .12s; } }
@@ -226,14 +289,27 @@ tr.classrow td { color: var(--soft); font-size: 12px; font-weight: 600; padding-
 </head>
 <body>
 <header class="bar" id="bar">
-  <div class="brand"><svg id="mark" viewBox="0 0 64 68" role="img" aria-label="Golem"></svg><span>Golem</span><small id="c-version" title="The running Golem version"></small></div>
-  <nav class="tabs" aria-label="Sections">
+  <div class="brand">
+    <!-- On a phone the mark opens the sections, as a panel from the left. -->
+    <button class="nav-toggle" id="nav-toggle" aria-controls="sections" aria-expanded="false" aria-label="Sections">
+      <svg class="menu" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12"/></svg>
+      <svg id="mark" viewBox="0 0 64 68" role="img" aria-label="Golem"></svg>
+    </button>
+    <span>Golem</span><small id="c-version" title="The running Golem version"></small>
+  </div>
+  <div class="scrim" id="scrim" hidden></div>
+  <nav class="tabs" id="sections" aria-label="Sections">
     <a href="#models" data-tab="models" hidden>Models</a>
     <a href="#chat" data-tab="chat" hidden>Chat</a>
     <a href="#results" data-tab="results">Results</a>
     <a href="#log" data-tab="log" hidden>Engine log</a>
   </nav>
   <div class="right">
+    <!-- On the Chat tab: the chat asks once for the API key, and keeps it. -->
+    <div class="chat-tools" id="chat-tools" hidden>
+      <button class="btn quiet" id="chat-copy" title="The chat asks for it once, then keeps it">Copy API key</button>
+      <a class="btn quiet" id="chat-open" target="_blank" rel="noopener">Open in a new tab</a>
+    </div>
     <div class="state" id="c-state"><i></i><span id="c-state-text">Snapshot</span></div>
     <div class="winbtns" aria-label="Window">
       <button data-win="minimize" title="Minimize" aria-label="Minimize"><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></button>
@@ -258,6 +334,14 @@ tr.classrow td { color: var(--soft); font-size: 12px; font-weight: 600; padding-
   </div>
   <section id="tab-models" hidden>
     <div class="surface">
+      <div class="serving">
+        <div>
+          <span class="lead" id="sv-lead">Stopped</span>
+          <h1 id="sv-name">–</h1>
+          <span class="seal" id="sv-seal"></span>
+        </div>
+        <dl class="numbers" id="sv-numbers"></dl>
+      </div>
       <div class="strip" id="control">
         <div class="group">
           <button class="btn" data-run="start">Start</button>
@@ -279,7 +363,34 @@ tr.classrow td { color: var(--soft); font-size: 12px; font-weight: 600; padding-
         <div class="head"><b id="c-progress-label"></b><span id="c-progress-amount"></span></div>
         <div class="track"><i id="c-progress-fill"></i></div>
       </div>
-      <pre class="log" id="c-log" hidden></pre>
+      <details class="joblog" id="c-log-box" hidden>
+        <summary id="c-log-sum"></summary>
+        <pre class="log" id="c-log"></pre>
+      </details>
+    </div>
+
+    <div class="surface connect" id="connect">
+      <div class="top">
+        <h2>Connect an agent</h2>
+        <div class="seg" role="tablist" aria-label="Agent" id="cx-tabs">
+          <button role="tab" data-cx="claude">Claude Code</button>
+          <button role="tab" data-cx="opencode">OpenCode</button>
+          <button role="tab" data-cx="codex">Codex</button>
+          <button role="tab" data-cx="other">Any other client</button>
+        </div>
+      </div>
+      <dl class="endpoints">
+        <dt>Anthropic API</dt><dd id="cx-anthropic"></dd><button class="btn quiet" data-copy="cx-anthropic">Copy</button>
+        <dt>OpenAI API</dt><dd id="cx-openai"></dd><button class="btn quiet" data-copy="cx-openai">Copy</button>
+        <dt>API key</dt><dd id="cx-key"></dd><button class="btn quiet" id="cx-key-copy">Copy</button>
+      </dl>
+      <pre class="snippet" id="cx-snippet" role="tabpanel" aria-labelledby="cx-tabs"></pre>
+      <div class="row">
+        <span class="sub" id="cx-note"></span>
+        <button class="btn quiet" id="cx-show">Show key</button>
+        <button class="btn go" id="cx-copy">Copy setup</button>
+      </div>
+      <p class="sub" id="cx-web" style="margin:0"></p>
     </div>
 
     <form class="surface pull" id="pull-form">
@@ -317,13 +428,6 @@ tr.classrow td { color: var(--soft); font-size: 12px; font-weight: 600; padding-
 
   <section id="tab-chat" hidden>
     <div class="surface">
-      <div class="strip" id="chat-key-strip">
-        <span class="sub">The chat asks for an API key the first time. Paste this one into it:</span>
-        <input type="password" id="chat-key" readonly aria-label="API key" spellcheck="false">
-        <button class="btn go" id="chat-copy">Copy key</button>
-        <button class="btn quiet" id="chat-show">Show</button>
-        <a class="btn quiet" id="chat-open" target="_blank" rel="noopener">Open in the browser</a>
-      </div>
       <p class="msg" id="chat-msg" role="status" aria-live="polite" hidden></p>
       <iframe id="chat-frame" title="Chat" allow="clipboard-read; clipboard-write; microphone" hidden></iframe>
     </div>
@@ -352,6 +456,14 @@ const day = (ts) => (ts || "").slice(0, 10);
 // A verdict as a class name: only the two the stylesheet knows, whatever a
 // row says.
 const verdict = (v) => (v === "PASS" || v === "FAIL" ? v : "none");
+// The seals that say what a number is worth: passed the 200K gate on this
+// machine, failed it, benched only, or never measured.
+const SEALS = {
+  proven: `<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 .8l1.7 1.3 2.1-.3.8 2 2 .8-.3 2.1L15.2 8l-1.3 1.7.3 2.1-2 .8-.8 2-2.1-.3L8 15.2l-1.7-1.3-2.1.3-.8-2-2-.8.3-2.1L.8 8l1.3-1.7-.3-2.1 2-.8.8-2 2.1.3z"/><path d="M5 8.2l2 2 4-4.2" fill="none" stroke="var(--surface)" stroke-width="1.7"/></svg>`,
+  failed: `<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.6 5.6l4.8 4.8M10.4 5.6l-4.8 4.8" stroke="currentColor" stroke-width="1.5"/></svg>`,
+  measured: `<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.8a6.2 6.2 0 0 1 0 12.4z" fill="currentColor"/></svg>`,
+  none: `<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2.4 2.2"/></svg>`,
+};
 // The records, one per line; a line that will not parse (a write cut short)
 // is skipped rather than costing the page every other row.
 const parseRows = (text) => text.split("\n").filter((l) => l.trim().startsWith("{")).flatMap((l) => {
@@ -405,9 +517,23 @@ function showTab(name) {
     else a.removeAttribute("aria-current");
   });
   ["models", "chat", "results", "log"].forEach((t) => { $("tab-" + t).hidden = t !== name; });
+  $("chat-tools").hidden = name !== "chat";
   if (name === "chat") showChat();
 }
 window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
+
+// The phone's panel of sections: the mark opens it; a section, the scrim or
+// Escape closes it.
+function setNav(open) {
+  document.documentElement.classList.toggle("nav-open", open);
+  $("scrim").hidden = !open;
+  $("nav-toggle").setAttribute("aria-expanded", String(open));
+  if (open) document.querySelector(".tabs a[aria-current]")?.focus();
+}
+$("nav-toggle").onclick = () => setNav(!document.documentElement.classList.contains("nav-open"));
+$("scrim").onclick = () => setNav(false);
+document.querySelectorAll(".tabs a").forEach((a) => a.addEventListener("click", () => setNav(false)));
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") setNav(false); });
 
 // ---- results ----------------------------------------------------------
 const KEY_FLAGS = ["n-cpu-moe", "fit", "fit-target", "ubatch-size", "spec-type", "ctx-size", "cache-type-k"];
@@ -513,7 +639,9 @@ function renderBoard(rows) {
         <td class="num">${fmt(r.prefill, 0)}</td><td class="num">${fmt(efficiency(r), 1)}</td>
         <td class="num">${r.vram_mib ? fmt(r.vram_mib / 1024) : "–"}</td>
         <td class="num">${r.ram_used_gib != null ? fmt(r.ram_used_gib) : "–"}</td>
-        <td>${needle ? `<span class="badge ${verdict(needle)}">${needle === "PASS" ? "Pass" : "Fail"}</span>` : `<span class="badge none">Not run</span>`}${ev?.eval?.tools === "FAIL" ? ` <span class="badge FAIL">Tools</span>` : ""}</td>
+        <td>${needle === "PASS" ? `<span class="seal proven">${SEALS.proven}<span>Proven</span></span>`
+          : needle ? `<span class="seal failed">${SEALS.failed}<span>Failed</span></span>`
+          : `<span class="seal none">${SEALS.none}<span>Not gated</span></span>`}${ev?.eval?.tools === "FAIL" ? ` <span class="badge FAIL">Tools</span>` : ""}</td>
         <td class="num">${fmt(ev?.eval?.depth_decode)}</td><td>${esc(day(r.ts))}</td><td class="flags">${esc(flagStr(r.flags))}</td></tr>`;
     }).join("") + "</tbody>";
 }
@@ -631,6 +759,110 @@ function bestRun(name) {
   return runs.reduce((a, b) => (!a || b.decode_median > a.decode_median ? b : a), null);
 }
 
+// What a model's numbers are worth on this machine, from its newest gate
+// (an eval with a needle) and its benches: proven, failed, measured, or
+// nothing at all. The machine is the host most rows come from.
+function evidence(name) {
+  const mine = ROWS.filter((r) => r.model === name && (!topHost || r.host === topHost));
+  const gate = mine.filter((r) => r.kind === "eval" && r.eval?.needle).sort((a, b) => (a.ts < b.ts ? 1 : -1))[0];
+  const build = (r) => (r.engine_build || "").split("-")[0];
+  const size = (r) => (r.eval?.needle_tokens ? `${Math.round(r.eval.needle_tokens / 1000)}K` : "long-context");
+  if (gate?.eval.needle === "PASS")
+    return { tier: "proven", text: `<b>Proven</b> on this machine: ${size(gate)} needle passed on ${esc(build(gate))}, ${esc(day(gate.ts))}` };
+  if (gate) return { tier: "failed", text: `<b>Failed the gate</b>: ${size(gate)} needle on ${esc(build(gate))}, ${esc(day(gate.ts))}` };
+  if (mine.some((r) => r.kind === "bench")) return { tier: "measured", text: `<b>Measured</b>, not yet through the 200K gate` };
+  return { tier: "none", text: "Not measured on this machine" };
+}
+const sealHtml = (ev) => SEALS[ev.tier] + `<span>${ev.text}</span>`;
+
+// The strip on top of Models: what serves (or would), what it is worth, how
+// fast it ran here.
+function renderServing(models, state) {
+  const name = state?.alias || "";
+  const m = models.find((x) => x.Name === name);
+  const run = bestRun(name);
+  const busy = state?.job_running;
+  $("sv-lead").textContent = busy ? `${state.job_action} running` : state?.up ? "Serving" : "Stopped";
+  $("sv-lead").className = "lead" + (state?.up && !busy ? " up" : "");
+  $("sv-name").textContent = name || "No model yet";
+  const ev = evidence(name);
+  $("sv-seal").className = "seal " + ev.tier;
+  $("sv-seal").innerHTML = name ? sealHtml(ev) : "";
+  const cell = (label, value, unit) => `<div><dt>${label}</dt><dd>${value}${unit ? `<small>${unit}</small>` : ""}</dd></div>`;
+  $("sv-numbers").innerHTML = (run ? cell("Decode", fmt(run.decode_median), "t/s") + cell("Prefill", fmt(run.prefill, 0), "t/s") : "")
+    + (m?.Ctx ? cell("Context", Math.round(m.Ctx / 1024), "K") : "");
+}
+
+// ---- connecting an agent ------------------------------------------------
+// The exact setup for each client, from the host, port and key the service
+// answers with: the Anthropic API at the root, the OpenAI APIs under /v1.
+let CX = "claude", CX_SHOW = false, CX_STATE = null;
+try { CX = localStorage.getItem("golem.connect") || "claude"; } catch (e) { /* no storage */ }
+const WINDOWS = /Windows/.test(navigator.userAgent);
+function connectSetup(chat, state, key) {
+  const wild = chat.host === "0.0.0.0" || chat.host === "::";
+  const host = wild ? location.hostname : chat.host;
+  const root = `http://${host}:${chat.port}`, v1 = `${root}/v1`;
+  const alias = state?.alias || "model";
+  const models = (state?.presets || [alias]);
+  const env = (name, value) => (WINDOWS ? `$env:${name} = "${value}"` : `export ${name}="${value}"`);
+  const setups = {
+    claude: {
+      text: [env("ANTHROPIC_BASE_URL", root), env("ANTHROPIC_AUTH_TOKEN", key), env("ANTHROPIC_MODEL", alias),
+        env("ANTHROPIC_SMALL_FAST_MODEL", alias), "claude"].join("\n"),
+      note: `${WINDOWS ? "PowerShell" : "A shell"}, then claude. On this machine, golem claude does the same.`,
+    },
+    opencode: {
+      text: JSON.stringify({ $schema: "https://opencode.ai/config.json", provider: { golem: { npm: "@ai-sdk/openai-compatible", name: "Golem",
+        options: { baseURL: v1, apiKey: key }, models: Object.fromEntries(models.map((m) => [m, {}])) } }, model: `golem/${alias}` }, null, 2),
+      note: "Into opencode.json (in ~/.config/opencode). The base URL ends in /v1.",
+    },
+    codex: {
+      text: `# ~/.codex/config.toml\nmodel = "${alias}"\nmodel_provider = "golem"\n\n[model_providers.golem]\nname = "Golem"\nbase_url = "${v1}"\n`
+        + `env_key = "GOLEM_API_KEY"\nwire_api = "responses"\n\n# and in the shell that runs codex:\n${env("GOLEM_API_KEY", key)}`,
+      note: "Codex speaks the Responses API, which golem serves under /v1.",
+    },
+    other: {
+      text: `OpenAI-compatible\n  base URL  ${v1}\n  API key   ${key}\n  model     ${alias}\n\n`
+        + `Anthropic-compatible\n  base URL  ${root}\n  API key   ${key}  (as a bearer token or x-api-key)\n\nModels: ${models.join(", ")}`,
+      note: "Most clients add /chat/completions or /messages to the base URL themselves.",
+    },
+  };
+  return { root, v1, local: !wild && (chat.host === "127.0.0.1" || chat.host === "localhost"), ...setups[CX] };
+}
+function renderConnect(state) {
+  if (state) CX_STATE = state;
+  if (!CHAT) return;
+  const masked = "•".repeat(12);
+  const shown = connectSetup(CHAT, CX_STATE, CX_SHOW ? CHAT.key : masked);
+  $("cx-anthropic").textContent = shown.root;
+  $("cx-openai").textContent = shown.v1;
+  $("cx-key").textContent = CX_SHOW ? CHAT.key : masked;
+  $("cx-snippet").textContent = shown.text;
+  $("cx-note").textContent = shown.note + (shown.local && location.hostname !== CHAT.host && location.hostname !== "localhost"
+    ? ` Golem's API listens on ${CHAT.host} only, so agents on other machines cannot reach it (LOCAL_AI_HOST in golem.toml).` : "");
+  $("cx-show").textContent = CX_SHOW ? "Hide key" : "Show key";
+  document.querySelectorAll("#cx-tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.cx === CX)));
+  const web = CX_STATE?.web;
+  $("cx-web").innerHTML = web === false
+    ? `Golem's web search and page fetch are off (WEB_SEARCH = "off" in golem.toml).`
+    : `<span class="web-on">Web search and page fetch come with every request</span> through this port, beside the agent's own tools. They run from this machine: searches go to DuckDuckGo with no account, and every call is a line in logs/web.log.`;
+}
+document.querySelectorAll("#cx-tabs button").forEach((b) => b.onclick = () => {
+  CX = b.dataset.cx;
+  try { localStorage.setItem("golem.connect", CX); } catch (e) { /* no storage */ }
+  renderConnect();
+});
+$("cx-show").onclick = () => { CX_SHOW = !CX_SHOW; renderConnect(); };
+$("cx-copy").onclick = () => CHAT && copyText(connectSetup(CHAT, CX_STATE, CHAT.key).text, $("cx-copy"), "Copy setup");
+$("cx-key-copy").onclick = () => CHAT && copyText(CHAT.key, $("cx-key-copy"), "Copy");
+document.querySelectorAll("[data-copy]").forEach((b) => b.onclick = () => copyText($(b.dataset.copy).textContent, b, "Copy"));
+async function loadChat() {
+  if (CHAT) return CHAT;
+  try { CHAT = await (await fetch("api/chat", { cache: "no-store" })).json(); } catch (e) { return null; }
+  return CHAT;
+}
+
 const busyNote = "The console is not answering. Is golem service running?";
 
 // What an action answered, said under the engine buttons: the service's own
@@ -686,6 +918,7 @@ function renderModels(models, state) {
     return `<li class="model${m.Name === serving ? " serving" : ""}">
       <div class="name"><strong>${esc(m.Name)}</strong>${chips}</div>
       <div class="facts">${facts}</div>
+      ${m.Present ? `<div class="seal ${evidence(m.Name).tier}">${sealHtml(evidence(m.Name))}</div>` : ""}
       <div class="speed${run ? "" : " none"}">${run ? `<b>${fmt(run.decode_median)}<small>t/s</small></b><span>${fmt(run.prefill, 0)} prefill</span>` : `<b>–</b><span>not measured yet</span>`}</div>
       <div class="acts">${acts}</div></li>`;
   }).join("") : `<li class="empty">No models yet. Pull one above.</li>`;
@@ -739,9 +972,18 @@ function renderState(s) {
     bar.setAttribute("aria-valuenow", p.percent);
     bar.setAttribute("aria-label", p.label);
   }
-  const log = $("c-log");
-  log.hidden = !s.job_tail;
-  if (s.job_tail) renderJobLog(log, s.job_tail);
+  const box = $("c-log-box");
+  box.hidden = !s.job_tail;
+  if (s.job_tail) {
+    renderJobLog($("c-log"), s.job_tail);
+    // A job that starts opens the log; one that ended stays as the reader
+    // left it, and a page opened after it ended shows only its last line.
+    if (busy && !jobWasRunning) box.open = true;
+    const lines = s.job_tail.split("\n").map((l) => l.trim()).filter(Boolean);
+    const last = (lines[lines.length - 1] || "").replace(/^(\d\d:\d\d):\d\d /, "$1 ").replace(/=== | ===$/g, "");
+    $("c-log-sum").innerHTML = busy ? `<b>${esc(s.job_action)}</b> running` : `Last job: ${esc(last)}`;
+  }
+  jobWasRunning = !!busy;
   renderUpdate(s.update);
   document.querySelectorAll("#control .btn, #pull-form .btn, #update-go").forEach((b) => { b.disabled = !!busy; });
 }
@@ -836,7 +1078,12 @@ async function pollOnce() {
   catch (e) { $("c-state-text").textContent = "No state"; }
   ENGINE_UP = !!state?.up;
   if (!$("tab-chat").hidden) showChat();
-  try { renderModels(await (await fetch("api/models", { cache: "no-store" })).json(), state); }
+  if (await loadChat()) renderConnect(state);
+  try {
+    const models = await (await fetch("api/models", { cache: "no-store" })).json();
+    renderServing(models, state);
+    renderModels(models, state);
+  }
   catch (e) {
     if (!$("m-list").children.length) $("m-list").innerHTML = `<li class="empty">The model list is not available from this service.</li>`;
   }
@@ -865,7 +1112,9 @@ function renderEngineLog(pre, l) {
     pre.textContent = l.text || "";
   } else {
     pre.innerHTML = l.lines.map((line) =>
-      `<div class="jl${line.k ? " " + line.k : ""}"><span class="em" title="${esc(line.m)}">${esc(line.m || "router")}</span>${esc(line.t)}</div>`
+      // The space after the tag is a real one, so a copied line reads
+      // "router  listening on ...", not "routerlistening".
+      `<div class="jl${line.k ? " " + line.k : ""}"><span class="em" title="${esc(line.m)}">${esc(line.m || "router")}</span> ${esc(line.t)}</div>`
     ).join("");
   }
   if (atEnd) pre.scrollTop = pre.scrollHeight;
@@ -884,15 +1133,12 @@ $("log-raw").classList.toggle("go", ENGINE_RAW);
 // ---- chat ---------------------------------------------------------------
 // The Chat tab frames the engine's own chat page (llama-server's, on the
 // engine's port). That page keeps its API key in its own origin's storage,
-// which this page cannot write, so the key is shown here to paste once.
+// which this page cannot write, so the title bar copies it to paste once.
 let ENGINE_UP = false;
 let CHAT = null;        // { host, port, key } from api/chat
 let chatShown = "";     // the URL the frame was loaded with, while it is up
 async function showChat() {
-  if (!CHAT) {
-    try { CHAT = await (await fetch("api/chat", { cache: "no-store" })).json(); } catch (e) { return; }
-    $("chat-key").value = CHAT.key || "";
-  }
+  if (!(await loadChat())) return;
   // A wildcard bind is reached the way this page was; anything else by name.
   const wild = CHAT.host === "0.0.0.0" || CHAT.host === "::";
   const url = `http://${wild ? location.hostname : CHAT.host}:${CHAT.port}/`;
@@ -910,25 +1156,25 @@ async function showChat() {
     chatShown = url;
   }
 }
-$("chat-show").onclick = () => {
-  const input = $("chat-key"), hidden = input.type === "password";
-  input.type = hidden ? "text" : "password";
-  $("chat-show").textContent = hidden ? "Hide" : "Show";
-};
-$("chat-copy").onclick = async () => {
-  const input = $("chat-key");
+// Copy text, and say so on the button. The async clipboard exists only on a
+// secure origin - a phone reaching the console over the LAN has plain http -
+// so the fallback copies from a textarea made for it.
+async function copyText(text, button, label) {
   let copied = false;
-  try { await navigator.clipboard.writeText(input.value); copied = true; } catch (e) {
-    // No async clipboard (an insecure origin, an older webview): select it.
-    const type = input.type;
-    input.type = "text";
-    input.select();
+  try { await navigator.clipboard.writeText(text); copied = true; } catch (e) {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+    document.body.appendChild(area);
+    area.select();
     try { copied = document.execCommand("copy"); } catch (err) { copied = false; }
-    input.type = type;
+    area.remove();
   }
-  $("chat-copy").textContent = copied ? "Copied" : "Select and copy it";
-  setTimeout(() => { $("chat-copy").textContent = "Copy key"; }, 2000);
-};
+  button.textContent = copied ? "Copied" : "Copy failed";
+  setTimeout(() => { button.textContent = label; }, 2000);
+}
+$("chat-copy").onclick = async () => { if (await loadChat()) copyText(CHAT.key || "", $("chat-copy"), "Copy API key"); };
 
 document.querySelectorAll("#control .btn").forEach((b) => b.onclick = async () => {
   b.disabled = true;
@@ -954,7 +1200,7 @@ showTab(location.hash.slice(1) || "results");
 // Every 5 s, and every 1.5 s while a job runs so its bar moves; never two
 // polls at once. A poll asked for while one runs (a button's follow-up)
 // runs once more right after it, so answers are applied in order.
-let polling = false, pollAgain = false, jobRunning = false;
+let polling = false, pollAgain = false, jobRunning = false, jobWasRunning = false;
 async function pollLive() {
   if (polling) { pollAgain = true; return; }
   polling = true;

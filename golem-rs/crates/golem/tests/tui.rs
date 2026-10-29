@@ -81,6 +81,7 @@ fn populated() -> App {
         engine: "llama.cpp".to_string(),
         web_up: true,
         console_port: 8787,
+        api_port: 8000,
     });
     app.set_models(vec![
         model("ornith-1.5-35b", "coder", true, true, Some("63.8")),
