@@ -751,23 +751,24 @@ function settingRow(s) {
   return `<form class="set-row" data-key="${esc(s.key)}">
     <label for="${id}">${esc(s.label)} <span class="flags">${esc(s.key)}</span></label>
     <span class="help">${esc(s.help)} <span class="chip">${esc(APPLIES[s.applies] || s.applies)}</span></span>
-    <div class="field">${field}<small aria-live="polite"></small></div>
-    <div class="acts"><button class="btn" type="submit">Save</button></div></form>`;
+    <div class="field">${field}</div>
+    <div class="acts"><button class="btn" type="submit">Save</button></div>
+    <small class="note" aria-live="polite"></small></form>`;
 }
 async function saveSetting(form) {
-  const key = form.dataset.key, input = form.querySelector("[name=value]"), note = form.querySelector("small"), btn = form.querySelector("button");
+  const key = form.dataset.key, input = form.querySelector("[name=value]"), note = form.querySelector(".note"), btn = form.querySelector("button");
   // An empty secret field is one nobody typed in, not a request to clear it.
-  if (input.type === "password" && !input.value) { note.className = "bad"; note.textContent = "Type the token to save it."; return; }
+  if (input.type === "password" && !input.value) { note.className = "note bad"; note.textContent = "Type the token to save it."; return; }
   btn.disabled = true;
-  note.className = ""; note.textContent = "Saving...";
+  note.className = "note"; note.textContent = "Saving...";
   try {
     const r = await post("api/settings", `key=${encodeURIComponent(key)}&value=${encodeURIComponent(input.value)}`);
     if (r.ok) {
       const a = await r.json();
-      note.className = "ok"; note.textContent = `Saved - ${APPLIES[a.applies] || a.applies}.`;
+      note.className = "note ok"; note.textContent = `Saved - ${APPLIES[a.applies] || a.applies}.`;
       if (input.type === "password") { input.value = ""; input.placeholder = "set - type to replace"; }
-    } else { note.className = "bad"; note.textContent = (await r.text()).trim() || `Refused (HTTP ${r.status})`; }
-  } catch (e) { note.className = "bad"; note.textContent = "The service did not answer."; }
+    } else { note.className = "note bad"; note.textContent = (await r.text()).trim() || `Refused (HTTP ${r.status})`; }
+  } catch (e) { note.className = "note bad"; note.textContent = "The service did not answer."; }
   btn.disabled = false;
 }
 
