@@ -114,8 +114,16 @@ file with search, recover from a tool error, two independent calls in one turn.
   prefill, and only the suite can say what it costs in solved tasks. The same holds for
   the KV cache's quantization and for `--image-min-tokens 1024`, which the engine
   recommends for Qwen-VL grounding.
-- **Done when:** the 35B and the 9B are measured on the eleven tasks on the reference box,
-  and the floor is one both adopted models pass.
+- **Measured** on the reference box, 2026-10-29 evening, busy desktop: the 9B and the
+  35B both solve 10 of 11 on both APIs with no malformed call, both over the 75% floor.
+  Both miss the rename past a built name, differently: the 9B renames every `get_user`
+  it finds and leaves the dispatch broken after 8 turns; the 35B, in 4 turns, leaves a
+  `get_user` in `users.py` - by its turn count a compatibility alias, which keeps the
+  dispatch working and is not the rename asked for. The 35B solves the eleven in
+  309-341 s and 186K prompt tokens per API, the 9B in 413-421 s and 210K: on the same
+  work the 35B is quicker and leaner.
+- **Next:** the suite keeps each failed task's final files, so a miss can be read rather
+  than inferred; `--task` reruns one task. Then the first questions above.
 
 ## 3. Discovery: fit before download, rank by local results
 
