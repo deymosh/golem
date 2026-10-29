@@ -881,7 +881,9 @@ fn log_api(home: &Path, line: &str) {
         let _ = std::fs::create_dir_all(dir);
     }
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{} {line}", golem_core::time::now_iso());
+        // One write per line: connections log from their own threads, and
+        // `writeln!` on a file writes each piece apart.
+        let _ = file.write_all(format!("{} {line}\n", golem_core::time::now_iso()).as_bytes());
     }
 }
 
@@ -903,7 +905,7 @@ fn log_call(home: &Path, label: &str) {
         let _ = std::fs::create_dir_all(dir);
     }
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{} {label}", golem_core::time::now_iso());
+        let _ = file.write_all(format!("{} {label}\n", golem_core::time::now_iso()).as_bytes());
     }
 }
 
