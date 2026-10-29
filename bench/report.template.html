@@ -52,7 +52,9 @@ button, select, input { font: inherit; color: inherit; }
 .tabs a[aria-current="page"] { background: var(--raised); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / .08); }
 .right { display: flex; align-items: center; justify-content: flex-end; gap: 14px; min-width: 0; height: 100%;
   padding-right: max(14px, env(safe-area-inset-right, 0px)); }
-.state { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--soft); white-space: nowrap; overflow: hidden; }
+/* Padded so the serving dot's ring is not cut by the clip that ellipsizes
+   the text. */
+.state { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--soft); white-space: nowrap; overflow: hidden; padding-left: 4px; min-width: 0; }
 .state i { width: 8px; height: 8px; border-radius: 50%; background: var(--soft); flex: none; }
 .state.up i { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
 .state.busy i { background: var(--busy); }
@@ -134,7 +136,7 @@ main:has(#tab-chat:not([hidden])) > * { max-width: none; }
 #tab-chat > .surface { border: 0; border-radius: 0; background: var(--ground); }
 #chat-frame { background: var(--ground); border-top: 0; }
 #chat-msg { margin: auto; border: 0; text-align: center; padding: 40px 18px; }
-.chat-tools { display: flex; gap: 2px; }
+.chat-tools { display: flex; align-items: center; gap: 2px; padding-right: 12px; border-right: 1px solid var(--hair); flex: none; }
 .chat-tools[hidden] { display: none; }
 .chat-tools .btn { padding: 4px 9px; }
 @media (max-width: 620px) { #chat-open { display: none; } }
