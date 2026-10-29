@@ -207,6 +207,15 @@ pub fn run_with(home: &Path, args: &[String], out: &mut dyn Write, progress: boo
         }
     }
     let _ = writeln!(out, "[ OK ] warmup done");
+    // A router that had another model resident knew nothing of this one
+    // before the warmup loaded it: the identity is read again, now.
+    if props_string(&props, "model_path").is_none() {
+        let props = parse_body(&get_body(&base, &format!("/props?model={model}"), PROPS_TIMEOUT));
+        if let Some(path) = props_string(&props, "model_path") {
+            let _ = writeln!(out, "model_path : {path} (once loaded)");
+            let _ = writeln!(out, "n_ctx      : {}", props_number(&props, "n_ctx").unwrap_or_else(|| "?".to_string()));
+        }
+    }
 
     let answer = sanity_answer(&base, &model);
     let _ = writeln!(out, "answer: {answer}");
