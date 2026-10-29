@@ -120,7 +120,15 @@ const UPDATE_CHECK_POLL: Duration = Duration::from_secs(60 * 60);
 pub struct Endpoint {
     pub port: u16,
     pub token: String,
+    /// Started in the background by a golem client ([`BACKGROUND`]), not
+    /// in a terminal or a container that watches it.
+    pub background: bool,
 }
+
+/// Set by the clients that start a service in the background: a service
+/// with it was not typed by anyone, so the window may restart it as its own
+/// child ([`ensure_running_as_child`]).
+const BACKGROUND: &str = "GOLEM_SERVICE_BACKGROUND";
 
 impl Endpoint {
     /// `.local/golem-service.json` under the home.
@@ -139,6 +147,8 @@ impl Endpoint {
         Some(Endpoint {
             port: value.get("port")?.as_f64()? as u16,
             token: value.get("token")?.as_str()?.to_string(),
+            // An older service writes no flag: never taken over.
+            background: value.get("background").and_then(json::Value::as_bool).unwrap_or(false),
         })
     }
 
@@ -150,7 +160,12 @@ impl Endpoint {
         }
         std::fs::write(
             &path,
-            format!("{{\"port\":{},\"token\":{}}}\n", endpoint.port, json::quote(&endpoint.token)),
+            format!(
+                "{{\"port\":{},\"token\":{},\"background\":{}}}\n",
+                endpoint.port,
+                json::quote(&endpoint.token),
+                endpoint.background
+            ),
         )
     }
 
@@ -252,8 +267,38 @@ pub fn ensure_running(home: &Path, out: &mut dyn Write) -> Result<(), String> {
 /// inherit, and a service started under it (with the engine under that) is
 /// what lets Task Manager list the three as one app, Golem, rather than the
 /// engine as a program of its own. The service still outlives the window.
+///
+/// Task Manager groups by parent, so a service the window did not start -
+/// one `golem up` started, or one an earlier window left behind - sits
+/// outside the group. When golem started it in the background and it has
+/// nothing to lose, no engine and no console job, the window stops it and
+/// starts its own. One with a model loaded stays where it is: a regroup is
+/// not worth unloading a model for.
 pub fn ensure_running_as_child(home: &Path, out: &mut dyn Write) -> Result<(), String> {
+    if running(home) && idle_in_background(home) {
+        let _ = send(home, "shutdown", &Overrides::default(), &mut std::io::sink());
+        let deadline = Instant::now() + START_DEADLINE;
+        while running(home) && Instant::now() < deadline {
+            std::thread::sleep(START_POLL);
+        }
+    }
     start(home, true, out)
+}
+
+/// Whether the running service was started in the background and has
+/// nothing a stop would cost: no engine answering on its port (a loading
+/// one answers too) and no job in the console. A console that does not
+/// answer counts as busy.
+fn idle_in_background(home: &Path) -> bool {
+    if !Endpoint::read(home).is_some_and(|endpoint| endpoint.background) {
+        return false;
+    }
+    if engine::get(&engine::Endpoint::from_home(home), "/health").is_some() {
+        return false;
+    }
+    let console = engine::Endpoint { port: crate::desktop::console_port(home), api_key: String::new() };
+    let Some((200, body)) = engine::get(&console, "/api/state") else { return false };
+    json::parse(&body).ok().and_then(|state| state.get("job_running").and_then(json::Value::as_bool)) == Some(false)
 }
 
 fn start(home: &Path, as_child: bool, out: &mut dyn Write) -> Result<(), String> {
@@ -313,6 +358,7 @@ fn start_without_handles(exe: &Path, home: &Path) -> Option<u32> {
         .args(["-NoProfile", "-NonInteractive", "-Command", START_SCRIPT])
         .env("GOLEM_SERVICE_EXE", exe)
         .env("GOLEM_HOME", home)
+        .env(BACKGROUND, "1")
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     for key in crate::config::OVERRIDABLE {
@@ -344,6 +390,7 @@ fn spawn_command(exe: &Path, home: &Path) -> std::process::Command {
     command
         .arg("service")
         .env("GOLEM_HOME", home)
+        .env(BACKGROUND, "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -504,7 +551,8 @@ fn serve(home: &Path, start_now: bool) -> i32 {
     // service is up, a client may use either straight away.
     start_api(home);
     start_console(home);
-    let endpoint = Endpoint { port, token: new_token() };
+    let background = std::env::var_os(BACKGROUND).is_some();
+    let endpoint = Endpoint { port, token: new_token(), background };
     if let Err(e) = Endpoint::write(home, &endpoint) {
         eprintln!("[ERROR] cannot write {}: {e}", Endpoint::path(home).display());
         return 1;
@@ -922,17 +970,31 @@ mod tests {
             envs.iter().any(|(k, v)| *k == "GOLEM_HOME" && v.is_some()),
             "the home is still handed on: {envs:?}"
         );
+        assert!(
+            envs.iter().any(|(k, v)| *k == BACKGROUND && v.is_some()),
+            "the service is told it runs in the background: {envs:?}"
+        );
     }
 
     #[test]
     fn the_endpoint_round_trips_through_the_file() {
         let dir = home("endpoint");
         assert_eq!(Endpoint::read(&dir), None, "no file is no service");
-        let endpoint = Endpoint { port: 8123, token: "abc123".to_string() };
+        let endpoint = Endpoint { port: 8123, token: "abc123".to_string(), background: true };
         Endpoint::write(&dir, &endpoint).expect("write");
         assert_eq!(Endpoint::read(&dir), Some(endpoint.clone()));
         Endpoint::remove(&dir);
         assert_eq!(Endpoint::read(&dir), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_older_services_endpoint_is_not_a_background_one() {
+        // Written before the flag existed: the window must leave it running.
+        let dir = home("endpoint-old");
+        std::fs::write(Endpoint::path(&dir), "{\"port\":8123,\"token\":\"t\"}\n").expect("write");
+        assert_eq!(Endpoint::read(&dir), Some(Endpoint { port: 8123, token: "t".to_string(), background: false }));
+        assert!(!idle_in_background(&dir));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -952,7 +1014,7 @@ mod tests {
         // The endpoint names a port with nothing on it: port 1 is reserved and
         // nothing may bind it without privilege.
         let dir = home("endpoint-dead");
-        Endpoint::write(&dir, &Endpoint { port: 1, token: "t".to_string() }).expect("write");
+        Endpoint::write(&dir, &Endpoint { port: 1, token: "t".to_string(), background: false }).expect("write");
         assert!(!running(&dir), "a written endpoint is not a running service");
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -127,8 +127,17 @@ screen; with neither, the usage. golem.exe is a console program, so on Windows a
 double-click still opens a console window for a moment; `golemw.exe`, a windowed
 launcher built beside it, starts the app with none. The window starts the service as its
 own child when none is running, so the tree is `golem app` → `golem service` →
-`Golem engine (llama.cpp)`, which Task Manager lists as one app; the service outlives the
-window.
+`Golem engine (llama.cpp)`; the service outlives the window.
+
+Task Manager groups an app's processes by parent, and nothing else an unpackaged program
+can set (an AppUserModelID, a job object) changes that. So the three are one Golem entry
+only while the window that started the service is open. A service golem started in the
+background - by `golem up`, or left by a window since closed - has no parent there and is
+listed on its own; the window, when it opens, stops such a service and starts its own if
+no engine runs and no console job does, and leaves one with a model loaded alone. The
+window's WebView2 processes are listed apart, as "WebView2 Manager", on Windows 11 builds
+around 26200 for any wry or Tauri host; no WebView2 option changes it
+([WebView2Feedback #5628](https://github.com/MicrosoftEdge/WebView2Feedback/issues/5628)).
 
 Why a long-lived owner rather than an `up` that spawns and exits:
 
