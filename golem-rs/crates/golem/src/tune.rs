@@ -367,6 +367,14 @@ struct Measured {
     n_cpu_moe: String,
     passed_gate: Option<bool>,
     depth_decode: Option<f64>,
+    /// The load went over the wall and the bench stopped there: the VRAM is
+    /// a reading, the speeds were never measured (and read as 0, which is
+    /// not a spill).
+    wall_only: bool,
+    /// The card's reading right after the warmup loaded the model. Under the
+    /// end-of-bench reading by what the bench itself adds, which is what an
+    /// over-the-wall point's reading is missing.
+    after_load_mib: Option<f64>,
 }
 
 impl Measured {
@@ -419,6 +427,9 @@ struct Tuner<'a> {
     ubatch: String,
     port: u16,
     points: Vec<Measured>,
+    /// MiB per context token, measured by an earlier context search, by
+    /// [`slope_key`]: the next candidate with the same key starts from it.
+    ctx_slopes: Vec<(String, f64)>,
     /// Where the narration goes: stdout for `golem tune`, the per-preset log
     /// for the `--auto` driver. A `RefCell` so every `&self` method can write
     /// without threading a mutable borrow through the whole sweep.
@@ -552,6 +563,7 @@ impl<'a> Tuner<'a> {
             ubatch,
             port,
             points: Vec::new(),
+            ctx_slopes: Vec::new(),
             out: RefCell::new(out),
             progress: !std::io::stdout().is_terminal(),
             phase: Cell::new(Phase::Frontier),
@@ -1145,12 +1157,15 @@ impl<'a> Tuner<'a> {
         // so it records its own row, labelled with the candidate preset and
         // the note. The transcript stays beside the candidate as evidence.
         let out_file = self.cand_dir.join(format!("out-{}-{label}.txt", self.opts.target));
+        let wall = self.machine.wall_mib(self.opts.headroom_mib);
         let args = vec![
             "bench".to_string(),
             "--runs".to_string(),
             self.opts.runs.to_string(),
             "--prefill".to_string(),
             self.opts.prefill.to_string(),
+            "--wall".to_string(),
+            wall.to_string(),
         ];
         let status = proc::golem(self.home, &args)
             .and_then(|mut command| {
@@ -1163,21 +1178,31 @@ impl<'a> Tuner<'a> {
             })
             .unwrap_or(-1);
         let text = std::fs::read_to_string(&out_file).unwrap_or_default();
-        if status != 0 {
+        let over_wall = (status == crate::bench::OVER_WALL).then(|| over_wall_reading(&text)).flatten();
+        if status != 0 && over_wall.is_none() {
             self.emit(format_args!("  the bench exited {status}, skipping"));
             self.say_tail(&text, 6);
             return None;
         }
-        let Some(bench) = bench_result(&text) else {
-            // Say what the bench said. "no usable result" on its own is the
-            // kind of message that costs an afternoon: the bench's own last
-            // lines distinguish a server that is down from a bench that
-            // never got as far as measuring anything.
-            self.emit(format_args!("  no usable result, skipping - the bench said:"));
-            self.say_tail(&text, 6);
-            return None;
+        let bench = match over_wall {
+            Some(vram) => {
+                self.emit(format_args!("  {engine:<14} {label:<12} over the wall once loaded: {vram:.0} MiB (wall {wall}), not benched"));
+                evalparse::Bench { decode_median: Some(0.0), vram_mib: Some(vram), prefill: Some(0.0), ..evalparse::Bench::default() }
+            }
+            None => match bench_result(&text) {
+                Some(bench) => bench,
+                None => {
+                    // Say what the bench said. "no usable result" on its own
+                    // is the kind of message that costs an afternoon: the
+                    // bench's own last lines distinguish a server that is
+                    // down from a bench that never got as far as measuring.
+                    self.emit(format_args!("  no usable result, skipping - the bench said:"));
+                    self.say_tail(&text, 6);
+                    return None;
+                }
+            },
         };
-        let (Some(decode), Some(vram)) = (bench.decode_median, bench.vram_mib) else {
+        let (Some(decode), Some(vram))= (bench.decode_median, bench.vram_mib) else {
             self.emit(format_args!("  no usable result, skipping - the bench said:"));
             self.say_tail(&text, 6);
             return None;
@@ -1204,9 +1229,11 @@ impl<'a> Tuner<'a> {
             .parse()
             .unwrap_or(0);
 
-        self.emit(format_args!(
-            "  {engine:<14} {label:<12} decode {decode:>6.1} t/s  prefill {prefill:>6.0} t/s  vram {vram:>5.0} MiB"
-        ));
+        if over_wall.is_none() {
+            self.emit(format_args!(
+                "  {engine:<14} {label:<12} decode {decode:>6.1} t/s  prefill {prefill:>6.0} t/s  vram {vram:>5.0} MiB"
+            ));
+        }
         self.points.push(Measured {
             engine: engine.to_string(),
             label: label.to_string(),
@@ -1219,6 +1246,8 @@ impl<'a> Tuner<'a> {
             n_cpu_moe,
             passed_gate: None,
             depth_decode: None,
+            wall_only: over_wall.is_some(),
+            after_load_mib: after_load_reading(&text),
         });
         Some(())
     }
@@ -1523,12 +1552,23 @@ impl<'a> Tuner<'a> {
         // The winner's own measurement is the line's first point: the search
         // holds it from the start (see `ContextSearch`).
         let seed = &self.points[candidate];
+        // What a bench adds to the card over the load alone, from the seed's
+        // two readings: an over-the-wall probe was read after its load, and
+        // without this it would sit low on the line, flatten the slope and
+        // send the next prediction over the wall again.
+        let bench_adds = seed.after_load_mib.map_or(0.0, |after| (seed.vram_mib - after).max(0.0));
+        let key = slope_key(&engine, seed.ubatch, &overrides);
+        let known = self.ctx_slopes.iter().find(|(k, _)| *k == key).map(|(_, s)| *s);
         let mut search = ContextSearch::new(
             seed.ctx,
             seed.vram_mib as u64,
             self.machine.wall_mib(self.opts.headroom_mib),
             self.ctx_ceiling,
-        );
+        )
+        .with_slope(known);
+        if let Some(slope) = known {
+            self.emit(format_args!("  context slope known from an earlier candidate: {:.1} KiB per token", slope * 1024.0));
+        }
         let mut best = candidate;
         while let Rung::Grow(next) = search.next() {
             let mut with_ctx = overrides.clone();
@@ -1539,18 +1579,28 @@ impl<'a> Tuner<'a> {
             }
             let measured = self.points.len() - 1;
             let (vram, decode) = (self.points[measured].vram_mib, self.points[measured].decode);
-            match search.record(next, vram as u64, decode < self.opts.floor.decode) {
+            let wall_only = self.points[measured].wall_only;
+            let under_floor = !wall_only && decode < self.opts.floor.decode;
+            let on_line = if wall_only { vram + bench_adds } else { vram };
+            match search.record(next, on_line as u64, under_floor) {
                 Probe::Fits => {
                     best = measured;
                     self.emit(format_args!(
                         "  context grows to {next} ({decode:.1} t/s decode, {vram:.0} MiB VRAM)"
                     ));
                 }
+                _ if self.points[measured].wall_only => {
+                    self.emit(format_args!("  context {next} does not fit ({vram:.0} MiB VRAM once loaded, over the wall)"))
+                }
                 probe => self.emit(format_args!(
                     "  context {next} does not fit ({decode:.1} t/s decode, {vram:.0} MiB VRAM{})",
                     if matches!(probe, Probe::UnderFloor { .. }) { ", spilled" } else { ", over the wall" }
                 )),
             }
+        }
+        if let Some(slope) = search.measured_slope() {
+            self.ctx_slopes.retain(|(k, _)| *k != key);
+            self.ctx_slopes.push((key, slope));
         }
         if best != candidate {
             self.emit(format_args!("[ .. ] context maximized: {engine} now serves {} tokens", self.points[best].ctx));
@@ -1633,7 +1683,7 @@ impl<'a> Tuner<'a> {
             .points
             .iter()
             .filter(|p| p.engine == engine)
-            .map(|p| format!("{}={:.1} ", p.label, p.decode))
+            .map(|p| if p.wall_only { format!("{}=over-the-wall ", p.label) } else { format!("{}={:.1} ", p.label, p.decode) })
             .collect();
         let mut overlay = String::new();
         overlay.push_str(&format!("; Auto-tuned by golem tune on {} for this machine.\n", time::now_iso()));
@@ -1762,6 +1812,13 @@ impl<'a> Tuner<'a> {
         ));
         text.push_str("\nall points:\n");
         for p in &self.points {
+            if p.wall_only {
+                text.push_str(&format!(
+                    "  {:<14} {:<12} over the wall once loaded, not benched  {:>5.0} MiB\n",
+                    p.engine, p.label, p.vram_mib
+                ));
+                continue;
+            }
             text.push_str(&format!(
                 "  {:<14} {:<12} {:>6.1} t/s decode  {:>6.0} t/s prefill  {:>5.0} MiB\n",
                 p.engine, p.label, p.decode, p.prefill, p.vram_mib
@@ -1868,6 +1925,32 @@ fn layer_names(pattern: &str) -> std::collections::BTreeSet<String> {
     out
 }
 
+/// The VRAM reading of a bench that stopped over the wall (`OVER_WALL
+/// vram=11500MiB`).
+fn over_wall_reading(text: &str) -> Option<f64> {
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("OVER_WALL vram="))
+        .and_then(|v| v.trim_end_matches("MiB").parse().ok())
+}
+
+/// The bench's reading right after the load (`vram after the load: 10956
+/// MiB (wall ...)`).
+fn after_load_reading(text: &str) -> Option<f64> {
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("vram after the load: "))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|v| v.parse().ok())
+}
+
+/// What makes two context searches share a slope: the engine, the
+/// `ubatch-size` (the compute buffers) and the drafting (an MTP head keeps a
+/// KV cache of its own). The split does not enter: the KV cache is on the
+/// card whatever the split.
+fn slope_key(engine: &str, ubatch: u32, overrides: &[Entry]) -> String {
+    let spec = overrides.iter().rev().find(|e| e.key == "spec-type").map_or("preset", |e| e.value.as_str());
+    format!("{engine}|ub{ubatch}|{spec}")
+}
+
 /// The bench's own RESULT line, out of everything the run printed.
 fn bench_result(text: &str) -> Option<evalparse::Bench> {
     text.lines()
@@ -1879,6 +1962,17 @@ fn bench_result(text: &str) -> Option<evalparse::Bench> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bench_says_its_two_readings() {
+        let over = "vram after the load: 11442 MiB (wall 11264 MiB)\nOVER_WALL vram=11442MiB\n";
+        assert_eq!(over_wall_reading(over), Some(11442.0));
+        assert_eq!(after_load_reading(over), Some(11442.0));
+        let full = "vram after the load: 10956 MiB (wall 11264 MiB)\n\nRESULT decode_best=57.3 vram=11028MiB\n";
+        assert_eq!(over_wall_reading(full), None);
+        assert_eq!(after_load_reading(full), Some(10956.0));
+        assert_eq!(after_load_reading("RESULT decode_best=1"), None);
+    }
 
     #[test]
     fn a_sweep_candidate_uses_mmap_and_the_overlay_does_not() {
@@ -2024,6 +2118,7 @@ mod tests {
             ubatch: String::new(),
             port: 8000,
             points: Vec::new(),
+            ctx_slopes: Vec::new(),
             out: RefCell::new(Box::new(std::io::sink())),
             progress: false,
             phase: Cell::new(Phase::Frontier),

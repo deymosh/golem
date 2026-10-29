@@ -466,9 +466,13 @@ pub fn next_predicted(fits: &[(u64, u64)], wall_mib: u64, ceiling: u64, last: &P
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContextSearch {
     fits: Vec<(u64, u64)>,
+    /// Probes that loaded and went over the wall: real points of the line
+    /// too, for [`ContextSearch::measured_slope`].
+    over: Vec<(u64, u64)>,
     probe: Probe,
     wall_mib: u64,
     ceiling: u64,
+    slope: Option<f64>,
 }
 
 impl ContextSearch {
@@ -478,12 +482,36 @@ impl ContextSearch {
     /// to grow into - so the search starts with nothing and stops at once.
     pub fn new(seed_ctx: u64, seed_vram_mib: u64, wall_mib: u64, ceiling: u64) -> ContextSearch {
         let fits = if seed_vram_mib <= wall_mib { vec![(seed_ctx, seed_vram_mib)] } else { Vec::new() };
-        ContextSearch { fits, probe: Probe::None, wall_mib, ceiling: ceiling.max(seed_ctx) }
+        ContextSearch { fits, over: Vec::new(), probe: Probe::None, wall_mib, ceiling: ceiling.max(seed_ctx), slope: None }
+    }
+
+    /// What one more context token costs, already measured on another
+    /// candidate of the same model, `ubatch-size` and drafting: the KV
+    /// cache is the same per token whatever the split, so the seed alone
+    /// fixes the line, and the doubling that would measure its slope again
+    /// - a whole model load - is not spent.
+    pub fn with_slope(mut self, per_token_mib: Option<f64>) -> ContextSearch {
+        self.slope = per_token_mib.filter(|s| *s > 0.0);
+        self
     }
 
     /// The context to measure next.
     pub fn next(&self) -> Rung {
+        if let (Some(per_token_mib), [(ctx, vram)], Probe::None | Probe::Fits) = (self.slope, self.fits.as_slice(), &self.probe) {
+            let fit = Fit { base_mib: *vram as f64 - per_token_mib * *ctx as f64, per_token_mib };
+            return predict(Some(fit), *ctx, self.wall_mib, self.ceiling);
+        }
         next_predicted(&self.fits, self.wall_mib, self.ceiling, &self.probe)
+    }
+
+    /// The slope this search measured: through its lowest and highest real
+    /// points, fits and over-the-wall probes alike, the widest span and so
+    /// the least noise. `None` when it has fewer than two.
+    pub fn measured_slope(&self) -> Option<f64> {
+        let points: Vec<(u64, u64)> = self.fits.iter().chain(&self.over).copied().collect();
+        let low = points.iter().min_by_key(|(ctx, _)| *ctx)?;
+        let high = points.iter().max_by_key(|(ctx, _)| *ctx)?;
+        Fit::from_points(low.0, low.1, high.0, high.1).map(|f| f.per_token_mib).filter(|s| *s > 0.0)
     }
 
     /// What measuring `ctx` showed. `under_floor` is the decode floor's
@@ -496,6 +524,7 @@ impl ContextSearch {
         self.probe = if under_floor {
             Probe::UnderFloor { attempt: ctx }
         } else if vram_mib > self.wall_mib {
+            self.over.push((ctx, vram_mib));
             Probe::OverWall { attempt: ctx, vram_mib }
         } else {
             self.fits.push((ctx, vram_mib));
@@ -825,6 +854,47 @@ mod tests {
     }
 
     // ---- the context prediction -----------------------------------------
+
+    #[test]
+    fn a_slope_measured_on_one_candidate_spares_the_next_its_doubling() {
+        // Flint on the reference box, 2026-10-28, ubatch 2048, wall 11264:
+        // n-cpu-moe 25 measured 32768 at 10883 and 65536 over the wall at
+        // 11483, then fit 53248 at 11247.
+        let wall = 11264;
+        let mut first = ContextSearch::new(32768, 10883, wall, 131072);
+        assert_eq!(first.next(), Rung::Grow(65536), "no slope yet: the doubling");
+        first.record(65536, 11483, false);
+        assert_eq!(first.next(), Rung::Grow(53248));
+        first.record(53248, 11247, false);
+        let slope = first.measured_slope().expect("three real points");
+        assert!((slope - 600.0 / 32768.0).abs() < 1e-9, "the widest span: {slope}");
+
+        // n-cpu-moe 27 started from 32768 at 10193 and spent 65536 (10796),
+        // 90112 (11300, over) and 88064 (11260) on its line. With the slope
+        // it predicts straight past the doubling (the reading at 91136 is
+        // the measured line's through 90112).
+        let mut second = ContextSearch::new(32768, 10193, wall, 131072).with_slope(Some(slope));
+        assert_eq!(second.next(), Rung::Grow(91136));
+        second.record(91136, 11320, false);
+        assert_eq!(second.next(), Rung::Grow(88064), "two real points now: the measured line");
+        second.record(88064, 11260, false);
+        assert_eq!(second.next(), Rung::Stop);
+
+        // The 35B, 2026-10-29: the seed 236544 at 11028 MiB (10956 once
+        // loaded, so the bench adds 72), and 262144 over the wall read once
+        // loaded at 11442. Taken as read, the line predicts 250880, over the
+        // wall again; with the bench's 72 added it predicts what fits.
+        let mut raw = ContextSearch::new(236544, 11028, 11264, 262144);
+        raw.record(262144, 11442, false);
+        assert_eq!(raw.next(), Rung::Grow(250880));
+        let mut corrected = ContextSearch::new(236544, 11028, 11264, 262144);
+        corrected.record(262144, 11442 + 72, false);
+        assert_eq!(corrected.next(), Rung::Grow(248832));
+
+        // A slope that is no slope is ignored.
+        let none = ContextSearch::new(32768, 10193, wall, 131072).with_slope(Some(0.0));
+        assert_eq!(none.next(), Rung::Grow(65536));
+    }
 
     /// A fit whose slope is the reference box's own: ~12.7 KB per context
     /// token at q8_0 KV, which is ~0.0121 MiB.

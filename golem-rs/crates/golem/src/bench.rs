@@ -113,6 +113,21 @@ fn run_with(
         }
     }
 
+    // The warmup loaded the model, and the card holds the weights, the KV
+    // cache and the compute buffers from here on: a reading over the wall
+    // now is over the wall at the end, and the speeds of a setup that does
+    // not fit are not worth the decode runs and the prefill.
+    if let Some(wall) = options.wall {
+        let used = vram().and_then(|v| v.parse::<u64>().ok());
+        if let Some(used) = used {
+            let _ = writeln!(out, "vram after the load: {used} MiB (wall {wall} MiB)");
+            if used > u64::from(wall) {
+                let _ = writeln!(out, "OVER_WALL vram={used}MiB");
+                return OVER_WALL;
+            }
+        }
+    }
+
     // ------------------------------------------------------------
     // Decode
     // ------------------------------------------------------------
@@ -212,14 +227,20 @@ fn run_with(
 struct Options {
     runs: u32,
     prefill: u32,
+    /// The tuner's VRAM wall in MiB: a load over it stops the bench.
+    wall: Option<u32>,
 }
 
-/// `--runs N` and `--prefill TOKENS`, in either order.
+/// The exit code of a bench whose load went over `--wall`: no row, and the
+/// reading on its `OVER_WALL` line.
+pub const OVER_WALL: i32 = 3;
+
+/// `--runs N`, `--prefill TOKENS` and `--wall MIB`, in any order.
 ///
 /// Anything else is `unknown arg: <arg>` and exit 1, as is a flag with a
 /// missing or non-numeric value.
 fn parse_args(args: &[String]) -> Result<Options, String> {
-    let mut options = Options { runs: DEFAULT_RUNS, prefill: DEFAULT_PREFILL };
+    let mut options = Options { runs: DEFAULT_RUNS, prefill: DEFAULT_PREFILL, wall: None };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -229,6 +250,10 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             }
             "--prefill" => {
                 options.prefill = number(args, i, "--prefill")?;
+                i += 2;
+            }
+            "--wall" => {
+                options.wall = Some(number(args, i, "--wall")?);
                 i += 2;
             }
             other => return Err(format!("unknown arg: {other}")),
@@ -523,6 +548,19 @@ mod tests {
     }
 
     #[test]
+    fn a_load_over_the_wall_stops_after_the_warmup() {
+        // Health and warmup only: a decode request would find no answer.
+        let port = serve(vec!["{}".to_string(), "{}".to_string()]);
+        let dir = home("overwall", port);
+        let args: Vec<String> = ["--wall", "11264"].iter().map(|s| s.to_string()).collect();
+        let (status, text) = run_out(&dir, &args, &|| Some("11500".to_string()));
+        assert_eq!(status, OVER_WALL);
+        assert!(text.ends_with("vram after the load: 11500 MiB (wall 11264 MiB)\nOVER_WALL vram=11500MiB\n"), "{text}");
+        assert!(!text.contains("decode:"), "{text}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn an_unknown_argument_is_refused() {
         // No server: the command line is refused before anything is asked.
         let dir = home("unknown-arg", 1);
@@ -602,14 +640,14 @@ mod tests {
     }
 
     #[test]
-    fn the_command_line_takes_two_flags_in_either_order() {
+    fn the_command_line_takes_its_flags_in_any_order() {
         let empty: [String; 0] = [];
-        assert_eq!(parse_args(&empty), Ok(Options { runs: 3, prefill: 30000 }));
-        let both: Vec<String> = ["--runs", "5", "--prefill", "0"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(parse_args(&both), Ok(Options { runs: 5, prefill: 0 }));
+        assert_eq!(parse_args(&empty), Ok(Options { runs: 3, prefill: 30000, wall: None }));
+        let both: Vec<String> = ["--runs", "5", "--prefill", "0", "--wall", "11264"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(parse_args(&both), Ok(Options { runs: 5, prefill: 0, wall: Some(11264) }));
         // Reversed, and a flag it refuses.
         let reversed: Vec<String> = ["--prefill", "100", "--runs", "2"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(parse_args(&reversed), Ok(Options { runs: 2, prefill: 100 }));
+        assert_eq!(parse_args(&reversed), Ok(Options { runs: 2, prefill: 100, wall: None }));
         let bad = vec!["--nope".to_string()];
         assert_eq!(parse_args(&bad), Err("unknown arg: --nope".to_string()));
     }

@@ -13,9 +13,17 @@ golem tune <preset> --dry-run        # the plan, and what it would spend
 ```
 
 Every point is a full model load and a restart - for the default coder a 20 GB read on a
-32 GB box - so the tuner's design is about spending as few of them as possible. Run it on a
-free desktop: the numbers mean nothing next to a game or a download, and the box needs its
-RAM.
+32 GB box - so the tuner's design is about spending as few of them as possible, and as
+little bench inside each as the decision needs. Run it on a free desktop: the numbers mean
+nothing next to a game or a download, and the box needs its RAM.
+
+A point is benched with the wall in hand (`bench --wall`): the warmup loads the model, and
+from then on the card holds its weights, KV cache and compute buffers, so a reading over the
+wall after the warmup is over the wall at the end. Such a point stops there - its VRAM is
+the measurement, its speeds are never taken - and is excluded like any point over the wall;
+it records no row in `bench/results.jsonl`, and `winner.txt` lists it as "over the wall
+once loaded". The splits past the frontier and the context probes that overshoot are most
+of these.
 
 ## The floors
 
@@ -75,8 +83,11 @@ and put back after the run on the configuration as it then stands.
    trained context) gives the second; from there the largest context under the wall is
    arithmetic, rounded down to 1024 tokens so a re-fit does not chase a reading's few MiB
    of noise, and one load confirms it. Two to three loads where the doubling ladder took
-   four or five. `TUNE_CTX_POLICY = "ladder"` or `--ctx-ladder` keeps the old ladder for a
-   paired comparison; `--ctx N` pins a context.
+   four or five. The slope is what the KV cache costs per token, the same for every split
+   of one model at one `ubatch-size` and drafting, so a later candidate with the same three
+   starts from the slope an earlier one measured and predicts from its own point alone: the
+   doubling is spent once per run, not once per candidate. `TUNE_CTX_POLICY = "ladder"` or
+   `--ctx-ladder` keeps the old ladder for a paired comparison; `--ctx N` pins a context.
    A candidate whose grown context cannot hold the gate - `GATE_TOKENS` at 90%, 223232
    tokens for 200000, or the trained context when that is smaller - is passed over for the
    next-ranked one, however fast it was: on a 12 GB card Ornith-1.5-9B with MTP stops at
