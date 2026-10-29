@@ -948,6 +948,273 @@ pub fn openai_final(mut last: Value, shown: &str, completion_tokens: u64) -> Val
     last
 }
 
+// ---------------------------------------------------------------
+// The Responses API
+// ---------------------------------------------------------------
+
+/// Golem's tools in the Responses shape: a flat function tool.
+pub fn responses_tools() -> Vec<Value> {
+    [(SEARCH_TOOL, SEARCH_DESCRIPTION, search_schema()), (FETCH_TOOL, FETCH_DESCRIPTION, fetch_schema())]
+        .into_iter()
+        .map(|(name, description, schema)| {
+            Value::object(vec![
+                ("type", Value::str("function")),
+                ("name", Value::str(name)),
+                ("description", Value::str(description)),
+                ("parameters", schema),
+            ])
+        })
+        .collect()
+}
+
+/// A Responses request (`/v1/responses`) made ready: OpenAI's hosted
+/// `web_search` tool - what Codex sends for its search - taken out, golem's
+/// search standing in for it with its allowed domains honoured, and golem's
+/// tools added when the tool choice leaves the model free to call them.
+pub fn prepare_responses(mut body: Value, enabled: bool) -> Prepared {
+    let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let mut server_search = None;
+    let mut tools: Vec<Value> = Vec::new();
+    for tool in body.get("tools").and_then(Value::as_array).cloned().unwrap_or_default() {
+        let kind = tool.get("type").and_then(Value::as_str).unwrap_or("");
+        if kind.starts_with("web_search") {
+            server_search = Some(ServerSearch {
+                max_uses: None,
+                allowed_domains: domains(tool.get("filters").and_then(|f| f.get("allowed_domains"))),
+                blocked_domains: Vec::new(),
+            });
+            continue;
+        }
+        if is_golem_tool(tool.get("name").and_then(Value::as_str).unwrap_or("")) {
+            continue;
+        }
+        tools.push(tool);
+    }
+    let choice = body.get("tool_choice").cloned();
+    let free = match &choice {
+        None => true,
+        Some(Value::String(choice)) => choice == "auto",
+        Some(_) => false,
+    };
+    let own = golem_tools_wanted(&tools, |t| t.get("name"));
+    let tools_added = enabled && free && !own.is_empty();
+    if tools_added {
+        tools.extend(responses_tools().into_iter().filter(|t| own.iter().any(|n| t.get("name").and_then(Value::as_str) == Some(n))));
+    }
+    if tools.is_empty() {
+        body.remove("tools");
+        if choice.as_ref().and_then(Value::as_str) != Some("none") {
+            body.remove("tool_choice");
+        }
+    } else {
+        body.set("tools", Value::Array(tools));
+    }
+    if let Some(Value::Array(input)) = body.get("input").cloned() {
+        body.set("input", Value::Array(responses_history(input)));
+    }
+    Prepared { body, stream, tools_added, server_search, max_calls: MAX_CALLS }
+}
+
+/// A Responses history as the engine reads it. Clients send items the API
+/// allows and the engine (llama.cpp b11379) refuses with a 400: a message
+/// with a `role` and no `type`, a reasoning item that carries only its
+/// summary, and an `item_reference`. A message gets its type, a reasoning
+/// item its summary as its content (or is left out with none), and a
+/// reference - to state the engine does not keep - is left out.
+fn responses_history(input: Vec<Value>) -> Vec<Value> {
+    let mut out = Vec::with_capacity(input.len());
+    for mut item in input {
+        match item.get("type").and_then(Value::as_str) {
+            None if item.get("role").is_some() => item.set("type", Value::str("message")),
+            Some("item_reference") => continue,
+            Some("reasoning") => {
+                let has_content = item.get("content").and_then(Value::as_array).is_some_and(|c| !c.is_empty());
+                if !has_content {
+                    let texts: Vec<Value> = item
+                        .get("summary")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|s| s.get("text").and_then(Value::as_str))
+                        .filter(|t| !t.is_empty())
+                        .map(|t| Value::object(vec![("type", Value::str("reasoning_text")), ("text", Value::str(t))]))
+                        .collect();
+                    if texts.is_empty() {
+                        continue;
+                    }
+                    item.set("content", Value::Array(texts));
+                }
+            }
+            _ => {}
+        }
+        out.push(item);
+    }
+    out
+}
+
+/// The golem calls a Responses answer's output makes, and how many of the
+/// client's own.
+pub fn responses_calls(response: &Value) -> (Vec<ToolCall>, usize) {
+    let mut golem = Vec::new();
+    let mut client = 0;
+    for item in response.get("output").and_then(Value::as_array).into_iter().flatten() {
+        if item.get("type").and_then(Value::as_str) != Some("function_call") {
+            continue;
+        }
+        let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+        if is_golem_tool(name) {
+            golem.push(ToolCall {
+                id: item.get("call_id").and_then(Value::as_str).unwrap_or("").to_string(),
+                name: name.to_string(),
+                arguments: item.get("arguments").and_then(Value::as_str).unwrap_or("").to_string(),
+            });
+        } else {
+            client += 1;
+        }
+    }
+    (golem, client)
+}
+
+/// Whether a Responses output item is one of golem's calls.
+fn is_golem_call(item: &Value) -> bool {
+    item.get("type").and_then(Value::as_str) == Some("function_call")
+        && item.get("name").and_then(Value::as_str).is_some_and(is_golem_tool)
+}
+
+/// The next Responses request: the round's messages and golem's calls
+/// appended to the input, and one `function_call_output` per answer. A
+/// string input becomes the user message it stands for.
+pub fn responses_continue(body: &mut Value, output: &[Value], answers: &[(String, String)]) {
+    let mut input = match body.get("input") {
+        Some(Value::String(text)) => vec![Value::object(vec![("role", Value::str("user")), ("content", Value::str(text))])],
+        Some(Value::Array(items)) => items.clone(),
+        _ => Vec::new(),
+    };
+    input.extend(
+        output
+            .iter()
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("message") || is_golem_call(item))
+            .cloned(),
+    );
+    for (id, text) in answers {
+        input.push(Value::object(vec![
+            ("type", Value::str("function_call_output")),
+            ("call_id", Value::str(id)),
+            ("output", Value::str(text)),
+        ]));
+    }
+    body.set("input", Value::Array(input));
+}
+
+/// A message item carrying text of golem's own.
+pub fn responses_message(id: &str, text: &str) -> Value {
+    Value::object(vec![
+        ("type", Value::str("message")),
+        ("id", Value::str(id)),
+        ("status", Value::str("completed")),
+        ("role", Value::str("assistant")),
+        (
+            "content",
+            Value::Array(vec![Value::object(vec![
+                ("type", Value::str("output_text")),
+                ("text", Value::str(text)),
+                ("annotations", Value::Array(Vec::new())),
+            ])]),
+        ),
+    ])
+}
+
+/// What a client keeps of one round's output: everything but golem's calls.
+pub fn responses_shown(output: &[Value]) -> Vec<Value> {
+    output.iter().filter(|item| !is_golem_call(item)).cloned().collect()
+}
+
+/// A non-streamed Responses answer after golem's calls: what the client saw
+/// of the earlier rounds in front of the last answer's output, and the
+/// output counted over every round.
+pub fn responses_final(mut last: Value, shown: Vec<Value>, output_tokens: u64) -> Value {
+    let mut output = shown;
+    output.extend(last.get("output").and_then(Value::as_array).cloned().unwrap_or_default());
+    last.set("output", Value::Array(output));
+    if let Some(usage) = last.get_mut("usage") {
+        let input = count(usage, &["input_tokens"]);
+        usage.set("output_tokens", Value::int(output_tokens));
+        usage.set("total_tokens", Value::int(input + output_tokens));
+    }
+    last
+}
+
+/// A non-streamed answer whose turn also calls a client tool: golem's calls
+/// in it are taken out, because the client cannot run them and golem cannot
+/// answer a turn the client finishes.
+pub fn without_golem_calls(api: ChatApi, mut answer: Value) -> Value {
+    match api {
+        ChatApi::Anthropic => {
+            if let Some(Value::Array(blocks)) = answer.get_mut("content") {
+                blocks.retain(|b| {
+                    !(b.get("type").and_then(Value::as_str) == Some("tool_use")
+                        && b.get("name").and_then(Value::as_str).is_some_and(is_golem_tool))
+                });
+            }
+        }
+        ChatApi::OpenAi => {
+            if let Some(Value::Array(choices)) = answer.get_mut("choices") {
+                if let Some(Value::Array(calls)) = choices.first_mut().and_then(|c| c.get_mut("message")).and_then(|m| m.get_mut("tool_calls")) {
+                    calls.retain(|c| !c.get("function").and_then(|f| f.get("name")).and_then(Value::as_str).is_some_and(is_golem_tool));
+                }
+            }
+        }
+        ChatApi::Responses => {
+            if let Some(Value::Array(items)) = answer.get_mut("output") {
+                items.retain(|item| !is_golem_call(item));
+            }
+        }
+    }
+    answer
+}
+
+/// The chat APIs golem's front answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatApi {
+    /// Anthropic's Messages API.
+    Anthropic,
+    /// OpenAI's Chat Completions API.
+    OpenAi,
+    /// OpenAI's Responses API.
+    Responses,
+}
+
+impl ChatApi {
+    /// The API a request is for, from its method and path - each with or
+    /// without the `/v1` a client's base URL may leave out.
+    pub fn of(method: &str, target: &str) -> Option<ChatApi> {
+        if method != "POST" {
+            return None;
+        }
+        let path = target.split('?').next().unwrap_or("").trim_end_matches('/');
+        match path.strip_prefix("/v1").unwrap_or(path) {
+            "/messages" => Some(ChatApi::Anthropic),
+            "/chat/completions" => Some(ChatApi::OpenAi),
+            "/responses" => Some(ChatApi::Responses),
+            _ => None,
+        }
+    }
+
+    /// The engine's path for the API, the client's query kept: the engine
+    /// serves Anthropic's API only under `/v1`.
+    pub fn engine_target(self, target: &str) -> String {
+        let path = match self {
+            ChatApi::Anthropic => "/v1/messages",
+            ChatApi::OpenAi => "/v1/chat/completions",
+            ChatApi::Responses => "/v1/responses",
+        };
+        match target.split_once('?') {
+            Some((_, query)) => format!("{path}?{query}"),
+            None => path.to_string(),
+        }
+    }
+}
+
 /// A number in a JSON object, as a count.
 pub fn count(value: &Value, path: &[&str]) -> u64 {
     let mut at = value;
@@ -1553,6 +1820,238 @@ impl OpenAiRelay {
     }
 }
 
+/// A Responses stream relayed to the client across golem's rounds: one
+/// `response.created`, the output items numbered in the order the client
+/// sees them, golem's calls held back, and the `response.completed` - its
+/// output every item shown, its usage counted over every round - only at
+/// the very end. The relay also writes the fields the engine leaves out and
+/// clients read: `output_index`, `content_index`, `sequence_number`, and the
+/// created response's `created_at` and `model`.
+#[derive(Debug, Default)]
+pub struct ResponsesRelay {
+    created_at: u64,
+    model: String,
+    id: Option<String>,
+    sequence: u64,
+    /// Each item of the round by id: its index for the client, or `None`
+    /// for a call of golem's.
+    items: Vec<(String, Option<usize>)>,
+    next_index: usize,
+    /// Everything the client was shown, for the final response's output.
+    shown: Vec<Value>,
+    /// The round's finished items, for the next request.
+    round: Vec<Value>,
+    calls: Vec<ToolCall>,
+    client_calls: usize,
+    completed: Option<Value>,
+    output_tokens: u64,
+    calls_made: usize,
+    labels: usize,
+}
+
+impl ResponsesRelay {
+    /// A relay for a response created at `created_at` (Unix seconds) by `model`.
+    pub fn new(created_at: u64, model: &str) -> ResponsesRelay {
+        ResponsesRelay { created_at, model: model.to_string(), ..ResponsesRelay::default() }
+    }
+
+    fn numbered(&mut self, event: &str, mut data: Value) -> Sse {
+        data.set("sequence_number", Value::int(self.sequence));
+        self.sequence += 1;
+        Sse::named(event, &data)
+    }
+
+    fn response_head(&mut self, response: &mut Value) {
+        match &self.id {
+            Some(id) => response.set("id", Value::str(id)),
+            None => self.id = response.get("id").and_then(Value::as_str).map(str::to_string),
+        }
+        if response.get("created_at").is_none() {
+            response.set("created_at", Value::int(self.created_at));
+        }
+        if response.get("model").is_none() {
+            response.set("model", Value::str(&self.model));
+        }
+    }
+
+    fn index_of(&self, id: &str) -> Option<Option<usize>> {
+        self.items.iter().rev().find(|(i, _)| i == id).map(|(_, slot)| *slot)
+    }
+
+    /// One engine event in; what the client gets of it out.
+    pub fn event(&mut self, sse: &Sse) -> Vec<Sse> {
+        let Ok(mut data) = json::parse(&sse.data) else { return Vec::new() };
+        let kind = data.get("type").and_then(Value::as_str).unwrap_or("").to_string();
+        let name = sse.event.clone().unwrap_or_else(|| kind.clone());
+        match kind.as_str() {
+            "response.created" | "response.in_progress" => {
+                // A later round's are not a new response to the client.
+                if self.calls_made > 0 {
+                    return Vec::new();
+                }
+                if let Some(response) = data.get_mut("response") {
+                    self.response_head(response);
+                }
+                vec![self.numbered(&name, data)]
+            }
+            "response.completed" | "response.incomplete" | "response.failed" => {
+                self.output_tokens += count(&data, &["response", "usage", "output_tokens"]);
+                self.completed = Some(data);
+                Vec::new()
+            }
+            "response.output_item.added" | "response.output_item.done" => {
+                let Some(item) = data.get("item").cloned() else { return Vec::new() };
+                let id = item.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                let added = kind.ends_with("added");
+                let slot = match self.index_of(&id) {
+                    Some(slot) => slot,
+                    None => {
+                        let slot = if is_golem_call(&item) {
+                            self.calls.push(ToolCall {
+                                id: item.get("call_id").and_then(Value::as_str).unwrap_or("").to_string(),
+                                name: item.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+                                arguments: String::new(),
+                            });
+                            None
+                        } else {
+                            if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                                self.client_calls += 1;
+                            }
+                            self.next_index += 1;
+                            Some(self.next_index - 1)
+                        };
+                        self.items.push((id.clone(), slot));
+                        slot
+                    }
+                };
+                if !added {
+                    self.round.push(item.clone());
+                }
+                match slot {
+                    None => {
+                        if !added {
+                            let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or("");
+                            let arguments = item.get("arguments").and_then(Value::as_str).unwrap_or("");
+                            if let Some(call) = self.calls.iter_mut().find(|c| c.id == call_id) {
+                                call.arguments = arguments.to_string();
+                            }
+                        }
+                        Vec::new()
+                    }
+                    Some(index) => {
+                        if !added {
+                            self.shown.push(item);
+                        }
+                        data.set("output_index", Value::int(index as u64));
+                        vec![self.numbered(&name, data)]
+                    }
+                }
+            }
+            _ => {
+                let item_id = data.get("item_id").and_then(Value::as_str).map(str::to_string);
+                if let Some(item_id) = item_id {
+                    match self.index_of(&item_id) {
+                        Some(None) => return Vec::new(),
+                        Some(Some(index)) => data.set("output_index", Value::int(index as u64)),
+                        None => {}
+                    }
+                    if data.get("content_index").is_none() && (data.get("part").is_some() || kind.contains("text")) {
+                        data.set("content_index", Value::int(0));
+                    }
+                }
+                vec![self.numbered(&name, data)]
+            }
+        }
+    }
+
+    /// The round is over: run golem's calls, or finish.
+    pub fn round_end(&mut self, max_calls: usize) -> RoundEnd {
+        if self.calls.is_empty() || self.client_calls > 0 || self.calls_made >= max_calls + 2 {
+            return RoundEnd::Done;
+        }
+        RoundEnd::Calls(self.calls.clone())
+    }
+
+    /// How many of golem's calls have run.
+    pub fn calls_made(&self) -> usize {
+        self.calls_made
+    }
+
+    /// The calls ran: the label message for the client, and the round's
+    /// output the next request continues from.
+    pub fn results(&mut self, ran: &[(ToolCall, Outcome)]) -> (Vec<Sse>, Vec<Value>) {
+        let text: Vec<&str> = ran.iter().map(|(_, outcome)| outcome.label.as_str()).collect();
+        let events = self.message(&text.join("\n\n"));
+        self.calls_made += ran.len();
+        self.calls.clear();
+        self.items.clear();
+        self.completed = None;
+        (events, std::mem::take(&mut self.round))
+    }
+
+    /// A message of golem's own, as the events that stream one item.
+    pub fn message(&mut self, text: &str) -> Vec<Sse> {
+        self.labels += 1;
+        let id = format!("msg_golem_{}", self.labels);
+        let index = Value::int(self.next_index as u64);
+        self.next_index += 1;
+        let item = responses_message(&id, text);
+        let part = item.get("content").and_then(Value::as_array).and_then(|c| c.first()).cloned().unwrap_or(Value::Null);
+        let mut empty_part = part.clone();
+        empty_part.set("text", Value::str(""));
+        let mut started = item.clone();
+        started.set("status", Value::str("in_progress"));
+        started.set("content", Value::Array(Vec::new()));
+        let at = |kind: &str, members: Vec<(&str, Value)>| {
+            let mut all = vec![("type", Value::str(kind)), ("output_index", index.clone())];
+            all.extend(members);
+            Value::object(all)
+        };
+        let text_at = |kind: &str, members: Vec<(&str, Value)>| {
+            let mut all = vec![("item_id", Value::str(&id)), ("content_index", Value::int(0))];
+            all.extend(members);
+            at(kind, all)
+        };
+        let events = vec![
+            ("response.output_item.added", at("response.output_item.added", vec![("item", started)])),
+            ("response.content_part.added", text_at("response.content_part.added", vec![("part", empty_part)])),
+            ("response.output_text.delta", text_at("response.output_text.delta", vec![("delta", Value::str(text))])),
+            ("response.output_text.done", text_at("response.output_text.done", vec![("text", Value::str(text))])),
+            ("response.content_part.done", text_at("response.content_part.done", vec![("part", part)])),
+            ("response.output_item.done", at("response.output_item.done", vec![("item", item.clone())])),
+        ];
+        self.shown.push(item);
+        events.into_iter().map(|(name, data)| self.numbered(name, data)).collect()
+    }
+
+    /// The end of the client's stream: the last round's completed response
+    /// with every item shown as its output and the usage of every round.
+    pub fn finish(&mut self) -> Vec<Sse> {
+        let mut done = self.completed.take().unwrap_or_else(|| {
+            Value::object(vec![
+                ("type", Value::str("response.completed")),
+                (
+                    "response",
+                    Value::object(vec![("object", Value::str("response")), ("status", Value::str("completed"))]),
+                ),
+            ])
+        });
+        let name = done.get("type").and_then(Value::as_str).unwrap_or("response.completed").to_string();
+        let output_tokens = self.output_tokens;
+        let shown = std::mem::take(&mut self.shown);
+        if let Some(response) = done.get_mut("response") {
+            self.response_head(response);
+            response.set("output", Value::Array(shown));
+            if let Some(usage) = response.get_mut("usage") {
+                let input = count(usage, &["input_tokens"]);
+                usage.set("output_tokens", Value::int(output_tokens));
+                usage.set("total_tokens", Value::int(input + output_tokens));
+            }
+        }
+        vec![self.numbered(&name, done)]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1900,5 +2399,150 @@ mod tests {
             r#"{"choices":[{"message":{"tool_calls":[{"id":"1","function":{"name":"golem_web_fetch","arguments":"{}"}},{"id":"2","function":{"name":"f","arguments":"{}"}}]}}]}"#,
         ).unwrap());
         assert_eq!((calls.len(), client), (1, 1));
+    }
+
+    #[test]
+    fn every_chat_path_is_known_with_or_without_v1() {
+        assert_eq!(ChatApi::of("POST", "/v1/messages?beta=true"), Some(ChatApi::Anthropic));
+        assert_eq!(ChatApi::of("POST", "/messages"), Some(ChatApi::Anthropic));
+        assert_eq!(ChatApi::of("POST", "/chat/completions/"), Some(ChatApi::OpenAi));
+        assert_eq!(ChatApi::of("POST", "/v1/chat/completions"), Some(ChatApi::OpenAi));
+        assert_eq!(ChatApi::of("POST", "/responses"), Some(ChatApi::Responses));
+        assert_eq!(ChatApi::of("GET", "/v1/messages"), None);
+        assert_eq!(ChatApi::of("POST", "/v1/completions"), None);
+        assert_eq!(ChatApi::of("POST", "/v1messages"), None);
+        assert_eq!(ChatApi::Anthropic.engine_target("/messages?beta=true"), "/v1/messages?beta=true");
+        assert_eq!(ChatApi::OpenAi.engine_target("/chat/completions"), "/v1/chat/completions");
+    }
+
+    #[test]
+    fn the_clients_own_tools_are_always_kept() {
+        let bash = r#"{"name":"bash","description":"Run a command","input_schema":{"type":"object"}}"#;
+        let anthropic = prepare_anthropic(json::parse(&format!(r#"{{"messages":[],"tools":[{bash}]}}"#)).unwrap(), true);
+        let openai = prepare_openai(
+            json::parse(r#"{"messages":[],"tools":[{"type":"function","function":{"name":"bash","parameters":{}}}]}"#).unwrap(),
+            true,
+        );
+        let responses = prepare_responses(
+            json::parse(r#"{"input":"hi","tools":[{"type":"function","name":"bash","parameters":{}}]}"#).unwrap(),
+            true,
+        );
+        for prepared in [anthropic, openai, responses] {
+            let tools = prepared.body.get("tools").and_then(Value::as_array).unwrap().len();
+            assert!(prepared.tools_added);
+            assert_eq!(tools, 3, "bash and golem's two: {}", prepared.body.to_json());
+            assert!(prepared.body.to_json().contains("\"bash\""));
+        }
+    }
+
+    #[test]
+    fn a_responses_request_trades_the_hosted_search_for_golems() {
+        let prepared = prepare_responses(
+            json::parse(
+                r#"{"input":"hi","tool_choice":"auto","tools":[{"type":"web_search","filters":{"allowed_domains":["rust-lang.org"]}},{"type":"function","name":"webfetch","parameters":{}}]}"#,
+            )
+            .unwrap(),
+            true,
+        );
+        let names: Vec<&str> = prepared.body.get("tools").and_then(Value::as_array).unwrap().iter().filter_map(|t| t.get("name").and_then(Value::as_str)).collect();
+        assert_eq!(names, ["webfetch", SEARCH_TOOL], "the client's fetch stands, the hosted search is golem's");
+        assert_eq!(prepared.server_search.unwrap().allowed_domains, ["rust-lang.org"]);
+        let off = prepare_responses(json::parse(r#"{"input":"hi","tools":[{"type":"web_search"}]}"#).unwrap(), false);
+        assert!(!off.tools_added);
+        assert_eq!(off.body.to_json(), r#"{"input":"hi"}"#, "the engine cannot read the hosted tool");
+    }
+
+    #[test]
+    fn a_responses_history_is_made_readable_for_the_engine() {
+        let prepared = prepare_responses(
+            json::parse(
+                r#"{"input":[{"role":"user","content":"hi"},{"type":"reasoning","id":"r1","summary":[{"type":"summary_text","text":"thought"}]},{"type":"reasoning","id":"r2","summary":[]},{"type":"reasoning","id":"r3","content":[{"type":"reasoning_text","text":"kept"}]},{"type":"item_reference","id":"m0"},{"role":"assistant","content":[{"type":"output_text","text":"Hi."}]}]}"#,
+            )
+            .unwrap(),
+            false,
+        );
+        assert_eq!(
+            prepared.body.get("input").unwrap().to_json(),
+            r#"[{"role":"user","content":"hi","type":"message"},{"type":"reasoning","id":"r1","summary":[{"type":"summary_text","text":"thought"}],"content":[{"type":"reasoning_text","text":"thought"}]},{"type":"reasoning","id":"r3","content":[{"type":"reasoning_text","text":"kept"}]},{"role":"assistant","content":[{"type":"output_text","text":"Hi."}],"type":"message"}]"#
+        );
+    }
+
+    #[test]
+    fn a_responses_round_continues_from_its_messages_and_golems_calls() {
+        let mut body = json::parse(r#"{"input":"weather?"}"#).unwrap();
+        let output = json::parse(
+            r#"[{"type":"reasoning","id":"rs"},{"type":"message","id":"m","content":[]},{"type":"function_call","id":"fc","call_id":"call_1","name":"golem_web_search","arguments":"{}"}]"#,
+        )
+        .unwrap();
+        responses_continue(&mut body, output.as_array().unwrap(), &[("call_1".into(), "results".into())]);
+        assert_eq!(
+            body.to_json(),
+            r#"{"input":[{"role":"user","content":"weather?"},{"type":"message","id":"m","content":[]},{"type":"function_call","id":"fc","call_id":"call_1","name":"golem_web_search","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":"results"}]}"#
+        );
+        let answer = json::parse(r#"{"output":[{"type":"function_call","call_id":"a","name":"golem_web_fetch"},{"type":"function_call","call_id":"b","name":"bash"}],"usage":{"input_tokens":3,"output_tokens":1}}"#).unwrap();
+        assert_eq!(responses_calls(&answer).1, 1);
+        let kept = without_golem_calls(ChatApi::Responses, answer);
+        assert!(!kept.to_json().contains("golem_web_fetch") && kept.to_json().contains("bash"));
+        let done = responses_final(kept, vec![responses_message("g", "🔎 label")], 7);
+        assert!(done.to_json().starts_with(r#"{"output":[{"type":"message","id":"g""#), "{}", done.to_json());
+        assert!(done.to_json().contains(r#""total_tokens":10"#));
+    }
+
+    #[test]
+    fn a_responses_stream_hides_golems_call_and_numbers_what_it_shows() {
+        // The events llama.cpp b11379 streams: no output_index, no
+        // sequence_number, and a created response without created_at.
+        let named = |d: &str| {
+            let v = json::parse(d).unwrap();
+            Sse { event: v.get("type").and_then(Value::as_str).map(str::to_string), data: d.to_string() }
+        };
+        let mut relay = ResponsesRelay::new(1_700_000_000, "m");
+        let mut shown = Vec::new();
+        for event in [
+            r#"{"type":"response.created","response":{"id":"resp_1","object":"response","status":"in_progress"}}"#,
+            r#"{"type":"response.in_progress","response":{"id":"resp_1","object":"response","status":"in_progress"}}"#,
+            r#"{"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning","content":[]}}"#,
+            r#"{"type":"response.reasoning_text.delta","item_id":"rs_1","delta":"think"}"#,
+            r#"{"type":"response.output_item.added","item":{"id":"fc_1","call_id":"call_1","name":"golem_web_search","type":"function_call","arguments":""}}"#,
+            r#"{"type":"response.function_call_arguments.delta","delta":"{\"query\":\"x\"}","item_id":"fc_1"}"#,
+            r#"{"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","content":[]}}"#,
+            r#"{"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","arguments":"{\"query\":\"x\"}","call_id":"call_1","name":"golem_web_search"}}"#,
+            r#"{"type":"response.completed","response":{"id":"resp_1","output":[],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}"#,
+        ] {
+            shown.extend(relay.event(&named(event)));
+        }
+        assert_eq!(shown.len(), 5, "created, in_progress, the reasoning item's three: {shown:?}");
+        assert!(shown[0].data.contains(r#""created_at":1700000000"#) && shown[0].data.contains(r#""model":"m""#), "{}", shown[0].data);
+        assert!(shown[3].data.contains(r#""output_index":0"#) && shown[3].data.contains(r#""content_index":0"#), "{}", shown[3].data);
+        assert!(shown.iter().all(|e| !e.data.contains("golem_web_search")));
+        let RoundEnd::Calls(calls) = relay.round_end(MAX_CALLS) else { panic!("should run") };
+        assert_eq!(calls[0].arguments, r#"{"query":"x"}"#);
+        let outcome = Outcome { text: String::new(), label: search_label("x", 3), results: None, query: None };
+        let (events, output) = relay.results(&[(calls[0].clone(), outcome)]);
+        assert_eq!(events.len(), 6);
+        assert!(events[2].data.contains("🔎 Golem web search: x, 3 results") && events[2].data.contains(r#""output_index":1"#));
+        assert_eq!(output.len(), 2, "the reasoning and golem's call");
+
+        for event in [
+            r#"{"type":"response.created","response":{"id":"resp_2","object":"response"}}"#,
+            r#"{"type":"response.output_item.added","item":{"id":"msg_2","type":"message","content":[]}}"#,
+            r#"{"type":"response.output_text.delta","item_id":"msg_2","delta":"Answer."}"#,
+            r#"{"type":"response.output_item.done","item":{"id":"msg_2","type":"message","content":[{"type":"output_text","text":"Answer."}]}}"#,
+            r#"{"type":"response.completed","response":{"id":"resp_2","output":[],"usage":{"input_tokens":40,"output_tokens":2,"total_tokens":42}}}"#,
+        ] {
+            shown.extend(relay.event(&named(event)));
+        }
+        assert!(shown.iter().all(|e| !e.data.contains("resp_2")), "a later round is no new response");
+        assert_eq!(relay.round_end(MAX_CALLS), RoundEnd::Done);
+        let end = relay.finish();
+        let done = json::parse(&end[0].data).unwrap();
+        let response = done.get("response").unwrap();
+        assert_eq!(response.get("id").and_then(Value::as_str), Some("resp_1"));
+        assert_eq!(response.get("output").and_then(Value::as_array).map(Vec::len), Some(3), "reasoning, golem's label, the answer");
+        assert_eq!(count(response, &["usage", "output_tokens"]), 7);
+        assert_eq!(count(response, &["usage", "total_tokens"]), 47);
+        let sequence: Vec<u64> = shown.iter().chain(&events).chain(&end).map(|e| count(&json::parse(&e.data).unwrap(), &["sequence_number"])).collect();
+        assert_eq!(sequence.len(), 5 + 6 + 3 + 1);
+        assert_eq!(*sequence.iter().max().unwrap() as usize, sequence.len() - 1);
     }
 }

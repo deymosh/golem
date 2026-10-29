@@ -2,13 +2,15 @@
 //! of the engine, which listens on the loopback on its own (`ENGINE_PORT`).
 //!
 //! Every request goes to the engine as it came - the router's pages, the
-//! web UI, `/health`, `/tokenize` - except `POST /v1/messages` and `POST
-//! /v1/chat/completions`. On those golem adds its two read-only web tools,
-//! stands in for Anthropic's `web_search_20250305` server tool, and runs the
-//! tool loop on the engine's output: a call to one of golem's tools is held
-//! back from the client, run here, answered to the engine, and the answer
-//! carries on in the same response. The decisions are `golem_core::webtools`';
-//! this file reads sockets and runs curl.
+//! web UI, `/health`, `/tokenize` - except a `POST` to the three chat APIs,
+//! `/v1/messages`, `/v1/chat/completions` and `/v1/responses`, each with or
+//! without its `/v1`. On those golem adds its two read-only web tools beside
+//! the client's own, stands in for Anthropic's `web_search_20250305` and
+//! OpenAI's hosted `web_search`, and runs the tool loop on the engine's
+//! output: a call to one of golem's tools is held back from the client, run
+//! here, answered to the engine, and the answer carries on in the same
+//! response. The decisions are `golem_core::webtools`'; this file reads
+//! sockets and runs curl.
 //!
 //! No API is translated: an Anthropic request goes to the engine's Anthropic
 //! endpoint and an OpenAI one to its OpenAI endpoint. Search goes to
@@ -30,7 +32,9 @@ use std::time::Duration;
 
 use golem_core::html;
 use golem_core::json::{self, Value};
-use golem_core::webtools::{self as tools, AnthropicRelay, OpenAiRelay, Outcome, RoundEnd, Sse, SseReader, ToolCall, WebCall};
+use golem_core::webtools::{
+    self as tools, AnthropicRelay, ChatApi, OpenAiRelay, Outcome, ResponsesRelay, RoundEnd, Sse, SseReader, ToolCall, WebCall,
+};
 
 use crate::config::Overrides;
 use crate::engine;
@@ -387,17 +391,15 @@ fn engine_down(client: &mut TcpStream, error: &std::io::Error) -> std::io::Resul
 fn serve(front: &Front, mut client: TcpStream) -> std::io::Result<()> {
     client.set_read_timeout(Some(Duration::from_secs(60)))?;
     let mut reader = BufReader::new(client.try_clone()?);
-    let Some(request) = read_request(&mut reader, &mut client)? else { return Ok(()) };
+    let Some(mut request) = read_request(&mut reader, &mut client)? else { return Ok(()) };
     client.set_read_timeout(None)?;
-    let path = request.target.split('?').next().unwrap_or("").to_string();
-    let api = match (request.method.as_str(), path.trim_end_matches('/')) {
-        ("POST", "/v1/messages") => Some(Api::Anthropic),
-        ("POST", "/v1/chat/completions") => Some(Api::OpenAi),
-        _ => None,
-    };
+    let api = ChatApi::of(&request.method, &request.target);
     let parsed = api.and_then(|_| std::str::from_utf8(&request.body).ok()).and_then(|text| json::parse(text).ok());
     let served = match (api, parsed) {
-        (Some(api), Some(body)) => intercept(front, api, &request, body, &mut client),
+        (Some(api), Some(body)) => {
+            request.target = api.engine_target(&request.target);
+            intercept(front, api, &request, body, &mut client)
+        }
         _ => pass(front, &request, &request.body, &mut client),
     };
     close(&client, &mut reader);
@@ -457,29 +459,27 @@ fn relay_answer(answer: &mut Answer, client: &mut TcpStream) -> std::io::Result<
     Ok(())
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Api {
-    Anthropic,
-    OpenAi,
-}
-
 // ---------------------------------------------------------------
 // The tool loop
 // ---------------------------------------------------------------
 
 /// A chat request with golem's tools in it.
-fn intercept(front: &Front, api: Api, request: &Request, body: Value, client: &mut TcpStream) -> std::io::Result<()> {
+fn intercept(front: &Front, api: ChatApi, request: &Request, body: Value, client: &mut TcpStream) -> std::io::Result<()> {
     let on = web_tools_on(&front.home);
     let prepared = match api {
-        Api::Anthropic => tools::prepare_anthropic(body, on),
-        Api::OpenAi => tools::prepare_openai(body, on),
+        ChatApi::Anthropic => tools::prepare_anthropic(body, on),
+        ChatApi::OpenAi => tools::prepare_openai(body, on),
+        ChatApi::Responses => tools::prepare_responses(body, on),
     };
-    if !prepared.tools_added {
+    // A Responses stream always goes through the relay, which writes the
+    // fields the engine's stream leaves out and clients read.
+    if !prepared.tools_added && !(api == ChatApi::Responses && prepared.stream) {
         return pass(front, request, prepared.body.to_json().as_bytes(), client);
     }
     match (api, prepared.stream) {
-        (Api::Anthropic, true) => anthropic_stream(front, request, prepared, client),
-        (Api::OpenAi, true) => openai_stream(front, request, prepared, client),
+        (ChatApi::Anthropic, true) => anthropic_stream(front, request, prepared, client),
+        (ChatApi::OpenAi, true) => openai_stream(front, request, prepared, client),
+        (ChatApi::Responses, true) => responses_stream(front, request, prepared, client),
         (api, false) => whole(front, api, request, prepared, client),
     }
 }
@@ -624,14 +624,71 @@ fn openai_stream(front: &Front, request: &Request, prepared: tools::Prepared, cl
     }
 }
 
+fn responses_stream(front: &Front, request: &Request, prepared: tools::Prepared, client: &mut TcpStream) -> std::io::Result<()> {
+    let mut body = prepared.body;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let model = body.get("model").and_then(Value::as_str).unwrap_or("").to_string();
+    let mut relay = ResponsesRelay::new(now, &model);
+    let mut first = true;
+    loop {
+        let mut answer = match to_engine(&front.home, request, body.to_json().as_bytes()) {
+            Ok(answer) => answer,
+            Err(e) if first => {
+                log_api(&front.home, &format!("{} {} -> no answer from the engine: {e}", request.method, request.target));
+                return engine_down(client, &e);
+            }
+            Err(e) => {
+                send(client, &relay.message(&format!("Golem: the engine stopped answering ({e}).")))?;
+                return send(client, &relay.finish());
+            }
+        };
+        if answer.status != 200 {
+            if first {
+                log_api(&front.home, &format!("{} {} -> HTTP {} (streamed)", request.method, request.target, answer.status));
+                return relay_answer(&mut answer, client);
+            }
+            let mut text = String::new();
+            let _ = answer.body.read_to_string(&mut text);
+            send(client, &relay.message(&refused(answer.status, &text)))?;
+            return send(client, &relay.finish());
+        }
+        if first {
+            stream_head(client)?;
+            first = false;
+        }
+        let mut reader = SseReader::default();
+        let mut lines = BufReader::new(&mut answer.body);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if lines.read_line(&mut line)? == 0 {
+                break;
+            }
+            if let Some(event) = reader.line(&line) {
+                send(client, &relay.event(&event))?;
+            }
+        }
+        match relay.round_end(prepared.max_calls) {
+            RoundEnd::Done => return send(client, &relay.finish()),
+            RoundEnd::Calls(calls) => {
+                let ran = run_calls(front, &calls, relay.calls_made(), prepared.max_calls, prepared.server_search.as_ref());
+                let (events, output) = relay.results(&ran);
+                send(client, &events)?;
+                tools::responses_continue(&mut body, &output, &answers(&ran));
+            }
+        }
+    }
+}
+
 /// A request the client wants answered in one piece. An answer that makes
 /// no call of golem's goes back byte for byte - the engine's `timings`
 /// included, which is what a measurement reads.
-fn whole(front: &Front, api: Api, request: &Request, prepared: tools::Prepared, client: &mut TcpStream) -> std::io::Result<()> {
+fn whole(front: &Front, api: ChatApi, request: &Request, prepared: tools::Prepared, client: &mut TcpStream) -> std::io::Result<()> {
     let server = prepared.server_search.is_some();
     let mut body = prepared.body;
     let mut shown_blocks: Vec<Value> = Vec::new();
     let mut shown_text = String::new();
+    let mut shown_items: Vec<Value> = Vec::new();
     let mut output_tokens = 0u64;
     let mut searches = 0u64;
     let mut calls_made = 0usize;
@@ -659,22 +716,25 @@ fn whole(front: &Front, api: Api, request: &Request, prepared: tools::Prepared, 
             return client.write_all(&raw);
         };
         let (calls, client_calls) = match api {
-            Api::Anthropic => tools::anthropic_calls(&value),
-            Api::OpenAi => tools::openai_calls(&value),
+            ChatApi::Anthropic => tools::anthropic_calls(&value),
+            ChatApi::OpenAi => tools::openai_calls(&value),
+            ChatApi::Responses => tools::responses_calls(&value),
         };
         let tokens = match api {
-            Api::Anthropic => tools::count(&value, &["usage", "output_tokens"]),
-            Api::OpenAi => tools::count(&value, &["usage", "completion_tokens"]),
+            ChatApi::OpenAi => tools::count(&value, &["usage", "completion_tokens"]),
+            ChatApi::Anthropic | ChatApi::Responses => tools::count(&value, &["usage", "output_tokens"]),
         };
         output_tokens += tokens;
         if calls.is_empty() || client_calls > 0 || calls_made >= prepared.max_calls + 2 {
-            if first {
+            if first && calls.is_empty() {
                 client.write_all(answer.head_for(Some(raw.len())).as_bytes())?;
                 return client.write_all(&raw);
             }
+            let value = if calls.is_empty() { value } else { tools::without_golem_calls(api, value) };
             let done = match api {
-                Api::Anthropic => tools::anthropic_final(value, shown_blocks, output_tokens, searches, server),
-                Api::OpenAi => tools::openai_final(value, &shown_text, output_tokens),
+                ChatApi::Anthropic => tools::anthropic_final(value, shown_blocks, output_tokens, searches, server),
+                ChatApi::OpenAi => tools::openai_final(value, &shown_text, output_tokens),
+                ChatApi::Responses => tools::responses_final(value, shown_items, output_tokens),
             };
             let text = done.to_json();
             client.write_all(answer.head_for(Some(text.len())).as_bytes())?;
@@ -684,7 +744,14 @@ fn whole(front: &Front, api: Api, request: &Request, prepared: tools::Prepared, 
         let ran = run_calls(front, &calls, calls_made, prepared.max_calls, prepared.server_search.as_ref());
         calls_made += ran.len();
         match api {
-            Api::Anthropic => {
+            ChatApi::Responses => {
+                let output = value.get("output").and_then(Value::as_array).cloned().unwrap_or_default();
+                shown_items.extend(tools::responses_shown(&output));
+                let labels: Vec<&str> = ran.iter().map(|(_, outcome)| outcome.label.as_str()).collect();
+                shown_items.push(tools::responses_message(&format!("msg_golem_{calls_made}"), &labels.join("\n\n")));
+                tools::responses_continue(&mut body, &output, &answers(&ran));
+            }
+            ChatApi::Anthropic => {
                 let content = value.get("content").and_then(Value::as_array).cloned().unwrap_or_default();
                 shown_blocks.extend(content.iter().filter(|block| {
                     !(block.get("type").and_then(Value::as_str) == Some("tool_use")
@@ -696,7 +763,7 @@ fn whole(front: &Front, api: Api, request: &Request, prepared: tools::Prepared, 
                 }
                 tools::anthropic_continue(&mut body, content, &answers(&ran));
             }
-            Api::OpenAi => {
+            ChatApi::OpenAi => {
                 let message = value
                     .get("choices")
                     .and_then(Value::as_array)

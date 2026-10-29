@@ -46,22 +46,37 @@ change the key before binding `0.0.0.0`, and firewall the port if the LAN is not
 Upstream llama.cpp runs no tool loop on the server - its tools are for its own web page,
 whose loop runs in the browser - and it refuses web search as a server tool. So golem
 answers the API itself (`api.rs`, decisions in `golem_core::webtools` and
-`golem_core::html`) and hands every request to the engine unchanged except `POST
-/v1/messages` and `POST /v1/chat/completions`. On those:
+`golem_core::html`) and hands every request to the engine unchanged except a `POST` to
+the three chat APIs: `/v1/messages` (Anthropic), `/v1/chat/completions` (OpenAI) and
+`/v1/responses` (OpenAI's Responses API, which Codex speaks), each also without its
+`/v1` - a client whose base URL leaves it out posts to `/chat/completions`, and the
+engine serves Anthropic's API only under `/v1`, so golem sends each to the engine's
+`/v1` path. On those:
 
-- **Two tools are added**, `golem_web_search` and `golem_web_fetch`, when the request's
-  tool choice leaves the model free to call them (none given or `auto`) - each one only
-  when the client has no tool of its own for the job: Claude Code brings `WebSearch` and
-  `WebFetch`, and its search reaches golem as the server tool below. Anthropic's
-  `web_search_*` server tool - what Claude Code's WebSearch sends - is taken out of the
-  request and answered by golem's search; its `max_uses` and domain lists are honoured.
+- **Two tools are added**, `golem_web_search` and `golem_web_fetch`, beside every tool
+  the client sent, when the request's tool choice leaves the model free to call them
+  (none given or `auto`) - each one only when the client has no tool of its own for the
+  job: Claude Code brings `WebSearch` and `WebFetch`, and its search reaches golem as the
+  server tool below; OpenCode brings `webfetch`. Anthropic's `web_search_*` server tool -
+  what Claude Code's WebSearch sends - and the Responses API's hosted `web_search` are
+  taken out of the request and answered by golem's search; their `max_uses` and domain
+  lists are honoured.
 - **The loop runs on the engine's output.** A call to one of golem's tools is held back
   from the client; golem runs it, sends the engine a follow-up request with the tool
   result, and the answer carries on in the same response, streamed or not: one
   `message_start`/`message_stop` (or one id and one `[DONE]`) whatever the number of
-  rounds. A turn that also calls one of the client's tools goes back to the client. An
-  answer with no call of golem's is handed on byte for byte, which keeps the engine's
-  `timings` for `bench` and `eval`. A request may make 8 calls (or `max_uses`).
+  rounds. A turn that also calls one of the client's tools goes back to the client,
+  without golem's calls in it. An answer with no call of golem's is handed on byte for
+  byte, which keeps the engine's `timings` for `bench` and `eval`. A request may make 8
+  calls (or `max_uses`).
+- **The Responses API needs two repairs the others do not.** The engine's stream leaves
+  out fields clients read - `output_index`, `sequence_number`, the created response's
+  `created_at` and `model` - and the AI SDK (OpenCode) fails on it, so a Responses stream
+  always goes through the relay, which writes them. And the engine refuses with a 400
+  history items the API allows: a message with a `role` and no `type`, a reasoning item
+  that carries only its summary, an `item_reference`. Golem gives the message its type,
+  the reasoning item its summary as its content, and leaves a reference out (the engine
+  keeps no state it could point to).
 - **Labelled.** Each call is a visible line, `🔎 Golem web search: <q>, N results` or
   `🌐 Golem web fetch: <url>`; a client that asked for Anthropic's server tool also gets
   the `server_tool_use` and `web_search_tool_result` blocks, and its history's blocks are
