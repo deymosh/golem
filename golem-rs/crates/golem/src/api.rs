@@ -91,7 +91,9 @@ pub fn start(home: &Path, overrides: &Overrides) -> Result<String, String> {
             let Ok(stream) = stream else { continue };
             let front = Arc::clone(&front);
             std::thread::spawn(move || {
-                let _ = serve(&front, stream);
+                if let Err(e) = serve(&front, stream) {
+                    log_api(&front.home, &format!("connection ended: {e}"));
+                }
             });
         }
     });
@@ -372,6 +374,8 @@ fn respond(client: &mut TcpStream, status: u16, reason: &str, content_type: &str
 /// use for an error.
 fn engine_down(client: &mut TcpStream, error: &std::io::Error) -> std::io::Result<()> {
     let message = format!("golem could not reach the engine: {error} - start it with: golem up");
+    // Logged by the chat paths only: a client polling a stopped engine
+    // would fill the file.
     let body = Value::object(vec![
         ("type", Value::str("error")),
         ("error", Value::object(vec![("type", Value::str("api_error")), ("message", Value::str(&message))])),
@@ -488,7 +492,10 @@ fn anthropic_stream(front: &Front, request: &Request, prepared: tools::Prepared,
     loop {
         let mut answer = match to_engine(&front.home, request, body.to_json().as_bytes()) {
             Ok(answer) => answer,
-            Err(e) if first => return engine_down(client, &e),
+            Err(e) if first => {
+                log_api(&front.home, &format!("{} {} -> no answer from the engine: {e}", request.method, request.target));
+                return engine_down(client, &e);
+            }
             Err(e) => {
                 send(client, &relay.note(&format!("Golem: the engine stopped answering ({e}).")))?;
                 return send(client, &relay.finish(server));
@@ -496,6 +503,7 @@ fn anthropic_stream(front: &Front, request: &Request, prepared: tools::Prepared,
         };
         if answer.status != 200 {
             if first {
+                log_api(&front.home, &format!("{} {} -> HTTP {} (streamed)", request.method, request.target, answer.status));
                 return relay_answer(&mut answer, client);
             }
             let mut text = String::new();
@@ -538,7 +546,10 @@ fn openai_stream(front: &Front, request: &Request, prepared: tools::Prepared, cl
     loop {
         let mut answer = match to_engine(&front.home, request, body.to_json().as_bytes()) {
             Ok(answer) => answer,
-            Err(e) if first => return engine_down(client, &e),
+            Err(e) if first => {
+                log_api(&front.home, &format!("{} {} -> no answer from the engine: {e}", request.method, request.target));
+                return engine_down(client, &e);
+            }
             Err(e) => {
                 let note = relay.text_chunk(&format!("Golem: the engine stopped answering ({e})."));
                 send(client, &[note])?;
@@ -547,6 +558,7 @@ fn openai_stream(front: &Front, request: &Request, prepared: tools::Prepared, cl
         };
         if answer.status != 200 {
             if first {
+                log_api(&front.home, &format!("{} {} -> HTTP {} (streamed)", request.method, request.target, answer.status));
                 return relay_answer(&mut answer, client);
             }
             let mut text = String::new();
@@ -601,7 +613,10 @@ fn whole(front: &Front, api: Api, request: &Request, prepared: tools::Prepared, 
     loop {
         let mut answer = match to_engine(&front.home, request, body.to_json().as_bytes()) {
             Ok(answer) => answer,
-            Err(e) => return engine_down(client, &e),
+            Err(e) => {
+                log_api(&front.home, &format!("{} {} -> no answer from the engine: {e}", request.method, request.target));
+                return engine_down(client, &e);
+            }
         };
         let mut raw = Vec::new();
         answer.body.read_to_end(&mut raw)?;
@@ -609,6 +624,11 @@ fn whole(front: &Front, api: Api, request: &Request, prepared: tools::Prepared, 
             .then(|| std::str::from_utf8(&raw).ok().and_then(|t| json::parse(t).ok()))
             .flatten();
         let Some(value) = value else {
+            if answer.status != 200 {
+                log_refusal(&front.home, request, answer.status, &raw);
+            } else {
+                log_api(&front.home, &format!("{} {} -> 200 that is not JSON ({} bytes)", request.method, request.target, raw.len()));
+            }
             client.write_all(answer.head_for(Some(raw.len())).as_bytes())?;
             return client.write_all(&raw);
         };
@@ -757,6 +777,29 @@ fn run_call(front: &Front, call: &ToolCall, server: Option<&tools::ServerSearch>
     };
     log_call(&front.home, &outcome.label);
     outcome
+}
+
+/// One line in `logs/api.log`: a chat request the engine refused or that
+/// broke off, with what it said - the one place that says why when a client
+/// only saw the failure.
+fn log_api(home: &Path, line: &str) {
+    let path = crate::paths::api_log(home);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{} {line}", golem_core::time::now_iso());
+    }
+}
+
+/// An engine answer that is not a success, logged with its message.
+fn log_refusal(home: &Path, request: &Request, status: u16, body: &[u8]) {
+    let text = String::from_utf8_lossy(body);
+    let message = json::parse(&text)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.get("message")).and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_else(|| text.chars().take(300).collect());
+    log_api(home, &format!("{} {} -> HTTP {status}: {message}", request.method, request.target));
 }
 
 /// One line in `logs/web.log` per call, so what golem looked up on a

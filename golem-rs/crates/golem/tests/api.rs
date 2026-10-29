@@ -112,6 +112,21 @@ fn an_answer_without_golems_calls_comes_back_byte_for_byte() {
 }
 
 #[test]
+fn a_refused_chat_request_is_handed_on_and_logged_with_its_reason() {
+    let refusal = r#"{"error":{"code":400,"message":"the request exceeds the available context size","type":"invalid_request_error"}}"#;
+    let engine = engine(vec![format!(
+        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{refusal}",
+        refusal.len()
+    )]);
+    let (dir, port) = front("refused", engine.port);
+    let answer = ask(port, "POST", "/v1/chat/completions", r#"{"model":"m","messages":[]}"#);
+    assert!(answer.starts_with("HTTP/1.1 400") && answer.ends_with(refusal), "{answer}");
+    let log = std::fs::read_to_string(dir.join("logs/api.log")).expect("logs/api.log");
+    assert!(log.contains("POST /v1/chat/completions -> HTTP 400: the request exceeds the available context size"), "{log}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn a_down_engine_is_said_in_the_apis_error_shape() {
     let (dir, port) = front("down", free_port());
     let answer = ask(port, "POST", "/v1/messages", r#"{"model":"m","messages":[]}"#);
@@ -165,6 +180,41 @@ fn an_anthropic_stream_runs_golems_call_inside_one_message() {
     let second = engine.bodies.lock().unwrap()[1].clone();
     assert!(second.contains("\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\""), "{second}");
     assert!(second.contains("\"stream\":true"), "{second}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A long prefill: the engine says nothing for minutes, then answers. What
+/// golem hands back must be that answer. Ignored by default - it waits.
+#[test]
+#[ignore]
+fn a_slow_answer_still_arrives() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let engine_port = listener.local_addr().expect("addr").port();
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else { return };
+        let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+        let mut line = String::new();
+        let mut length = 0;
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                break;
+            }
+            if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = v.trim().parse().unwrap_or(0);
+            }
+        }
+        let mut body = vec![0u8; length];
+        let _ = reader.read_exact(&mut body);
+        std::thread::sleep(std::time::Duration::from_secs(75));
+        let _ = stream.write_all(json_reply(r#"{"choices":[{"message":{"content":"7"}}],"timings":{"prompt_n":1}}"#).as_bytes());
+    });
+    let (dir, port) = front("slow", engine_port);
+    let base = golem::engine::Base { host: "127.0.0.1".into(), port, prefix: String::new(), api_key: "k".into() };
+    let started = std::time::Instant::now();
+    let reply = golem::engine::post_json(&base, "/v1/chat/completions", r#"{"model":"m","messages":[]}"#, std::time::Duration::from_secs(300));
+    println!("after {:?}: {reply:?}", started.elapsed());
+    assert!(reply.is_some_and(|r| r.ok() && r.body.contains("\"7\"")));
     std::fs::remove_dir_all(&dir).ok();
 }
 

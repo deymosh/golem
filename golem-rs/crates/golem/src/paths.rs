@@ -135,6 +135,11 @@ pub fn engine_log(home: &Path) -> PathBuf {
     home.join("logs").join("llama-server.log")
 }
 
+/// One line per chat request golem's front saw refused or broken off.
+pub fn api_log(home: &Path) -> PathBuf {
+    home.join("logs").join("api.log")
+}
+
 /// One line per search and fetch golem's web tools ran.
 pub fn web_log(home: &Path) -> PathBuf {
     home.join("logs").join("web.log")
