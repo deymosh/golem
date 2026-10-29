@@ -92,20 +92,27 @@ html.app .edge { display: block; }
   .bar { height: auto; padding-block: 8px; row-gap: 8px; } .state span { overflow: hidden; text-overflow: ellipsis; } .state .extra { display: none; } }
 
 /* ---- page -------------------------------------------------------------- */
-main { flex: 1; min-height: 0; width: 100%; max-width: 1240px; margin: 0 auto; display: flex; flex-wrap: wrap;
+/* A column: the update banner on top, the open tab filling the rest. The
+   window never scrolls; the tab is held to the height left, so what is
+   long inside it (the model list, the results, a log) scrolls in place. */
+main { flex: 1; min-height: 0; width: 100%; max-width: 1240px; margin: 0 auto; display: flex; flex-direction: column;
   padding: 22px max(18px, env(safe-area-inset-right, 0px)) 18px max(18px, env(safe-area-inset-left, 0px)); }
 section { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 16px; }
 section[hidden] { display: none; }
 section > * { flex: none; }
 /* The update banner, a full-width strip above whichever tab is open. */
-.update { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+.update { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
   padding: 10px 14px; margin-bottom: 16px; background: var(--surface); border: 1px solid var(--hair); border-radius: 10px; }
 .update[hidden] { display: none; }
 .update span b { color: var(--ink); font-weight: 600; }
 .update span { color: var(--soft); font-size: 13px; }
 .update .spacer { flex: 1; }
+.update .bad-text { color: var(--bad); font-size: 13px; }
 /* What scrolls in each tab. */
-#m-list { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
+#m-list { flex: 0 1 auto; min-height: 160px; overflow-y: auto; }
+/* A window too short for the controls, the job log and a few models scrolls
+   the tab itself rather than squeezing the list away. */
+#tab-models { overflow-y: auto; }
 #tab-results { overflow-y: auto; padding-right: 4px; margin-right: -4px; }
 #tab-log > .surface { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #engine-log { flex: 1; min-height: 0; }
@@ -189,7 +196,9 @@ pre.log { margin: 0; padding: 12px 14px; font: 12px/1.55 var(--code); color: var
 .filters label { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--soft); }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--hair); white-space: nowrap; }
-th { font-weight: 600; color: var(--soft); font-size: 12px; cursor: pointer; user-select: none; background: var(--surface); }
+th { font-weight: 600; color: var(--soft); font-size: 12px; background: var(--surface); }
+/* Only the runs table sorts. */
+#runs th { cursor: pointer; user-select: none; }
 th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
 tr:last-child td { border-bottom: 0; }
 tr.suspect td { opacity: .45; }
@@ -202,8 +211,10 @@ tr.classrow td { color: var(--soft); font-size: 12px; font-weight: 600; padding-
 .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 7px; }
 .flags { color: var(--soft); font-family: var(--code); font-size: 12px; }
 .note { color: var(--soft); max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
-.chart { padding: 10px 6px 4px; }
-.chart svg { width: 100%; height: auto; display: block; }
+/* Drawn 900 wide; on a narrow screen it keeps a readable size and scrolls
+   sideways rather than shrinking its labels to nothing. */
+.chart { padding: 10px 6px 4px; overflow-x: auto; }
+.chart svg { width: 100%; min-width: 600px; height: auto; display: block; }
 .chart text { fill: var(--soft); font-size: 11px; }
 .chart .grid { stroke: var(--hair); }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 4px 14px 12px; font-size: 12px; }
@@ -239,6 +250,7 @@ tr.classrow td { color: var(--soft); font-size: 12px; font-weight: 600; padding-
        The job it starts shows its progress in the job pane under Models. -->
   <div class="update" id="update" role="status" hidden>
     <span id="update-text"></span>
+    <span id="update-msg" class="bad-text" hidden></span>
     <span class="spacer"></span>
     <button class="btn go" id="update-go">Update</button>
     <a class="btn quiet" id="update-link" target="_blank" rel="noopener" hidden>What's new</a>
@@ -502,7 +514,7 @@ function renderBoard(rows) {
         <td class="num">${r.vram_mib ? fmt(r.vram_mib / 1024) : "–"}</td>
         <td class="num">${r.ram_used_gib != null ? fmt(r.ram_used_gib) : "–"}</td>
         <td>${needle ? `<span class="badge ${verdict(needle)}">${needle === "PASS" ? "Pass" : "Fail"}</span>` : `<span class="badge none">Not run</span>`}${ev?.eval?.tools === "FAIL" ? ` <span class="badge FAIL">Tools</span>` : ""}</td>
-        <td class="num">${fmt(ev?.eval?.depth_decode)}</td><td>${day(r.ts)}</td><td class="flags">${esc(flagStr(r.flags))}</td></tr>`;
+        <td class="num">${fmt(ev?.eval?.depth_decode)}</td><td>${esc(day(r.ts))}</td><td class="flags">${esc(flagStr(r.flags))}</td></tr>`;
     }).join("") + "</tbody>";
 }
 
@@ -567,8 +579,8 @@ function moveTip(e) {
 
 let sortKey = "ts", sortDir = -1;
 const COLS = [
-  ["ts", "Time", (r) => (r.ts || "").replace("T", " ").slice(0, 16)],
-  ["kind", "Kind", (r) => r.kind],
+  ["ts", "Time", (r) => esc((r.ts || "").replace("T", " ").slice(0, 16))],
+  ["kind", "Kind", (r) => esc(r.kind)],
   ["model", "Model", (r) => `<span class="swatch" style="background:${colorOf(r.model)}"></span>${esc(r.model)}`],
   ["engine_build", "Build", (r) => esc(`${r.engine} ${r.engine_build}`)],
   ["model_stats", "Params", (r) => paramsCell(r), false],
@@ -626,10 +638,13 @@ const busyNote = "The console is not answering. Is golem service running?";
 const ANSWERS = { applied: "Done. It takes effect at the next start.", added: "Preset added.",
   "bad-input": "Refused: the default model stays, and only what this machine has can be chosen.",
   deleted: "Model file deleted.", removed: "Preset removed." };
+// The service's answer in words: a JSON `result` code through ANSWERS, or
+// the plain text it sent.
+function answerWords(text) {
+  try { const r = JSON.parse(text).result; return ANSWERS[r] || r; } catch (e) { return text; }
+}
 async function say(response) {
-  const text = (await response.text()).trim();
-  let words = text;
-  try { const r = JSON.parse(text).result; words = ANSWERS[r] || r; } catch (e) { /* plain text */ }
+  const words = answerWords((await response.text()).trim());
   const msg = $("c-msg");
   msg.textContent = words;
   msg.className = "msg" + (response.ok ? "" : " bad");
@@ -676,10 +691,15 @@ function renderModels(models, state) {
   }).join("") : `<li class="empty">No models yet. Pull one above.</li>`;
   $("m-list").querySelectorAll("button").forEach((b) => { b.disabled = running; });
 
+  // A refused or failed action gives its button back: the list repaints
+  // only when what it shows changed, and a refusal changes nothing.
   const act = (sel, fn) => $("m-list").querySelectorAll(sel).forEach((b) => b.onclick = async () => {
     b.disabled = true;
-    try { const r = await fn(b); if (r) await say(r); else b.disabled = false; }
-    catch (e) { $("pull-msg").textContent = busyNote; }
+    try {
+      const r = await fn(b);
+      if (r) await say(r);
+      if (!r || !r.ok) b.disabled = false;
+    } catch (e) { $("pull-msg").textContent = busyNote; b.disabled = false; }
     setTimeout(pollLive, 1200);
   });
   act("[data-alias]", (b) => post("api/run", `action=alias&arg=${encodeURIComponent(b.dataset.alias)}`));
@@ -723,7 +743,7 @@ function renderState(s) {
   log.hidden = !s.job_tail;
   if (s.job_tail) renderJobLog(log, s.job_tail);
   renderUpdate(s.update);
-  document.querySelectorAll("#control .btn, #pull-form .btn").forEach((b) => { b.disabled = !!busy; });
+  document.querySelectorAll("#control .btn, #pull-form .btn, #update-go").forEach((b) => { b.disabled = !!busy; });
 }
 
 // The update banner: a release on offer, or one installed and waiting for a
@@ -749,12 +769,16 @@ function renderUpdate(u) {
 // lands in the job pane, and the Models tab is where that pane lives. A
 // refused click (another job is running) leaves the banner up: the poll
 // repaints it, and the offer is not lost.
+// A refusal is said in the banner itself, until the next click.
 $("update-go").onclick = async () => {
   updateShown = "";
+  const note = $("update-msg");
+  note.hidden = true;
   try {
     const r = await post("api/run", "action=update");
     if (r.ok) { $("update").hidden = true; showTab("models"); }
-  } catch (e) { /* the poll repaints */ }
+    else { note.textContent = answerWords((await r.text()).trim()) || `Refused (HTTP ${r.status})`; note.hidden = false; }
+  } catch (e) { note.textContent = "The service did not answer."; note.hidden = false; }
   setTimeout(pollLive, 1200);
 };
 $("update-skip").onclick = async () => {
@@ -787,7 +811,7 @@ function renderJobLog(pre, text) {
   if (atEnd) pre.scrollTop = pre.scrollHeight;
 }
 
-async function pollLive() {
+async function pollOnce() {
   let live = false;
   try {
     const r = await fetch("results.jsonl", { cache: "no-store" });
@@ -812,7 +836,10 @@ async function pollLive() {
   catch (e) { $("c-state-text").textContent = "No state"; }
   ENGINE_UP = !!state?.up;
   if (!$("tab-chat").hidden) showChat();
-  try { renderModels(await (await fetch("api/models", { cache: "no-store" })).json(), state); } catch (e) { /* older service */ }
+  try { renderModels(await (await fetch("api/models", { cache: "no-store" })).json(), state); }
+  catch (e) {
+    if (!$("m-list").children.length) $("m-list").innerHTML = `<li class="empty">The model list is not available from this service.</li>`;
+  }
   try {
     const l = await (await fetch("api/logs", { cache: "no-store" })).json();
     $("log-file").textContent = l.file ? l.file : "No engine log yet. It starts with the engine.";
@@ -925,13 +952,18 @@ $("pull-form").onsubmit = async (e) => {
 
 showTab(location.hash.slice(1) || "results");
 // Every 5 s, and every 1.5 s while a job runs so its bar moves; never two
-// polls at once.
-let polling = false, jobRunning = false;
+// polls at once. A poll asked for while one runs (a button's follow-up)
+// runs once more right after it, so answers are applied in order.
+let polling = false, pollAgain = false, jobRunning = false;
+async function pollLive() {
+  if (polling) { pollAgain = true; return; }
+  polling = true;
+  try {
+    do { pollAgain = false; await pollOnce(); } while (pollAgain);
+  } finally { polling = false; }
+}
 async function tick() {
-  if (!polling) {
-    polling = true;
-    try { await pollLive(); } finally { polling = false; }
-  }
+  await pollLive();
   setTimeout(tick, jobRunning ? 1500 : 5000);
 }
 tick();
