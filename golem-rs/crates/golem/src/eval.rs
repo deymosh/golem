@@ -245,8 +245,15 @@ pub fn run_with(home: &Path, args: &[String], out: &mut dyn Write, progress: boo
     // the model is loaded - after the warmup, not before.
     let props = parse_body(&get_body(&base, &format!("/props?model={model}"), PROPS_TIMEOUT));
     if deep(&props, "vision").and_then(Value::as_bool) == Some(true) {
-        let answer = message_content(&post_body(&base, &vision_body(&model), REQUEST_TIMEOUT));
-        let _ = writeln!(out, "answer: {}", if answer.is_empty() { "(request failed)" } else { answer.trim() });
+        let reply = engine::post_json(&base, "/v1/chat/completions", &vision_body(&model), REQUEST_TIMEOUT);
+        let answer = reply.as_ref().map(|reply| message_content(&reply.body)).unwrap_or_default();
+        let shown = match &reply {
+            _ if !answer.is_empty() => answer.trim().to_string(),
+            Some(reply) if reply.ok() => "(no answer text)".to_string(),
+            Some(reply) => format!("(request failed: HTTP {}: {})", reply.status, reply.error_message()),
+            None => "(request failed: no answer: the connection failed or closed early)".to_string(),
+        };
+        let _ = writeln!(out, "answer: {shown}");
         if answer.to_ascii_lowercase().contains(VISION_ANSWER) {
             let _ = writeln!(out, "[ OK ] vision (the picture's colour)");
         } else {
