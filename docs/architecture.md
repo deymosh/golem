@@ -40,6 +40,9 @@ Golem binds `LOCAL_AI_HOST` (default `127.0.0.1`) on `LOCAL_AI_PORT` (8000); the
 binds `127.0.0.1` on `ENGINE_PORT` (the next port) and requires `LOCAL_AI_API_KEY`, which
 the front hands on with every request. Anyone who can reach the port can use the GPU:
 change the key before binding `0.0.0.0`, and firewall the port if the LAN is not trusted.
+The router starts each model as a child server on a loopback port of its own, and that
+child takes no key (its log says "no API key is set"): any process on this machine can
+reach the model through it, as it can reach the router's other loopback endpoints.
 
 ## Web search
 

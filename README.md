@@ -158,16 +158,19 @@ On the Golem machine itself: `golem claude` does all of this. See
 ### Anything OpenAI (OpenCode, Aider, scripts)
 
 Base URL `http://<golem-host>:8000/v1`, model `ornith-1.5-35b` (or `ornith-1.5-9b`),
-Bearer = `LOCAL_AI_API_KEY`.
+Bearer = `LOCAL_AI_API_KEY`. Golem answers the Chat Completions API and the Responses API
+(what Codex speaks, `wire_api = "responses"`), with or without the `/v1`. The console's
+**Connect an agent** panel writes the exact setup for Claude Code, OpenCode and Codex.
 OpenCode and Aider have much smaller per-turn overheads than Claude Code (~6-10K tokens vs
 15-20K) — on a constrained context window that meaningfully increases the usable working
 context. See [docs/models.md](docs/models.md).
 
 ### Web search
 
-Every chat request through golem's port gets two tools the model may call,
-`golem_web_search` and `golem_web_fetch`, and Claude Code's own **WebSearch** works
-unchanged: golem answers it. A search goes to DuckDuckGo from your machine (no key, no
+Every chat request through golem's port - Anthropic, Chat Completions or Responses - gets
+two tools the model may call, `golem_web_search` and `golem_web_fetch`, beside every tool
+the agent brings, and Claude Code's own **WebSearch** and Codex's hosted `web_search` work
+unchanged: golem answers them. A search goes to DuckDuckGo from your machine (no key, no
 account) and comes back to the model as a short numbered list; a fetch comes back as the
 page's main text in Markdown, never HTML, and only public pages are fetched - never this
 machine or your network. Each one shows in the answer as `🔎 Golem web search: ...` or

@@ -95,6 +95,18 @@ section is one model with its own flags. A request's `model` field picks the sec
 3. `MODEL_ALIAS = "<preset>"` in `golem.toml` to make it the default; clients that name a
    model pick any section without it.
 
+Each fact about a model lives in one place:
+
+| File | Holds | Written by |
+|---|---|---|
+| `config/models.ini` | llama-server flags, and the `; Download:` lines `up` fetches from | golem, on pull; the tuner overlays its own |
+| `data/models/<file>.json` | repo, revision, quant, files, size, base model, licence, date | golem, beside the file |
+| `config/library.ini` | curated models: repo, quant, role, vendor score and its source | shipped with golem |
+
+A model outside the library has no score to read - the Hub publishes none - so `tune
+--auto` ranks it after every scored one, by parameters, then the context and the decode
+its cheap sweep reached; a model under the floors is no candidate at all.
+
 ## Memory math, two regimes
 
 **Dense models (all in VRAM)** - OS/display overhead (~0.5-1.5 GB on a desktop GPU) leaves
