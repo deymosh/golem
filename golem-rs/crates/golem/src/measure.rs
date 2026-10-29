@@ -24,8 +24,12 @@ pub fn bench(home: &Path, args: &[String]) -> i32 {
     run(home, Kind::Bench, args, bench::run)
 }
 
-/// `golem eval [--long N]`.
+/// `golem eval [--long N]`, or `golem eval --agent [anthropic|openai]` for
+/// the agent suite, which prints its verdicts and records no row yet.
 pub fn eval(home: &Path, args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("--agent") {
+        return crate::agent::run(home, &args[1..], &mut std::io::stdout());
+    }
     run(home, Kind::Eval, args, eval::run)
 }
 

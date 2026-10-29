@@ -93,6 +93,10 @@ pub mod html;
 /// golem's own calls from the client.
 pub mod webtools;
 
+/// The agent suite: coding tasks run against an in-memory workspace over
+/// either API, graded on what the agent leaves behind.
+pub mod agent;
+
 /// Golem's own updates, decided: release tags and assets, the releases
 /// answer, and the state file that remembers what was checked and skipped.
 pub mod update;

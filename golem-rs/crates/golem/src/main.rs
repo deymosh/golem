@@ -52,6 +52,8 @@ Measuring:
   bench [--runs N] [--prefill N]
                    Speed: decode and prefill tok/s
   eval [--long N]  Quality gate: sanity, tool calls, needle at depth
+  eval --agent [anthropic|openai]
+                   Agent suite: coding tasks with tools, on both APIs
   tune [preset] [--adopt] [--no-gate]
                    Find the fastest setup this machine can serve, gate it,
                    and with --adopt serve it
