@@ -26,6 +26,13 @@ pub const SEARCH_TOOL: &str = "golem_web_search";
 /// The fetch tool golem adds to a request.
 pub const FETCH_TOOL: &str = "golem_web_fetch";
 
+/// The header golem's own measurements send (`off`): the front adds no tools
+/// to such a request. Two tool definitions in a request that had none change
+/// what the model writes - on the 35B the MTP head's acceptance fell from 68%
+/// to 61% and decode from 61.4 to 57.0 t/s - and a bench or a gate that
+/// measured that would not compare with any row before it.
+pub const MEASURE_HEADER: &str = "X-Golem-Web-Tools";
+
 /// How many results a search returns: about 1K tokens, because on a 12 GB
 /// card prefill is what a tool result costs.
 pub const SEARCH_RESULTS: usize = 8;

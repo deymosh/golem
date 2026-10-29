@@ -302,7 +302,7 @@ fn to_engine(home: &Path, request: &Request, body: &[u8]) -> std::io::Result<Ans
     let mut upstream = TcpStream::connect_timeout(&addr, ENGINE_CONNECT)?;
     let mut head = format!("{} {} HTTP/1.1\r\n", request.method, request.target);
     for (name, value) in &request.headers {
-        if is_framing(name) || name.eq_ignore_ascii_case("expect") {
+        if is_framing(name) || name.eq_ignore_ascii_case("expect") || name.eq_ignore_ascii_case(tools::MEASURE_HEADER) {
             continue;
         }
         head.push_str(&format!("{name}: {value}\r\n"));
@@ -465,7 +465,8 @@ fn relay_answer(answer: &mut Answer, client: &mut TcpStream) -> std::io::Result<
 
 /// A chat request with golem's tools in it.
 fn intercept(front: &Front, api: ChatApi, request: &Request, body: Value, client: &mut TcpStream) -> std::io::Result<()> {
-    let on = web_tools_on(&front.home);
+    let measuring = request.header(tools::MEASURE_HEADER).is_some_and(|v| v.trim().eq_ignore_ascii_case("off"));
+    let on = web_tools_on(&front.home) && !measuring;
     let prepared = match api {
         ChatApi::Anthropic => tools::prepare_anthropic(body, on),
         ChatApi::OpenAi => tools::prepare_openai(body, on),

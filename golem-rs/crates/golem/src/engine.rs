@@ -270,6 +270,9 @@ fn request(
     if !base.api_key.is_empty() {
         head.push_str(&format!("Authorization: Bearer {}\r\n", base.api_key));
     }
+    // Golem's own requests are measurements: through golem's port they get
+    // none of its web tools (golem_core::webtools::MEASURE_HEADER).
+    head.push_str(&format!("{}: off\r\n", golem_core::webtools::MEASURE_HEADER));
     if let Some(body) = body {
         head.push_str("Content-Type: application/json\r\n");
         head.push_str(&format!("Content-Length: {}\r\n", body.len()));

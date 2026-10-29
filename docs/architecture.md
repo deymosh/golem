@@ -98,6 +98,14 @@ engine serves Anthropic's API only under `/v1`, so golem sends each to the engin
   page that only renders with JavaScript says so with its description. Pages are kept
   per service for their later parts.
 
+Golem's own measurements - `bench`, `eval`, `tune`, the agent suite - mark their requests
+(`X-Golem-Web-Tools: off`, taken out before the engine sees it) and get none of the tools:
+two tool definitions in a request that had none change what the model writes. On the 35B,
+paired on one load on 2026-10-29, the MTP head's acceptance fell from 68% to 61% and decode
+from 61.4 to 57.0 t/s with them, so a bench through the front that took them compared with
+no row before it. That cost is real for a client that sends no tools of its own, a plain
+chat page among them; an agent's request already carries its tools.
+
 `WEB_SEARCH = "off"` hands both paths to the engine without the tools (a server tool in
 the request is still taken out: the engine cannot read it).
 
