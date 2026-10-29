@@ -57,11 +57,19 @@ inside each; the levers are fewer loads and less bench per load.
   The second run spent one load on a context probe read once loaded, before the bench
   adds its ~70 MiB; the context search now adds the seed's own difference to such a
   reading, which brings that run's prediction back to one load.
-- **Next, the ranking's noise.** The third run ranked `ub1024` first by 4% on decode -
-  past the 3% tie band - where the quiet-desktop pair measured the two as tied and
-  `ub2048` 57% faster on prefill; the earlier verdict was put back by hand. One bench of
-  three runs per point does not separate setups 4% apart on a desktop: the tie band
-  should come from the bench's own spread, or the top two be measured again in turn.
+- **In, the ranking's noise.** The third run ranked `ub1024` first by 4% on decode - past
+  a fixed 3% tie band - where the quiet-desktop pair measured the two as tied and
+  `ub2048` 57% faster on prefill. Its two benches were 4% and 5% wide (best run over
+  median), so the gap sat inside their own spread. The tie is now that spread, held
+  between 3% and 8% (`tune::tie_band`), and costs no load. The evening's run on a busy
+  desktop ranked n35 first with `ub1024` "tied within 6.0%" and passed the gate (639 t/s
+  prefill, 33.4 at depth) in 16 min 32 s - and 11 loads.
+- **Next, the context search near the wall.** Four of those loads went to contexts
+  within 26K tokens of the seed (262144, 242688, 238592, 237568), every one over the wall
+  by 3-220 MiB, and the search ended on the seed's 236544. With the desktop holding
+  ~100 MiB more than in the morning, the line through the seed and the first probe sat
+  under the readings that followed: a prediction that lands within a reading's noise of
+  the wall should stop, or step down by the noise, rather than probe again.
 - **Done when:** the reference box's `golem tune ornith-1.5-35b` reaches the same verdict
   in at most seven loads and measurably less wall-clock than the same day's run of the
   previous build, and the 200K gate passes on the result.

@@ -358,6 +358,9 @@ struct Measured {
     engine: String,
     label: String,
     decode: f64,
+    /// The bench's best run, 0 when it said none: the spread the ranking's
+    /// tie is drawn from.
+    decode_best: f64,
     prefill: f64,
     vram_mib: f64,
     ctx: u64,
@@ -383,6 +386,7 @@ impl Measured {
             engine: self.engine.clone(),
             label: self.label.clone(),
             decode: self.decode,
+            decode_best: self.decode_best,
             prefill: self.prefill,
             ctx: self.ctx,
             ubatch: self.ubatch,
@@ -1238,6 +1242,7 @@ impl<'a> Tuner<'a> {
             engine: engine.to_string(),
             label: label.to_string(),
             decode,
+            decode_best: bench.decode_best.unwrap_or(0.0),
             prefill,
             vram_mib: vram,
             ctx,
@@ -1345,14 +1350,27 @@ impl<'a> Tuner<'a> {
         let ranked: Vec<usize> = tune::rank(&points, &floor, wall);
         self.emit(format_args!(""));
         self.emit(format_args!(
-            "  ranked (best decode that fits and is not spilling; within {:.0}% of it, best prefill):",
-            tune::DECODE_TIE * 100.0
+            "  ranked (best decode that fits and is not spilling; tied with it by the benches' own spread, \
+             {:.0}-{:.0}%, best prefill):",
+            tune::DECODE_TIE * 100.0,
+            tune::DECODE_TIE_MAX * 100.0
         ));
+        let top = ranked.iter().copied().max_by(|&a, &b| {
+            points[a].decode.partial_cmp(&points[b].decode).unwrap_or(std::cmp::Ordering::Equal)
+        });
         for &i in &ranked {
             let p = &points[i];
+            // Whether the point ties with the best decode, and by how wide a
+            // band: the line that explains a slower decode ranked first.
+            let tie = match top {
+                Some(t) if t != i && tune::tied(&points[t], p) => {
+                    format!("  tied within {:.1}%", tune::tie_band(&points[t], p) * 100.0)
+                }
+                _ => String::new(),
+            };
             self.emit(format_args!(
-                "    {:<14} {:<12} {:>6.1} t/s decode  {:>6.0} t/s prefill  {:>5.0} MiB",
-                p.engine, p.label, p.decode, p.prefill,
+                "    {:<14} {:<12} {:>6.1} t/s decode (best {:>5.1})  {:>6.0} t/s prefill  {:>5.0} MiB{tie}",
+                p.engine, p.label, p.decode, p.decode_best, p.prefill,
                 self.points[i].vram_mib
             ));
         }
@@ -1589,9 +1607,10 @@ impl<'a> Tuner<'a> {
                         "  context grows to {next} ({decode:.1} t/s decode, {vram:.0} MiB VRAM)"
                     ));
                 }
-                _ if self.points[measured].wall_only => {
-                    self.emit(format_args!("  context {next} does not fit ({vram:.0} MiB VRAM once loaded, over the wall)"))
-                }
+                _ if self.points[measured].wall_only => self.emit(format_args!(
+                    "  context {next} does not fit ({vram:.0} MiB VRAM once loaded, over the wall; \
+                     {on_line:.0} MiB on the line with the {bench_adds:.0} a bench adds)"
+                )),
                 probe => self.emit(format_args!(
                     "  context {next} does not fit ({decode:.1} t/s decode, {vram:.0} MiB VRAM{})",
                     if matches!(probe, Probe::UnderFloor { .. }) { ", spilled" } else { ", over the wall" }

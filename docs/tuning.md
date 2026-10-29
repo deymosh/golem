@@ -74,10 +74,12 @@ and put back after the run on the configuration as it then stands.
    a file, and the probe keeps it honest).
 4. **Rank** what is not excluded by decode, and take the best. A point over the wall is
    excluded however fast it ran: the splits the bisection measured past the frontier
-   decode faster precisely because they hold more than the card can spare. Decodes
-   within 3% of the best (`DECODE_TIE`) are a tie, and the tie goes to the faster
-   prefill: a gap that small
-   is run-to-run noise, and prefill is paid on every first prompt.
+   decode faster precisely because they hold more than the card can spare. A decode
+   close enough to the best is a tie, and the tie goes to the faster prefill: prefill is
+   paid on every first prompt. How close is the two benches' own spread (best run over
+   median), held between 3% and 8% (`tune::tie_band`): a drafting model's decode moves
+   with what each run accepts, and a busy desktop moves it further, so a gap inside the
+   benches' own spread is noise, not a ranking.
 5. **Grow the context, by prediction.** VRAM is a straight line in the context at a fixed
    split. The winner's own point is the line's first point; one doubling (capped at the
    trained context) gives the second; from there the largest context under the wall is

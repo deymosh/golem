@@ -116,7 +116,12 @@ pub fn loads_left(phase: Phase, in_phase: u32) -> u32 {
 pub struct Point {
     pub engine: String,
     pub label: String,
+    /// Median decode of the bench's runs, tokens/s.
     pub decode: f64,
+    /// Best decode of the same runs, 0 when unknown: with the median it is
+    /// the bench's own spread, which sets how wide a decode tie is
+    /// ([`tie_band`]).
+    pub decode_best: f64,
     pub prefill: f64,
     pub ctx: u64,
     /// The `ubatch-size` it ran with, 0 for the engine's default. Prefill
@@ -182,15 +187,47 @@ pub fn exclusion(point: &Point, engine_best_prefill: f64, floor: &Floor, wall_mi
     None
 }
 
-/// How close to the best decode a point must be to count as tied with it,
-/// as a fraction of the best.
+/// The narrowest a decode tie is, as a fraction of the best decode.
 ///
-/// Best-of-3 decode on one unchanged setup varies by about 1% (63.1 to 63.9
-/// t/s in the 2026-10-25 pair), so a gap under 3% is noise, not a ranking.
-/// Within the tie, prefill decides: ub2048 and ub1024 decoded alike there,
-/// and ub2048 prefilled 55% faster - which a session pays on every first
-/// prompt.
+/// Best-of-3 decode on one unchanged setup varies by about 1% on a quiet
+/// desktop (63.1 to 63.9 t/s in the 2026-10-25 pair), so a gap under 3% is
+/// noise, not a ranking. Within the tie, prefill decides: ub2048 and ub1024
+/// decoded alike there, and ub2048 prefilled 55% faster - which a session
+/// pays on every first prompt.
 pub const DECODE_TIE: f64 = 0.03;
+
+/// The widest a decode tie is, however noisy the benches were: a gap past
+/// it is a ranking whatever the spread says.
+pub const DECODE_TIE_MAX: f64 = 0.08;
+
+/// How far under `top`'s decode `other` may fall and still tie with it, as a
+/// fraction: the wider of the two benches' own spreads (best over median),
+/// held between [`DECODE_TIE`] and [`DECODE_TIE_MAX`].
+///
+/// A drafting model's decode moves with what each run happens to accept,
+/// and a busy desktop moves it further: in the reference box's third tune
+/// of 2026-10-29 the n35 bench read 52.2 median / 54.3 best and the ub1024
+/// bench 54.3 / 57.0, so a 4% gap between the medians sat inside both
+/// benches' own spread - and a fixed 3% band ranked ub1024 first on it,
+/// at a third less prefill than the quiet pair had measured for ub2048.
+pub fn tie_band(top: &Point, other: &Point) -> f64 {
+    spread(top).max(spread(other)).clamp(DECODE_TIE, DECODE_TIE_MAX)
+}
+
+/// Whether `other` decodes close enough to `top` to tie with it.
+pub fn tied(top: &Point, other: &Point) -> bool {
+    other.decode >= top.decode * (1.0 - tie_band(top, other))
+}
+
+/// A bench's spread, best over median, as a fraction of the median; 0 when
+/// the best is unknown.
+pub fn spread(p: &Point) -> f64 {
+    if p.decode > 0.0 && p.decode_best > p.decode {
+        (p.decode_best - p.decode) / p.decode
+    } else {
+        0.0
+    }
+}
 
 /// The best prefill each engine reached at each `ubatch-size`, in the order
 /// they first appear.
@@ -218,11 +255,11 @@ fn best_of(best: &[(&str, u32, f64)], point: &Point) -> f64 {
 
 /// Point indices, best first, with excluded points dropped.
 ///
-/// Best decode first, except that the points within [`DECODE_TIE`] of the
-/// best decode form one band at the top, ordered by prefill. Below the band
-/// decode alone decides. The depth floor is deliberately *not* applied: a
-/// point is ranked before it is gated (see [`winner`]). Exact ties keep input
-/// order, so the sweep's own order decides.
+/// Best decode first, except that the points tied with the best decode
+/// ([`tie_band`]) form one band at the top, ordered by prefill. Below the
+/// band decode alone decides. The depth floor is deliberately *not* applied:
+/// a point is ranked before it is gated (see [`winner`]). Exact ties keep
+/// input order, so the sweep's own order decides.
 pub fn rank(points: &[Point], floor: &Floor, wall_mib: u64) -> Vec<usize> {
     let best = best_prefill(points);
     let mut kept: Vec<usize> = (0..points.len())
@@ -232,10 +269,13 @@ pub fn rank(points: &[Point], floor: &Floor, wall_mib: u64) -> Vec<usize> {
     // Stable sorts: equal values stay in the order they were measured.
     kept.sort_by(|&a, &b| desc(points[a].decode, points[b].decode));
     let Some(&top) = kept.first() else { return kept };
-    let cut = points[top].decode * (1.0 - DECODE_TIE);
-    let band = kept.iter().take_while(|&&i| points[i].decode >= cut).count();
-    kept[..band].sort_by(|&a, &b| desc(points[a].prefill, points[b].prefill));
-    kept
+    // Each point's band is its own, so a noisy bench can tie with the top
+    // while a quieter one above it does not: partition, not a prefix.
+    let (mut band, rest): (Vec<usize>, Vec<usize>) =
+        kept.into_iter().partition(|&i| tied(&points[top], &points[i]));
+    band.sort_by(|&a, &b| desc(points[a].prefill, points[b].prefill));
+    band.extend(rest);
+    band
 }
 
 /// Why `points[i]` is out of [`rank`], judged against the same per-engine
@@ -604,6 +644,7 @@ mod tests {
             engine: engine.into(),
             label: label.into(),
             decode,
+            decode_best: 0.0,
             prefill,
             ctx,
             ubatch: 0,
@@ -681,6 +722,59 @@ mod tests {
     fn the_default_floor_is_the_one_the_plan_agreed() {
         let f = Floor::default();
         assert_eq!((f.decode, f.prefill, f.depth_decode), (25.0, 350.0, 15.0));
+    }
+
+    fn best(mut p: Point, decode_best: f64) -> Point {
+        p.decode_best = decode_best;
+        p
+    }
+
+    #[test]
+    fn a_noisy_bench_widens_the_tie_to_its_own_spread() {
+        // The reference box's third tune, 2026-10-29: medians 4% apart,
+        // each bench 4-5% wide. A fixed 3% band ranked ub1024 first.
+        let floor = Floor::default();
+        let points = vec![
+            best(at_ubatch(point("llama.cpp", "n35", 52.2, 706.0, 236544), 2048), 54.3),
+            best(at_ubatch(point("llama.cpp", "ub1024", 54.3, 509.0, 236544), 1024), 57.0),
+        ];
+        assert_eq!(rank(&points, &floor, WALL), vec![0, 1]);
+        assert!((tie_band(&points[1], &points[0]) - 0.0497).abs() < 0.001);
+
+        // The same medians from quiet benches are a ranking.
+        let quiet = vec![
+            best(at_ubatch(point("llama.cpp", "n35", 52.2, 706.0, 236544), 2048), 52.5),
+            best(at_ubatch(point("llama.cpp", "ub1024", 54.3, 509.0, 236544), 1024), 54.6),
+        ];
+        assert_eq!(rank(&quiet, &floor, WALL), vec![1, 0]);
+    }
+
+    #[test]
+    fn the_spread_never_opens_the_tie_past_its_ceiling() {
+        // The first tune's ub1024 bench, 47.2 median / 57.4 best: a 22%
+        // spread, held to 8%, so the n35 16% above it stays ahead.
+        let floor = Floor::default();
+        let points = vec![
+            best(at_ubatch(point("llama.cpp", "n35", 56.3, 722.0, 236544), 2048), 56.3),
+            best(at_ubatch(point("llama.cpp", "ub1024", 47.2, 900.0, 236544), 1024), 57.4),
+        ];
+        assert_eq!(tie_band(&points[0], &points[1]), DECODE_TIE_MAX);
+        assert_eq!(rank(&points, &floor, WALL), vec![0, 1]);
+        // An unknown best is no spread: the floor of the band holds.
+        assert_eq!(spread(&point("llama.cpp", "x", 50.0, 800.0, 4096)), 0.0);
+    }
+
+    #[test]
+    fn a_point_tied_by_its_own_spread_joins_the_band_past_a_quieter_one() {
+        // b is 4% under the top with a quiet bench (out of the band); c is
+        // 6% under with a 7% spread (in it): the band is not a prefix.
+        let floor = Floor::default();
+        let points = vec![
+            best(point("llama.cpp", "a", 60.0, 700.0, 4096), 60.3),
+            best(point("llama.cpp", "b", 57.6, 900.0, 4096), 57.8),
+            best(point("llama.cpp", "c", 56.4, 800.0, 4096), 60.3),
+        ];
+        assert_eq!(rank(&points, &floor, WALL), vec![2, 0, 1]);
     }
 
     #[test]
