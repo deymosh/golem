@@ -264,3 +264,74 @@ fn web_search_off_leaves_the_tools_out() {
     assert!(!sent.contains("golem_web") && !sent.contains("web_search_2025"), "{sent}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The live front on this checkout's port, hit the way eval hits it: many
+/// small chat requests through golem's own client, each answer checked.
+/// Ignored by default - it needs a running service and a loaded model.
+#[test]
+#[ignore]
+fn the_live_front_hands_every_answer_back() {
+    let home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let base = golem::engine::Base::from_home(&home).expect("a base");
+    let model = golem::config::get(&home, "MODEL_ALIAS").unwrap_or_default();
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+    let bodies = [
+        format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"Say hi"}}],"max_tokens":2,"chat_template_kwargs":{{"enable_thinking":false}}}}"#),
+        format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":[{{"type":"image_url","image_url":{{"url":"data:image/png;base64,{png}"}}}},{{"type":"text","text":"What colour is this? One word."}}]}}],"chat_template_kwargs":{{"enable_thinking":false}},"temperature":0,"max_tokens":8}}"#),
+    ];
+    let mut failed = Vec::new();
+    for i in 0..200 {
+        let body = &bodies[i % 2];
+        match golem::engine::post_json(&base, "/v1/chat/completions", body, std::time::Duration::from_secs(120)) {
+            Some(reply) if reply.ok() && reply.body.contains("\"choices\"") => {}
+            other => failed.push(format!("#{i}: {other:?}")),
+        }
+    }
+    println!("{} of 200 failed", failed.len());
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// A whole answer that a reset follows is still an answer. A server that
+/// closes without reading the request resets the connection on Windows, and
+/// the reset throws away what the client had not read yet - so golem's
+/// client stops at the end its `Content-Length` names.
+#[test]
+fn golems_client_keeps_an_answer_a_reset_follows() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else { return };
+        // Never reads the request: closing over it is the reset.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let _ = stream.write_all(json_reply(r#"{"choices":[{"message":{"content":"4"}}]}"#).as_bytes());
+    });
+    let base = golem::engine::Base { host: "127.0.0.1".into(), port, prefix: String::new(), api_key: String::new() };
+    let body = format!(r#"{{"model":"m","messages":[],"pad":"{}"}}"#, "x".repeat(256 * 1024));
+    let reply = golem::engine::post_json(&base, "/v1/chat/completions", &body, std::time::Duration::from_secs(10));
+    assert!(reply.as_ref().is_some_and(|r| r.ok() && r.body.contains("\"4\"")), "{reply:?}");
+}
+
+/// The front's answer reaches a client that sent more than its
+/// `Content-Length` and reads only after the front is done: the front shuts
+/// its side and drains the rest rather than closing over it.
+#[test]
+fn the_front_closes_without_losing_its_answer() {
+    let reply = r#"{"data":[]}"#;
+    let engine = engine(vec![json_reply(reply)]);
+    let (dir, port) = front("close", engine.port);
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    let body = r#"{"model":"m"}"#;
+    let request = format!(
+        "POST /v1/models HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).expect("write");
+    // Bytes the front never asked for, arriving once it has answered.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let _ = stream.write_all(b"trailing bytes");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).expect("the answer, not a reset");
+    assert!(answer.starts_with("HTTP/1.1 200") && answer.ends_with(reply), "{answer}");
+    std::fs::remove_dir_all(&dir).ok();
+}

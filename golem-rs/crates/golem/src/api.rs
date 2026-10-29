@@ -396,9 +396,35 @@ fn serve(front: &Front, mut client: TcpStream) -> std::io::Result<()> {
         _ => None,
     };
     let parsed = api.and_then(|_| std::str::from_utf8(&request.body).ok()).and_then(|text| json::parse(text).ok());
-    match (api, parsed) {
+    let served = match (api, parsed) {
         (Some(api), Some(body)) => intercept(front, api, &request, body, &mut client),
         _ => pass(front, &request, &request.body, &mut client),
+    };
+    close(&client, &mut reader);
+    served
+}
+
+/// How long a closing connection waits for the client to finish.
+const CLOSE_DRAIN: Duration = Duration::from_secs(2);
+
+/// End a connection the way that keeps the answer.
+///
+/// Windows answers a socket closed with bytes it never read with a reset,
+/// and a reset throws away whatever the client had received but not read
+/// yet - the whole answer, for a client that reads it at the end. So the
+/// sending side is shut first, which tells the client the answer is
+/// complete, and anything the client still sends is read and dropped until
+/// it closes its side or [`CLOSE_DRAIN`] runs out.
+fn close(client: &TcpStream, reader: &mut BufReader<TcpStream>) {
+    let _ = client.shutdown(std::net::Shutdown::Write);
+    let _ = client.set_read_timeout(Some(CLOSE_DRAIN));
+    let deadline = std::time::Instant::now() + CLOSE_DRAIN;
+    let mut sink = [0u8; 4096];
+    while std::time::Instant::now() < deadline {
+        match reader.read(&mut sink) {
+            Ok(n) if n > 0 => {}
+            _ => break,
+        }
     }
 }
 

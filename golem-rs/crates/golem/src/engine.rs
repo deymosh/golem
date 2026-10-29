@@ -282,9 +282,45 @@ fn request(
     }
     stream.flush().ok()?;
 
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).ok()?;
+    let raw = read_reply(&mut stream)?;
     parse_reply(&String::from_utf8_lossy(&raw))
+}
+
+/// Read one answer: as far as its `Content-Length` says, else to the end of
+/// the connection.
+///
+/// Reading no further than the body means a reset that arrives after a
+/// complete answer cannot cost it. Windows answers a socket closed with
+/// bytes it never read with a reset, and a reset throws away whatever the
+/// receiver had not read yet, so a reader that waits for the end of the
+/// connection loses an answer it already had.
+fn read_reply(stream: &mut TcpStream) -> Option<Vec<u8>> {
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        if framed_end(&raw).is_some_and(|end| raw.len() >= end) {
+            return Some(raw);
+        }
+        match stream.read(&mut buf) {
+            Ok(0) => return Some(raw),
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Where a reply framed by `Content-Length` ends, once its head is in.
+/// `None` for a head still arriving, a chunked body or no length at all:
+/// those are read to the end of the connection.
+fn framed_end(raw: &[u8]) -> Option<usize> {
+    let head_end = find(raw, 0, b"\r\n\r\n")? + 4;
+    let head = String::from_utf8_lossy(&raw[..head_end]).to_ascii_lowercase();
+    if head.contains("transfer-encoding: chunked") {
+        return None;
+    }
+    let length: usize = header_value(&head, "content-length")?.parse().ok()?;
+    Some(head_end + length)
 }
 
 /// Split an HTTP/1.1 response into its status code and its body.
