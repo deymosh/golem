@@ -21,7 +21,7 @@ A point is benched with the wall in hand (`bench --wall`): the warmup loads the 
 from then on the card holds its weights, KV cache and compute buffers, so a reading over the
 wall after the warmup is over the wall at the end. Such a point stops there - its VRAM is
 the measurement, its speeds are never taken - and is excluded like any point over the wall;
-it records no row in `bench/results.jsonl`, and `winner.txt` lists it as "over the wall
+it records no row in `results/results.jsonl`, and `winner.txt` lists it as "over the wall
 once loaded". The splits past the frontier and the context probes that overshoot are most
 of these.
 
@@ -142,7 +142,7 @@ effective file, so one tune's answers never become the next one's assumptions.
 effective preset, and an engine that was up comes back on it. The console's and the
 screen's Tune is `tune <model> --adopt`: it always gates, so a tune started there serves
 its verdict once the gate passes. `data/tuned/<host>/winner.txt` records the verdict and every point, and
-every point is also a row in `bench/results.jsonl`.
+every point is also a row in `results/results.jsonl`.
 
 ## `--auto`
 

@@ -1,7 +1,7 @@
 # Portable golem binary: test + build on the three desktop platforms.
 # CI never runs models and never adopts anything (the 200K eval gate stays
 # a manual, on-real-hardware check); it only proves the code builds and the
-# unit tests pass. See golem-rs/README.md.
+# unit tests pass. See crates/README.md.
 
 name: golem-bin
 
@@ -12,9 +12,9 @@ on:
   push:
     branches: [master]
     tags: ['v*']
-    paths: [golem-rs/**, config/**, engines/**, golem.toml.example, .github/workflows/golem-bin.yml]
+    paths: [crates/**, Cargo.toml, Cargo.lock, config/**, golem.toml.example, .github/workflows/golem-bin.yml]
   pull_request:
-    paths: [golem-rs/**, config/**, engines/**, golem.toml.example, .github/workflows/golem-bin.yml]
+    paths: [crates/**, Cargo.toml, Cargo.lock, config/**, golem.toml.example, .github/workflows/golem-bin.yml]
 
 env:
   CARGO_TERM_COLOR: always
@@ -39,28 +39,28 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev
       - uses: actions/cache@v5
         with:
-          path: golem-rs/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('golem-rs/**/Cargo.lock') }}
+          path: target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
       - name: Test
-        run: cargo test --workspace --manifest-path golem-rs/Cargo.toml
+        run: cargo test --workspace
       - name: Build (release)
-        run: cargo build --release --manifest-path golem-rs/Cargo.toml
+        run: cargo build --release
       # The app window and tray, on every platform - on Windows with the C
       # runtime linked in, as the release is.
       - name: Build (release, desktop)
         env:
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
-        run: cargo build --release --features desktop --manifest-path golem-rs/Cargo.toml
+        run: cargo build --release --features desktop
       # The release's plain Linux binary: static, against musl.
       - name: Build (release, static musl)
         if: runner.os == 'Linux'
         run: |
           rustup target add x86_64-unknown-linux-musl
-          cargo build --release --target x86_64-unknown-linux-musl --manifest-path golem-rs/Cargo.toml
-          file golem-rs/target/x86_64-unknown-linux-musl/release/golem | grep -q 'static'
+          cargo build --release --target x86_64-unknown-linux-musl
+          file target/x86_64-unknown-linux-musl/release/golem | grep -q 'static'
       - name: Smoke
-        run: ./golem-rs/target/release/golem --version
+        run: ./target/release/golem --version
         shell: bash
 
   # A tag (v*) attaches the three binaries to a GitHub release.
@@ -112,11 +112,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev
-      - run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }} --manifest-path golem-rs/Cargo.toml
+      - run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
       - name: Package
         shell: bash
         run: |
-          src=golem-rs/target/${{ matrix.target }}/release/golem
+          src=target/${{ matrix.target }}/release/golem
           if [[ "${{ runner.os }}" == Windows ]]; then
             # Archive from inside the release directory: 7z stores the paths it
             # is given, and the zip must hold golem.exe and golemw.exe at its

@@ -23,7 +23,7 @@ eliminates most of the field:
 | vLLM, SGLang, TensorRT-LLM, LMDeploy, TGI | no | partial | datacenter engines, Linux-first, no single-GPU expert offload |
 | Ollama, LM Studio, TabbyAPI, llamafile | no | yes | wrappers or front-ends; OpenAI clients only |
 
-Engine gate, 2026-10-19, quiet desktop, rows in `bench/results.jsonl`:
+Engine gate, 2026-10-19, quiet desktop, rows in `results/results.jsonl`:
 
 | Engine | Model | ctx | decode best/median | prefill | VRAM |
 |---|---|---|---|---|---|
@@ -51,7 +51,7 @@ Golem still does not install or start it; it is measured as another server.
 
 Measured 2026-10-25 on the reference box (Strata 0.2.6, engine 0.1.50, `--context 200k
 --vision off`, golem's `eval --long 200000` against port 8080; the row is in
-`bench/results.jsonl`), beside llama.cpp b11379 with Ornith-1.5-35B the same afternoon:
+`results/results.jsonl`), beside llama.cpp b11379 with Ornith-1.5-35B the same afternoon:
 
 | | Strata, Coder IQ1_M | llama.cpp, Ornith-1.5-35B |
 |---|---|---|

@@ -11,7 +11,7 @@ tokens-per-second figure is one input, not the answer.
 
 ## Where it stands
 
-Checked against the code and `bench/results.jsonl` (176 rows on the reference box):
+Checked against the code and `results/results.jsonl` (176 rows on the reference box):
 
 - **What holds up.** One binary owns the engine (`service.rs`); every decision is a pure,
   tested function in `golem-core` (558 tests); a row records host, build, flags and
@@ -126,7 +126,7 @@ file with search, recover from a tool error, two independent calls in one turn.
   prediction until a load confirms it.
 - Rank candidates by the agent suite where a model has been measured, by the vendor score
   only where it has not, and say which.
-- **Done when:** for the models in `bench/results.jsonl`, the predicted context is within
+- **Done when:** for the models in `results/results.jsonl`, the predicted context is within
   5% of the context the tuner reached, and the console's pull suggestions name a fit for
   this machine.
 

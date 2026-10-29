@@ -32,21 +32,20 @@ fi
 
 export PATH="${MINGW_BIN}:${PATH}"
 
-# The manifest lives in golem-rs/, the cargo config and the rustup override at
-# the repository root. Both are found from the working directory, so cargo
-# runs from the root whatever directory called this - relative paths in the
-# arguments resolve against the root too. --manifest-path is a flag of each
-# subcommand, not of cargo itself, so it goes after the subcommand.
+# The workspace manifest, the cargo config and the rustup override are all at
+# the repository root, and cargo finds them from the working directory: it
+# runs from the root whatever directory called this, so relative paths in the
+# arguments resolve against the root too.
 cd "${ROOT_DIR}"
 [[ $# -ge 1 ]] || { exec cargo; }
 sub="$1"; shift
-cargo "${sub}" --manifest-path "${ROOT_DIR}/golem-rs/Cargo.toml" "$@"
+cargo "${sub}" "$@"
 
 # A build leaves the binary at the repository root (git-ignored), which is the
-# same shape a release has: a golem executable sitting next to the bench/ and
-# data/ it uses. paths::home picks the directory holding the binary when it
-# has a bench/ beside it, so ./golem.exe works on the checkout's own files -
-# and the same code finds its folders in a fresh release directory.
+# same shape a release has: a golem executable sitting next to the results/
+# and data/ it uses. paths::home is the directory holding the binary, so
+# ./golem.exe works on the checkout's own files - and the same code makes its
+# folders in a fresh release directory.
 #
 # A test run builds without features, so it only puts a binary there when
 # there is none: replacing one would swap a desktop build for one with no
@@ -64,9 +63,9 @@ if [[ "${sub}" == "build" || ( "${sub}" == "test" && ! -f "${root_bin}" ) ]]; th
     esac
     # target/<triple>/<profile>/ when a target triple is configured (the
     # Windows GNU setup), else target/<profile>/ (Linux, macOS).
-    built="$(ls -1 "${ROOT_DIR}/golem-rs/target"/*/"${profile}/${bin}" 2>/dev/null | head -n1 || true)"
-    if [[ -z "${built}" && -f "${ROOT_DIR}/golem-rs/target/${profile}/${bin}" ]]; then
-        built="${ROOT_DIR}/golem-rs/target/${profile}/${bin}"
+    built="$(ls -1 "${ROOT_DIR}/target"/*/"${profile}/${bin}" 2>/dev/null | head -n1 || true)"
+    if [[ -z "${built}" && -f "${ROOT_DIR}/target/${profile}/${bin}" ]]; then
+        built="${ROOT_DIR}/target/${profile}/${bin}"
     fi
     if [[ -n "${built}" ]]; then
         cp -f "${built}" "${ROOT_DIR}/${copy}"
@@ -80,7 +79,7 @@ if [[ "${sub}" == "build" || ( "${sub}" == "test" && ! -f "${root_bin}" ) ]]; th
     # A GNU build with the desktop feature loads WebView2Loader.dll at run
     # time (an MSVC build, like CI's release, links it in); it goes beside
     # the binary, where Windows looks first.
-    loader="$(ls -1t "${ROOT_DIR}/golem-rs/target"/*/"${profile}"/build/webview2-com-sys-*/out/x64/WebView2Loader.dll 2>/dev/null | head -n1 || true)"
+    loader="$(ls -1t "${ROOT_DIR}/target"/*/"${profile}"/build/webview2-com-sys-*/out/x64/WebView2Loader.dll 2>/dev/null | head -n1 || true)"
     if [[ -n "${loader}" ]]; then
         cp -f "${loader}" "${ROOT_DIR}/WebView2Loader.dll"
     fi

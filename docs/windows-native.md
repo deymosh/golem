@@ -50,7 +50,7 @@ vision projector is ~22.6 GB. After that, `up` only fetches what is missing.
 ## Engines and pinned builds
 
 `ENGINE` in `golem.toml` picks the inference engine (default `llama.cpp`); its
-[engines/&lt;name&gt;/engine.ini](../engines/llama.cpp/engine.ini) names the GitHub release
+[config/engines/&lt;name&gt;.ini](../config/engines/llama.cpp.ini) names the GitHub release
 source, the pinned build and the engine's capabilities. `golem up` (or `golem install`)
 installs that build into `.local\engines\<name>\<build>-<backend>\` — a `BUILD` marker is
 written only once every archive extracted, so an interrupted install reinstalls — and keeps
@@ -58,7 +58,7 @@ older builds side by side, so switching back is instant.
 
 Builds are not interchangeable (b11149's *Linux* build failed the 200K needle), so to
 upgrade: set `ENGINE_BUILD = "b<new>"`, `golem restart`, and keep it only if
-`golem eval --long 200000` passes; then bump `build` in the engine.ini. `"latest"` follows
+`golem eval --long 200000` passes; then bump `build` in the adapter. `"latest"` follows
 upstream ungated. `golem up --dry-run` prints the server command line without starting
 anything, and `golem install` puts the engine on disk without starting it at all.
 
@@ -68,7 +68,7 @@ anything, and `golem install` puts the engine on disk without starting it at all
 | `ik_llama.cpp` (Thireus main-b5483) | **rejected** 2026-10-19 | 16.7-16.9 t/s decode vs llama.cpp 58.1 on the same model and flags (3.4x slower): its `--fit` fills to 12.0 GB (sysmem cliff) and the default split is worse; `-rtr` repack crashes at startup; `mlock` of the 17.7 GB buffer fails; no `/v1/messages`, no router, no idle unload |
 | `strata` (v0.1.45) | **rejected, and unsupported** 2026-10-19 | cannot serve 200K on 12 GB: its VRAM cost per context token is ~57 KB (measured: 32K→64K costs 1.80 GiB) against llama.cpp's ~12.7 KB q8 KV, so 200K needs ~11.5 GB for context alone and the engine reports "0 MiB free" at 236K. Where it runs (32768 ctx) it gives 49.8 t/s vs llama.cpp 58.5 at the same context. It installs itself with its own setup, which golem does not run, so its adapter is gone |
 
-Engine gate, 2026-10-19, quiet desktop, all rows in `bench/results.jsonl`:
+Engine gate, 2026-10-19, quiet desktop, all rows in `results/results.jsonl`:
 
 | Engine | Model | ctx | decode best/median | prefill | VRAM |
 |---|---|---|---|---|---|

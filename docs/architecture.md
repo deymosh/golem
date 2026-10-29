@@ -1,7 +1,7 @@
 # Architecture
 
 Golem serves one local model to Claude Code and to any OpenAI client. It is one Rust
-binary (`golem-rs/`) and one configuration file (`golem.toml`); the inference engine is a
+binary (`crates/`) and one configuration file (`golem.toml`); the inference engine is a
 pinned upstream release that the binary installs, starts and supervises.
 
 Three rules shape everything below:
@@ -115,7 +115,7 @@ the request is still taken out: the engine cannot read it).
 ## The binary
 
 ```
-golem-rs/crates/
+crates/
   golem-core/   pure and tested: JSON, golem.toml, INI presets and overlays, GGUF header,
                 results.jsonl, RESULT lines, the report, every tuner decision, the agent
                 suite's tasks and grading, the settings the console edits
@@ -245,7 +245,7 @@ later one.
 `launch::plan` resolves the command line from `golem.toml`, the overrides, the engine's
 adapter and the preset, and spawns nothing - `golem up --dry-run` prints it.
 
-- **The adapter** (`engines/<name>/engine.ini`) names the engine's pinned `build`, the
+- **The adapter** (`config/engines/<name>.ini`) names the engine's pinned `build`, the
   GitHub release archives per platform and GPU backend (`windows_asset_cuda`,
   `linux_asset_rocm`, ...), the server's name, its capabilities (`api_anthropic`,
   `router`) and the flag translation (`flag.*`, `map.*`) from the canonical llama.cpp
@@ -299,11 +299,11 @@ repository root uses the checkout's own files.
 |---|---|
 | `golem.toml` | this machine's configuration |
 | `config/models.ini` | the shipped presets (router mode) |
-| `engines/<name>/engine.ini` | engine adapters |
+| `config/engines/<name>.ini` | engine adapters |
 | `data/models/` | GGUF files |
 | `data/tuned/<host>/<engine>/<preset>.ini` | each gated tune's overlay |
 | `data/tuned/models.effective.ini` | the base presets with this machine's overlays merged in |
-| `bench/results.jsonl` | every measurement, append-only ([bench/README.md](../bench/README.md)) |
+| `results/results.jsonl` | every measurement, append-only ([results/README.md](../results/README.md)) |
 | `logs/llama-server.log`, `logs/web-job.log` | the engine's log; the console's job log |
 | `.local/` | installed engine builds, the pid file, the service endpoint, the dev toolchain |
 
@@ -313,7 +313,7 @@ One `Dockerfile`, `--build-arg GPU_BACKEND=cuda|rocm`: a builder stage runs `car
 --release`, and the runtime stage (`nvidia/cuda:13.4.1-runtime-ubuntu24.04` or
 `rocm/dev-ubuntu-24.04`) gets the binary, the adapter and the presets, runs
 `golem install` to bake in the pinned engine, and starts `golem service --up` as PID 1.
-`compose.yml` picks the vendor by profile, mounts `golem.toml`, `data/models`, `bench/`,
+`compose.yml` picks the vendor by profile, mounts `golem.toml`, `data/models`, `results/`,
 `logs/` and `data/tuned`, and sets `GOLEM_LOCAL_AI_HOST=0.0.0.0` because a container's
 port is published. Docker is packaging, not a mode: the same binary, the same commands,
 `tune` and `eval` included.

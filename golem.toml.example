@@ -76,7 +76,7 @@ GATE_TOKENS = 200000
 # Engine
 # ------------------------------------------------------------
 
-# Which adapter under `engines/<name>/` starts the model. Only llama.cpp is
+# Which adapter under `config/engines/<name>.ini` starts the model. Only llama.cpp is
 # eval-gated and serves `/v1/messages` (which `golem claude` needs) plus
 # router mode; ik_llama.cpp is kept for paired measurements only (no
 # `/v1/messages`, so the tuner never adopts it).

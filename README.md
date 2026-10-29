@@ -83,7 +83,7 @@ serves changes until the gate passes; `--adopt` then points `golem.toml` at the 
 
 **Console.** `golem service` hosts a page on `127.0.0.1:8787` (`CONSOLE_HOST`,
 `CONSOLE_PORT`) for as long as it runs, whether or not an engine is up: live results from
-`bench/results.jsonl`, every preset with its file and state, start/stop/restart/bench/eval/
+`results/results.jsonl`, every preset with its file and state, start/stop/restart/bench/eval/
 tune buttons, the running engine's log, and pulling a model from Hugging Face. It stays on
 localhost unless `CONSOLE_HOST` says otherwise; it has no login, so only open it to a
 network you trust. Double-clicking `golem` on a desktop starts the service if needed and opens the
@@ -111,7 +111,7 @@ this way: `git pull` and `./scripts/cargo.sh build`.
 `Dockerfile` builds one image per GPU vendor — `docker build --build-arg GPU_BACKEND=cuda -t
 golem:cuda .` — with the pinned engine baked in by `golem install` and `golem service --up`
 as PID 1. `compose.yml` wires the GPU through (`--profile cuda` or `--profile rocm`) and
-mounts `data/models`, `bench/`, `logs/` and `data/tuned`; the image is the engine's home.
+mounts `data/models`, `results/`, `logs/` and `data/tuned`; the image is the engine's home.
 Docker is packaging here, not a mode: the same binary, the same configuration, the same
 commands.
 
@@ -129,7 +129,7 @@ commands.
 | `bench [--runs N] [--prefill TOKENS]` | speed: decode best/median + MTP acceptance, prefill on a ~30K prompt |
 | `eval [--long TOKENS]` | quality gate: arithmetic, tool calls, a picture when the model has vision, throughput; with `--long` the needle, decode at depth and the agent suite on both APIs |
 | `eval --agent [anthropic\|openai]` | the agent suite alone: eleven small coding tasks an agent finishes with tools, graded on the result, recorded as an `agent` row |
-| `report [--no-open] [--md]` | build `bench/report.html` (self-contained) from the recorded runs; `--md` writes `bench/RESULTS.md` for GitHub instead |
+| `report [--no-open] [--md]` | build `results/report.html` (self-contained) from the recorded runs; `--md` writes `results/RESULTS.md` for GitHub instead |
 | `app` | the Golem window and tray, showing the console (a build with `--features desktop`; the release for Windows and macOS has it, and `golem-linux-x86_64-desktop` on Linux, which needs WebKitGTK). On Windows `golemw.exe` beside `golem.exe` starts it without a console window - point shortcuts at it |
 | `tui` | the full-screen screen in the terminal (what a bare `golem` opens there): the actions, the model list (Tab; Enter makes the default or downloads, `t` tunes, `x` deletes the file, Del removes the preset), `p` pull, `e` engine, `w` console |
 | `tune [preset] [--adopt] [--dry-run]` / `tune --auto` | the fastest gated setup for this model (or the best installed model) on this machine |
@@ -206,11 +206,10 @@ benchmarks: [docs/models.md](docs/models.md).
 
 ```
 .
-├── golem-rs/                 The Rust source of the binary (see its README)
-├── Dockerfile                The container image: binary + pinned engine, service as PID 1
-├── compose.yml               CUDA / ROCm profiles for that image
-├── golem.toml.example        Configuration template; `golem.toml` is written from it
-├── config/models.ini         Model presets for router mode (MODELS_PRESET)
+├── Cargo.toml, Cargo.lock    The Rust workspace
+├── crates/                   The source of the binary (see its README)
+│   ├── golem-core/           Pure, tested decisions
+│   └── golem/                The binary; console/ is the page it serves
 ├── docs/
 │   ├── architecture.md       The binary, the service, the engine, the config, the container
 │   ├── tuning.md             How `golem tune` searches, decides and gates
@@ -221,14 +220,23 @@ benchmarks: [docs/models.md](docs/models.md).
 │   ├── windows-native.md     Windows: the native engine, the VRAM cliff, LAN, auto-start
 │   └── amd-rocm.md           AMD GPUs under ROCm
 ├── scripts/                  Building this binary: cargo.sh and the toolchain setup
-├── data/models/              GGUF files (git-ignored)
-├── data/cache/               Download / HF cache (git-ignored)
-├── data/tuned/               Tuner output per machine (git-ignored)
-└── logs/                     Run logs (git-ignored)
+├── Dockerfile, compose.yml   The container image (binary + pinned engine, service as PID 1)
+├── golem.toml.example        Configuration template; `golem.toml` is written from it
+│
+│   The home: what a running golem reads and writes. A checkout is one.
+├── golem.toml                This machine's configuration (git-ignored)
+├── config/
+│   ├── models.ini            Model presets for router mode (MODELS_PRESET)
+│   ├── library.ini           The curated models and their vendor scores
+│   └── engines/<name>.ini    Engine adapters: the pinned build, flags, assets
+├── results/                  Every measurement (results.jsonl), RESULTS.md, report.html
+├── data/                     models/, cache/, tuned/ (git-ignored)
+├── logs/                     Run logs (git-ignored)
+└── .local/                   Installed engine builds, state, the dev toolchain (git-ignored)
 ```
 
 **One binary, no shell.** Every command — the measurement, the tuner, the console, the
-screen, the engine and the service that owns it — is `golem-rs/`, which builds one
+screen, the engine and the service that owns it — is `crates/`, which builds one
 executable with no bash, no PowerShell and no WSL behind it. A release is that executable
 plus the `golem.toml` it writes beside itself; a checkout builds it with
 `./scripts/cargo.sh build` and gets the same thing at the repository root.

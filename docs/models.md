@@ -58,7 +58,7 @@ and costs a third of decode. The tuner then moved the split from the hand-set
 `golem tune <preset>` for each, one at a time, on llama.cpp b11379, quiet desktop, wall
 11264 MiB. Decode and prefill are the tuner's (median of three, 8K prompt); the gate is
 the needle at 90% of the tuned context, capped at 200000 tokens. The rows are in
-`bench/results.jsonl`, tagged with the round. All but the two presets above (and the
+`results/results.jsonl`, tagged with the round. All but the two presets above (and the
 0.5B smoke-test model) have since left `config/models.ini`; `golem pull <name>` brings
 back one the library lists.
 
@@ -296,7 +296,7 @@ give generous `max_tokens` (reasoning eats the budget first) or send
 **llama.cpp build gate:** builds are not interchangeable — b11149 (2026-09-24,
 CUDA 13.4 runtime) answered the 200K needle wrong *twice, identically* (tool calls,
 100K needle, throughput and prefill all fine) on Linux, while b10991 passes. So
-the release is pinned - `build` in `engines/llama.cpp/engine.ini`, the one pin
+the release is pinned - `build` in `config/engines/llama.cpp.ini`, the one pin
 the native install and the container image both use - and a bump is
 `ENGINE_BUILD = "b<new>"`, `golem restart`, and adoption only if
 `golem eval --long 200000` passes. Currently b11379, adopted 2026-10-03 (the

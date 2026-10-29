@@ -5,17 +5,19 @@ engine (llama.cpp) serving one local model over the Anthropic (`/v1/messages`) a
 APIs. The engine speaks both APIs natively.
 
 Read before changing anything: `docs/architecture.md` (design), `docs/tuning.md` (the
-tuner), `docs/roadmap.md` (the work, in order), `golem-rs/README.md` (code conventions).
+tuner), `docs/roadmap.md` (the work, in order), `crates/README.md` (code conventions).
 
 ## Layout
 
-- `golem-rs/crates/golem-core/`: pure, tested decisions (JSON, `golem.toml`, INI
+- `crates/golem-core/`: pure, tested decisions (JSON, `golem.toml`, INI
   presets and overlays, GGUF, results rows, the report, every tuner decision).
-- `golem-rs/crates/golem/`: the binary. A library (`src/lib.rs` declares every module)
+- `crates/golem/`: the binary. A library (`src/lib.rs` declares every module)
   and a thin `main.rs` that only parses arguments. Integration tests in `tests/` import
   `golem::<module>`.
 - `config/models.ini`: the shipped presets (`; Download: repo -> file` comments feed
-  `up` and `pull`). `engines/<name>/engine.ini`: engine adapters.
+  `up` and `pull`). `config/engines/<name>.ini`: engine adapters.
+- `results/results.jsonl`: every measurement, tracked; `results/RESULTS.md` is generated.
+- `crates/golem/console/`: the console page (index.html, console.css, console.js).
 - Per-machine and git-ignored: `golem.toml` (template: `golem.toml.example`), `.local/`,
   `data/tuned/`, `data/models/`, `logs/`.
 
@@ -24,7 +26,7 @@ tuner), `docs/roadmap.md` (the work, in order), `golem-rs/README.md` (code conve
 - Only `./scripts/cargo.sh test` and `./scripts/cargo.sh build`, never plain `cargo`: the
   wrapper puts the pinned toolchain on PATH. First-time setup: `./scripts/setup-rust-toolchain.sh`.
 - The build drops the binary at the repo root (`./golem.exe` / `./golem`). It runs on the
-  checkout's own `bench/`, `data/`, `config/`.
+  checkout's own `results/`, `data/`, `config/`.
 - `rust-version` is 1.81: no std APIs newer than that. `unsafe_code` is forbidden. The
   dependency set is deliberate (tokio and axum, ratatui and crossterm). JSON, TOML, INI,
   GGUF and HTTP are hand-written; don't add crates casually.
@@ -78,7 +80,7 @@ runs, alternating pairs, build trials, adoption.
 - llama.cpp b11879 and b11936 fail `load-mode = mlock` on load (b11755 does not);
   `mmap+mlock` pins the same way and loads. A failed CUDA load blanks a Windows screen
   for a moment.
-- The console page (`golem-rs/crates/golem/console/`: index.html, console.css, console.js)
+- The console page (`crates/golem/console/`: index.html, console.css, console.js)
   is compiled in: change it, rebuild,
   restart the service. The presets, library and default adapter are compiled in too, for
   a release folder; a checkout's own files win.

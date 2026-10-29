@@ -7,7 +7,7 @@ export LC_ALL=C
 # RUST DEV TOOLCHAIN (local, git-ignored, no admin)
 # ============================================================
 #
-# Gives this checkout a working `cargo test` / `cargo build` for golem-rs
+# Gives this checkout a working `cargo test` / `cargo build` for the binary
 # without installing anything system-wide:
 #
 #   Windows - a standalone mingw-w64 (GCC) toolchain in .local/toolchain/,
@@ -19,7 +19,7 @@ export LC_ALL=C
 #
 # What it writes:
 #   .local/toolchain/            the extracted toolchain (git-ignored)
-#   golem-rs/.cargo/config.toml  linker + target for this machine, absolute
+#   .cargo/config.toml           linker + target for this machine, absolute
 #                                paths, git-ignored - never committed
 #
 # The CI workflow does not read any of it: CI builds the MSVC target, which
@@ -32,9 +32,9 @@ export LC_ALL=C
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOOLCHAIN_DIR="${ROOT_DIR}/.local/toolchain"
 DOWNLOAD_DIR="${ROOT_DIR}/data/tmp"
-# At the repository root, not inside golem-rs: cargo reads .cargo/config.toml
-# from the working directory upwards, so this way `cargo test` works from the
-# root and from golem-rs alike.
+# At the repository root, beside the workspace manifest: cargo reads
+# .cargo/config.toml from the working directory upwards, so `cargo test`
+# works from the root and from any crate below it.
 CARGO_CONFIG_DIR="${ROOT_DIR}/.cargo"
 
 # Pinned, like the engine build in the adapter: a
@@ -79,7 +79,7 @@ if [[ "${PLATFORM}" != windows ]]; then
     fi
     say "nothing else to install: cargo test builds for this host"
     echo
-    ok "run: cd golem-rs && cargo test"
+    ok "run: ./scripts/cargo.sh test"
     exit 0
 fi
 
@@ -189,7 +189,7 @@ EOF
 ok "wrote .cargo/config.toml at the repository root (git-ignored)"
 
 echo
-ok "run: cd golem-rs && cargo test"
+ok "run: ./scripts/cargo.sh test"
 echo "  (a rustup override pins this checkout to the GNU toolchain, so no"
 echo "   --target flag is needed; undo with: rustup override unset --path .)"
 echo "  CI still builds MSVC; this is the local test toolchain."

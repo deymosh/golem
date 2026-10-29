@@ -39,7 +39,7 @@ x-inference: &inference
     - ./data/models:/golem/data/models
     - ./data/cache:/golem/data/cache
     - ./data/tuned:/golem/data/tuned
-    - ./bench:/golem/bench
+    - ./results:/golem/results
     - ./logs:/golem/logs
     - ./config:/golem/config
 
@@ -71,7 +71,7 @@ services:
       args:
         GPU_BACKEND: cuda
     image: golem:cuda
-    # The engine pin is the adapter's `build` (engines/llama.cpp/engine.ini),
+    # The engine pin is the adapter's `build` (config/engines/llama.cpp.ini),
     # gated by the 200K eval, baked in by the Dockerfile.
     environment:
       NVIDIA_VISIBLE_DEVICES: all

@@ -25,12 +25,12 @@ WORKDIR /src
 # golem.toml.example, the presets, the library and the default adapter are
 # compiled in with include_str!(), resolved relative to the sources - so the
 # layout here has to match the checkout's. The console page is the crate's
-# own (golem-rs/crates/golem/console/).
-COPY golem-rs golem-rs
+# own (crates/golem/console/).
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
 COPY golem.toml.example golem.toml.example
 COPY config config
-COPY engines engines
-RUN cargo build --release --manifest-path golem-rs/Cargo.toml
+RUN cargo build --release
 
 # One runtime per vendor; the final stage picks between them. The CUDA tag
 # is pinned to a full patch version - the floating 13.4 tag does not exist
@@ -51,13 +51,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# The home: everything the binary owns lives under it (golem-rs/README.md).
+# The home: everything the binary owns lives under it (crates/README.md).
 ENV GOLEM_HOME=/golem
 WORKDIR /golem
-COPY --from=build /src/golem-rs/target/release/golem /usr/local/bin/golem
+COPY --from=build /src/target/release/golem /usr/local/bin/golem
 # The adapter and the presets; mount a volume over /golem/config to serve
 # your own.
-COPY engines/llama.cpp /golem/engines/llama.cpp
 COPY config /golem/config
 
 # The container's configuration: the template, with the two keys a
@@ -87,7 +86,7 @@ RUN golem install \
 # What belongs to the user, not the image: the model files, the results
 # database, the logs and the tuner's overlays. .local (the engine) is baked
 # and stays with the image - the image is the engine's home.
-VOLUME ["/golem/data/models", "/golem/bench", "/golem/logs", "/golem/data/tuned"]
+VOLUME ["/golem/data/models", "/golem/results", "/golem/logs", "/golem/data/tuned"]
 
 EXPOSE 8000
 

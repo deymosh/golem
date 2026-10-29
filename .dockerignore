@@ -5,8 +5,8 @@
 .local
 data
 logs
-bench
-golem-rs/target
+results
+target
 golem.exe
 .env
 .env.migrated
