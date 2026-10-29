@@ -55,9 +55,10 @@ engine serves Anthropic's API only under `/v1`, so golem sends each to the engin
 
 - **Two tools are added**, `golem_web_search` and `golem_web_fetch`, beside every tool
   the client sent, when the request's tool choice leaves the model free to call them
-  (none given or `auto`) - each one only when the client has no tool of its own for the
-  job: Claude Code brings `WebSearch` and `WebFetch`, and its search reaches golem as the
-  server tool below; OpenCode brings `webfetch`. Anthropic's `web_search_*` server tool -
+  (none given or `auto`). A client's own search or fetch stays: Claude Code brings
+  `WebSearch` and `WebFetch`, OpenCode `websearch` (a third-party service) and
+  `webfetch`, and the model is handed golem's beside them - an agent whose search is
+  someone else's service still gets the one that runs on this machine. Anthropic's `web_search_*` server tool -
   what Claude Code's WebSearch sends - and the Responses API's hosted `web_search` are
   taken out of the request and answered by golem's search; their `max_uses` and domain
   lists are honoured.

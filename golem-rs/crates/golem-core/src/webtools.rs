@@ -518,28 +518,6 @@ pub struct Prepared {
     pub max_calls: usize,
 }
 
-/// Which of golem's tools a request should get: each one the client does
-/// not already offer a tool for. Claude Code brings its own `WebSearch` and
-/// `WebFetch` - its search reaches golem as the server tool anyway - and two
-/// tools for one job is a choice the model need not be handed.
-fn golem_tools_wanted(tools: &[Value], name: impl Fn(&Value) -> Option<&Value>) -> Vec<&'static str> {
-    let has = |words: &[&str]| {
-        tools.iter().any(|tool| {
-            let name = name(tool).and_then(Value::as_str).unwrap_or("");
-            let flat: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
-            words.iter().any(|w| flat == *w)
-        })
-    };
-    let mut wanted = Vec::new();
-    if !has(&["websearch", "search", "searchweb", "googlesearch", "bravesearch"]) {
-        wanted.push(SEARCH_TOOL);
-    }
-    if !has(&["webfetch", "fetch", "fetchurl", "fetchpage", "browse"]) {
-        wanted.push(FETCH_TOOL);
-    }
-    wanted
-}
-
 fn domains(value: Option<&Value>) -> Vec<String> {
     value
         .and_then(Value::as_array)
@@ -581,10 +559,9 @@ pub fn prepare_anthropic(mut body: Value, enabled: bool) -> Prepared {
     let choice_name = choice.as_ref().and_then(|c| c.get("name")).and_then(Value::as_str).unwrap_or("");
     let forced_search = choice_kind == "tool" && choice_name == server_name && server_search.is_some();
     let free = choice_kind == "auto" || (choice_kind == "any" && server_search.is_some() && tools.is_empty());
-    let own = golem_tools_wanted(&tools, |t| t.get("name"));
-    let tools_added = enabled && (free || forced_search) && !own.is_empty();
+    let tools_added = enabled && (free || forced_search);
     if tools_added {
-        tools.extend(anthropic_tools().into_iter().filter(|t| own.iter().any(|n| t.get("name").and_then(Value::as_str) == Some(n))));
+        tools.extend(anthropic_tools());
     }
     if forced_search {
         if tools_added {
@@ -742,12 +719,9 @@ pub fn prepare_openai(mut body: Value, enabled: bool) -> Prepared {
         Some(Value::String(choice)) => choice == "auto",
         Some(_) => false,
     };
-    let own = golem_tools_wanted(&tools, |t| t.get("function").and_then(|f| f.get("name")));
-    let tools_added = enabled && free && !own.is_empty();
+    let tools_added = enabled && free;
     if tools_added {
-        tools.extend(openai_tools().into_iter().filter(|t| {
-            own.iter().any(|n| t.get("function").and_then(|f| f.get("name")).and_then(Value::as_str) == Some(n))
-        }));
+        tools.extend(openai_tools());
     }
     if !tools.is_empty() {
         body.set("tools", Value::Array(tools));
@@ -996,10 +970,9 @@ pub fn prepare_responses(mut body: Value, enabled: bool) -> Prepared {
         Some(Value::String(choice)) => choice == "auto",
         Some(_) => false,
     };
-    let own = golem_tools_wanted(&tools, |t| t.get("name"));
-    let tools_added = enabled && free && !own.is_empty();
+    let tools_added = enabled && free;
     if tools_added {
-        tools.extend(responses_tools().into_iter().filter(|t| own.iter().any(|n| t.get("name").and_then(Value::as_str) == Some(n))));
+        tools.extend(responses_tools());
     }
     if tools.is_empty() {
         body.remove("tools");
@@ -2204,14 +2177,11 @@ mod tests {
         assert!(prepared.body.get("tools").is_none(), "the engine is never handed the server tool");
 
         // Claude Code's main loop: its own WebSearch and WebFetch stand, and
-        // golem adds nothing beside them.
+        // golem's two join them.
         let claude = json::parse(r#"{"messages":[],"tools":[{"name":"Read"},{"name":"WebSearch"},{"name":"WebFetch"}]}"#).unwrap();
         let prepared = prepare_anthropic(claude, true);
-        assert!(!prepared.tools_added);
-        assert_eq!(prepared.body.get("tools").unwrap().as_array().unwrap().len(), 3);
-        let fetch_only = json::parse(r#"{"messages":[],"tools":[{"type":"function","function":{"name":"web_fetch"}}]}"#).unwrap();
-        let tools = prepare_openai(fetch_only, true).body.get("tools").unwrap().as_array().unwrap().clone();
-        assert_eq!(tools.len(), 2, "the client's fetch, and golem's search: {tools:?}");
+        assert!(prepared.tools_added);
+        assert_eq!(prepared.body.get("tools").unwrap().as_array().unwrap().len(), 5);
 
         let openai = json::parse(r#"{"messages":[],"tool_choice":"required","tools":[{"type":"function","function":{"name":"f"}}]}"#).unwrap();
         assert!(!prepare_openai(openai, true).tools_added);
@@ -2433,6 +2403,13 @@ mod tests {
             assert_eq!(tools, 3, "bash and golem's two: {}", prepared.body.to_json());
             assert!(prepared.body.to_json().contains("\"bash\""));
         }
+        // OpenCode v2 brings a search and a fetch of its own; golem's stand
+        // beside them.
+        let opencode = prepare_openai(
+            json::parse(r#"{"messages":[],"tools":[{"type":"function","function":{"name":"websearch"}},{"type":"function","function":{"name":"webfetch"}}]}"#).unwrap(),
+            true,
+        );
+        assert_eq!(opencode.body.get("tools").and_then(Value::as_array).map(Vec::len), Some(4));
     }
 
     #[test]
@@ -2445,7 +2422,7 @@ mod tests {
             true,
         );
         let names: Vec<&str> = prepared.body.get("tools").and_then(Value::as_array).unwrap().iter().filter_map(|t| t.get("name").and_then(Value::as_str)).collect();
-        assert_eq!(names, ["webfetch", SEARCH_TOOL], "the client's fetch stands, the hosted search is golem's");
+        assert_eq!(names, ["webfetch", SEARCH_TOOL, FETCH_TOOL], "the client's fetch stands beside golem's two");
         assert_eq!(prepared.server_search.unwrap().allowed_domains, ["rust-lang.org"]);
         let off = prepare_responses(json::parse(r#"{"input":"hi","tools":[{"type":"web_search"}]}"#).unwrap(), false);
         assert!(!off.tools_added);
