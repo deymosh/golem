@@ -582,14 +582,28 @@ impl ContextSearch {
 /// a load per wobble, each a full model read, for a gain no session notices.
 pub const CONTEXT_STEP: u64 = 1024;
 
+/// How far apart two whole-card readings of one setup can land, MiB.
+///
+/// Two loads on a quiet desktop read 9 MiB apart; on a busy one the desktop
+/// itself moves between loads - on the reference box's evening tune of
+/// 2026-10-29 the seed read 11115 MiB and a context 1024 tokens larger 11279,
+/// where the KV cache accounts for 25. A prediction that promises less
+/// context than this much VRAM buys is a probe of the noise.
+pub const READING_NOISE_MIB: f64 = 128.0;
+
 /// The largest context the fit allows, on a [`CONTEXT_STEP`], capped by
-/// `limit` and only worth growing to when it beats what already fit.
+/// `limit` and only worth growing to when it beats what already fit by more
+/// than a reading's noise is worth in tokens ([`READING_NOISE_MIB`]): that
+/// evening's search spent its last two loads on predictions 2048 and 1024
+/// tokens above the seed, both of which read over the wall.
 fn predict(fit: Option<Fit>, current: u64, wall_mib: u64, limit: u64) -> Rung {
-    let Some(predicted) = fit.and_then(|f| f.context_under(wall_mib)) else {
+    let Some(fit) = fit else { return Rung::Stop };
+    let Some(predicted) = fit.context_under(wall_mib) else {
         return Rung::Stop;
     };
     let target = (predicted / CONTEXT_STEP * CONTEXT_STEP).min(limit);
-    if target > current {
+    let noise = (READING_NOISE_MIB / fit.per_token_mib) as u64;
+    if target > current.saturating_add(noise) {
         Rung::Grow(target)
     } else {
         Rung::Stop
@@ -716,6 +730,20 @@ mod tests {
             at_ubatch(point("llama.cpp", "slow", 58.0, 900.0, 4096), 2048),
         ];
         assert_eq!(rank(&points, &floor, WALL), vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn the_search_stops_when_a_probe_would_only_measure_the_noise() {
+        // The reference box's evening tune, 2026-10-29: the seed at 11115
+        // MiB under an 11264 wall, then 262144 and 242688 over it. The next
+        // prediction promised 2048 tokens - under what 128 MiB of noise is
+        // worth at that slope - and the search spent two more loads on it.
+        let mut search = ContextSearch::new(236544, 11115, 11264, 262144);
+        assert_eq!(search.next(), Rung::Grow(262144));
+        search.record(262144, 11730, false);
+        assert_eq!(search.next(), Rung::Grow(242688), "6144 tokens is worth a load");
+        search.record(242688, 11483, false);
+        assert_eq!(search.next(), Rung::Stop);
     }
 
     #[test]

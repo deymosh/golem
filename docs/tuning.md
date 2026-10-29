@@ -84,7 +84,9 @@ and put back after the run on the configuration as it then stands.
    split. The winner's own point is the line's first point; one doubling (capped at the
    trained context) gives the second; from there the largest context under the wall is
    arithmetic, rounded down to 1024 tokens so a re-fit does not chase a reading's few MiB
-   of noise, and one load confirms it. Two to three loads where the doubling ladder took
+   of noise, and one load confirms it. A prediction that promises less context than 128
+   MiB of VRAM buys at the fitted slope is not probed: on a busy desktop two readings of
+   one setup land that far apart, and such a probe measures the desktop. Two to three loads where the doubling ladder took
    four or five. The slope is what the KV cache costs per token, the same for every split
    of one model at one `ubatch-size` and drafting, so a later candidate with the same three
    starts from the slope an earlier one measured and predicts from its own point alone: the

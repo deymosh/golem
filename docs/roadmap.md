@@ -64,12 +64,12 @@ inside each; the levers are fewer loads and less bench per load.
   between 3% and 8% (`tune::tie_band`), and costs no load. The evening's run on a busy
   desktop ranked n35 first with `ub1024` "tied within 6.0%" and passed the gate (639 t/s
   prefill, 33.4 at depth) in 16 min 32 s - and 11 loads.
-- **Next, the context search near the wall.** Four of those loads went to contexts
-  within 26K tokens of the seed (262144, 242688, 238592, 237568), every one over the wall
-  by 3-220 MiB, and the search ended on the seed's 236544. With the desktop holding
-  ~100 MiB more than in the morning, the line through the seed and the first probe sat
-  under the readings that followed: a prediction that lands within a reading's noise of
-  the wall should stop, or step down by the noise, rather than probe again.
+- **In, the context search near the wall.** Four of those loads went to contexts within
+  26K tokens of the seed (262144, 242688, 238592, 237568), every one over the wall by
+  3-466 MiB, and the search ended on the seed's 236544: the desktop moved more between
+  loads than the last two predictions could buy. A prediction now has to promise more
+  context than 128 MiB of VRAM is worth at the fitted slope (`READING_NOISE_MIB`); on
+  that run's readings the search stops after 242688, two loads sooner.
 - **Done when:** the reference box's `golem tune ornith-1.5-35b` reaches the same verdict
   in at most seven loads and measurably less wall-clock than the same day's run of the
   previous build, and the 200K gate passes on the result.
