@@ -114,18 +114,19 @@ file with search, recover from a tool error, two independent calls in one turn.
   prefill, and only the suite can say what it costs in solved tasks. The same holds for
   the KV cache's quantization and for `--image-min-tokens 1024`, which the engine
   recommends for Qwen-VL grounding.
-- **Measured** on the reference box, 2026-10-29 evening, busy desktop: the 9B and the
-  35B both solve 10 of 11 on both APIs with no malformed call, both over the 75% floor.
-  Both miss the rename past a built name - the 9B for real (it renames every `get_user`
-  it finds and leaves the built name broken), the 35B because its fourth turn was cut at
-  the harness's 4096-token cap mid-thought, after reading every file it needed. The cap is
-  16384 now and a cut turn says so in the verdict; on that task alone the 35B then solves
-  it (8 turns, 329 s) and the 9B does not (it switches the lookup to `"fetch_" + kind`,
-  which breaks the teams, and its last turn runs past 16384 tokens). The 35B solves the
-  eleven in 309-341 s and 186K prompt tokens per API, the 9B in 413-421 s and 210K.
-- **Next:** the eleven again on both models at the new cap, recorded, for the item's
-  numbers; then the first questions above. A missed task leaves its calls, last answer and
-  changed files in `logs/agent/`, and `--task NAME` reruns one task.
+- **Measured** on the reference box, 2026-10-30, quiet desktop, at the 16384-token cap:
+  the 35B solves all eleven on both APIs (61 turns, 78 calls, no malformed call) in
+  452-486 s and 230K prompt tokens; the 9B solves ten, on both APIs, in 700-713 s and 210K.
+  The task between them is the rename past a built name: the 35B finds the caller that
+  looks the function up as `getattr(users, "get_" + kind)` and solves it in 8 turns
+  (210 s); the 9B renames every `get_user` it finds, rewrites that lookup so the other
+  kinds break, and its last turn runs out at 16384 tokens (440 s). The 9B also writes half again as many tokens (30.7K against 19.5K): it reasons
+  longer for less. At the old 4096 cap the two had tied at ten, the 35B's miss a turn
+  cut mid-thought.
+- **Next:** the first questions above, through the suite on the 35B; then tasks that
+  separate models nearer the 35B, since it now solves every one. A missed task leaves its
+  calls, last answer and changed files in `logs/agent/`, and `--task NAME` reruns one
+  task.
 
 ## 3. Discovery: fit before download, rank by local results
 

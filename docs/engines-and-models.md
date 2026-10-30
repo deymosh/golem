@@ -100,8 +100,9 @@ The decode gap is about 11% at every split both builds measured. The load failur
 the card being full: the nospec point at 9057 MiB failed the same way, while every `mmap`
 point loaded, so it is `mlock` on this build - the abort is in
 `ggml_backend_cuda_buffer_set_tensor`. Each failed load reset the display driver
-(nvlddmkm event 153) and blanked the screen for a moment, which is why the service now
-stops the engine after the first failed load (see [architecture.md](architecture.md)) and
+(nvlddmkm event 153) and blanked the screen for a moment, which is why the service
+stops the engine after the first failed load - one whose file is merely missing excepted
+(see [architecture.md](architecture.md)) - and
 the tuner stops at a gate whose model does not load.
 
 **b11936** (2026-10-27, measured 2026-10-28) fails the same way under `load-mode = mlock`
