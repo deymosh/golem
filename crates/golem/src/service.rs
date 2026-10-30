@@ -674,10 +674,15 @@ fn serve(home: &Path, start_now: bool) -> i32 {
 /// into a black screen every half minute. Stopping the engine makes the
 /// retry a refused connection instead, and `status` says why
 /// (`paths::load_failure`) until the next start.
+///
+/// A model whose file is not downloaded fails at once and touches no memory,
+/// so it is said once and the engine keeps serving the others.
 fn guard_loads(home: &Path, starting: &Mutex<()>) {
+    let mut said: Vec<String> = Vec::new();
     loop {
         std::thread::sleep(LOAD_GUARD_POLL);
         if engine::pid(home).is_none() {
+            said.clear();
             continue;
         }
         // A start in progress owns the engine; the next poll looks again.
@@ -686,7 +691,18 @@ fn guard_loads(home: &Path, starting: &Mutex<()>) {
         if failed.is_empty() {
             continue;
         }
-        let reason = golem_core::router::stop_reason(&failed);
+        let (_, log) = crate::state::log_tail(home, 200);
+        let cause = golem_core::router::cause(&failed[0].model, failed[0].exit_code, &log);
+        if !cause.stops_the_engine() {
+            for f in &failed {
+                if !said.contains(&f.model) {
+                    println!("[WARN] {} could not load: {} - golem pull {}", f.model, cause.words(), f.model);
+                    said.push(f.model.clone());
+                }
+            }
+            continue;
+        }
+        let reason = golem_core::router::stop_reason(&failed, &cause);
         println!("[WARN] {reason}");
         let _ = std::fs::write(paths::load_failure(home), format!("{reason}\n"));
         launch::down(home, &mut std::io::stdout());

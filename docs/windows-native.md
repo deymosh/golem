@@ -125,10 +125,21 @@ or drop a shortcut to `golem.exe service --up` in `shell:startup`.
 ## Notes
 
 - **mlock on Windows** maps to `VirtualLock`, subject to working set limits: with the whole
-  model pinned you may see lock warnings in the log. `load-mode = auto` in a preset section
-  degrades gracefully (pages trim and re-read from disk) if that bothers you. llama.cpp
-  b11879 and b11936 cannot load under `mlock` at all; `mmap+mlock` pins the same way and
-  loads ([engines-and-models.md](engines-and-models.md#builds)).
+  model pinned you may see lock warnings in the log, which the console reads as "mlock could
+  not pin N GiB". `load-mode = auto` in a preset section degrades gracefully (pages trim and
+  re-read from disk) if that bothers you. llama.cpp b11879 and b11936 cannot load under
+  `mlock` at all; `mmap+mlock` pins the same way and loads
+  ([engines-and-models.md](engines-and-models.md#builds)).
+- **mlock and a host buffer over 4 GiB.** On a backend whose host weight buffer is split
+  into chunks - Vulkan, on b11379 - a model with more than 4 GiB of weights in RAM (the 35B
+  with `n-cpu-moe 36`) aborts on load under `load-mode = mlock`:
+  `llama-mmap.cpp:804: GGML_ASSERT(addr) failed`, exit code `-1073740791` (0xC0000409). The
+  engine locks the buffer by its base address, and a split buffer has none; upstream locks
+  each chunk after b11379 (PR #30926). `load-mode = mmap+mlock` loads and pins the whole
+  mapping (21.7 GB for the 35B), so it needs the RAM to hold it. The service names the
+  assert when it stops the engine, and the console shows the line as "engine aborted
+  (assert)". The CUDA build loads the same section under `mlock` on the reference box,
+  which is why the shipped preset keeps it.
 - The server writes its own log (`--log-file logs\llama-server.log`), and the binary starts it
   with its stdout and stderr closed rather than inherited — a child that inherits the caller's
   pipes hangs anything reading `golem up`'s output.

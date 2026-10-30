@@ -1333,7 +1333,9 @@ impl<'a> Tuner<'a> {
         let endpoint = engine::Endpoint { port: self.port, ..engine::Endpoint::from_home(self.home) };
         let failed = engine::failed_loads(&endpoint);
         if !failed.is_empty() {
-            return Some(golem_core::router::stop_reason(&failed));
+            let (_, log) = crate::state::log_tail(self.home, 200);
+            let cause = golem_core::router::cause(&failed[0].model, failed[0].exit_code, &log);
+            return Some(golem_core::router::stop_reason(&failed, &cause));
         }
         std::fs::read_to_string(paths::load_failure(self.home)).ok().map(|s| s.trim().to_string())
     }

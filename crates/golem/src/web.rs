@@ -375,11 +375,15 @@ async fn api_chat(State(app): State<Arc<App>>) -> Response {
 /// router's lines fold away in the reading.
 async fn api_logs(State(app): State<Arc<App>>) -> Response {
     let home = app.cfg.home.clone();
-    let tail = tokio::task::spawn_blocking(move || state::log_tail(&home, 600)).await;
-    let Ok((file, text)) = tail else {
+    let tail = tokio::task::spawn_blocking(move || {
+        let (file, text) = state::log_tail(&home, 600);
+        (file, text, state::preset_files(&home))
+    })
+    .await;
+    let Ok((file, text, files)) = tail else {
         return plain(StatusCode::INTERNAL_SERVER_ERROR, "log unavailable");
     };
-    let lines = golem_core::enginelog::to_json(&golem_core::enginelog::read(&text));
+    let lines = golem_core::enginelog::to_json(&golem_core::enginelog::read_with(&text, &files));
     json(
         StatusCode::OK,
         format!("{{\"file\": {}, \"text\": {}, \"lines\": {lines}}}", json::quote(&file), json::quote(&text)),

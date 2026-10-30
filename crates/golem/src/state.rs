@@ -30,6 +30,26 @@ pub fn presets(home: &Path) -> Vec<String> {
     ini::Document::read(&preset_path(home)).map(|doc| doc.preset_names()).unwrap_or_default()
 }
 
+/// Every file the preset names - its `; Download:` lines and its `model`,
+/// `mmproj` and `spec-draft-model` keys - with the section that needs it, so
+/// the log can say which `golem pull` fetches a file the engine could not
+/// open.
+pub fn preset_files(home: &Path) -> Vec<(String, String)> {
+    let Ok(doc) = ini::Document::read(&preset_path(home)) else { return Vec::new() };
+    let mut files = Vec::new();
+    for section in &doc.sections {
+        for download in &section.downloads {
+            files.push((download.name().to_string(), section.name.clone()));
+        }
+        for key in ["model", "mmproj", "spec-draft-model"] {
+            if let Some(file) = section.value(key) {
+                files.push((file.to_string(), section.name.clone()));
+            }
+        }
+    }
+    files
+}
+
 /// Point the setup at another preset (`alias`) or engine (`engine`), or
 /// record an update the console declined (`skip-update`), in golem.toml or
 /// the update state file: `applied`, or `bad-input` for a name that is not

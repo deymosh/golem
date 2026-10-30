@@ -115,8 +115,100 @@ fn bookkeeping(message: &str) -> bool {
     ["need to evaluate at least 1 token", "n_past was set to"].iter().any(|known| message.contains(known))
 }
 
+/// The exit status Windows gives a process that aborted (`STATUS_STACK_BUFFER_OVERRUN`,
+/// 0xC0000409, which is how the C runtime's `abort()` ends one): a failed
+/// `GGML_ASSERT`, as the router prints it signed and unsigned.
+const ABORT_STATUSES: [&str; 2] = ["-1073740791", "3221226505"];
+
+/// Lines that say a GPU backend did not start. Another backend may still
+/// have a device (`--list-devices` is what says), so the line names the
+/// failure; `offloaded 0/N layers` is the one that means the CPU alone. At
+/// the router's verbosity most of llama.cpp's device lines are written blank,
+/// so these show only when a backend fails loudly.
+const NO_GPU: [&str; 5] = [
+    "using device CPU",
+    "not compiled with GPU offload support",
+    "ggml_cuda_init: failed to initialize",
+    "failed to load backend",
+    "no usable GPU found",
+];
+
+/// What a known line means, before the generic rules: an abort, a file the
+/// router could not open, a lock Windows refused, a missing GPU backend.
+/// `m` is the message, `whole` the line it came from (a subsystem prefix such
+/// as `ggml_cuda_init:` is part of what identifies some of them), and
+/// `files` maps a preset's file names to their section, for the pull hint.
+/// `Some(None)` is a line known and not shown.
+fn special(model: &str, m: &str, whole: &str, files: &[(String, String)]) -> Option<Option<(Kind, String)>> {
+    if m.contains("GGML_ASSERT") {
+        return Some(Some((Kind::Bad, format!("engine aborted (assert): {m}"))));
+    }
+    if let Some(at) = m.find("failed to open GGUF file '") {
+        let file = m[at + "failed to open GGUF file '".len()..].split('\'').next().unwrap_or("");
+        let section = files.iter().find(|(f, _)| f == file).map(|(_, s)| s.as_str());
+        return Some(Some(match (model.is_empty(), section) {
+            // The router reads every preset's files when it lists them; a
+            // preset that is not downloaded is only that.
+            (true, Some(section)) => (Kind::Dim, format!("[{section}] not downloaded - golem pull {section}")),
+            (true, None) => (Kind::Dim, format!("{file} is not downloaded")),
+            (false, Some(section)) => (Kind::Bad, format!("{file} is not downloaded - golem pull {section}")),
+            (false, None) => (Kind::Bad, format!("{file} is not downloaded")),
+        }));
+    }
+    if let Some(at) = m.find("failed to VirtualLock ") {
+        let bytes: Option<f64> = m[at + "failed to VirtualLock ".len()..].split('-').next().and_then(|n| n.parse().ok());
+        let size = bytes.map_or(String::from("the weights"), |b| format!("{:.1} GiB", b / 1_073_741_824.0));
+        return Some(Some((
+            Kind::Warn,
+            format!(
+                "mlock could not pin {size} (Windows' working-set limit); those pages may be trimmed - \
+                 load-mode = mmap+mlock pins the same way and loads"
+            ),
+        )));
+    }
+    if offloaded(m) == Some(0) {
+        return Some(Some((Kind::Bad, format!("engine started without a GPU backend: {m}"))));
+    }
+    if NO_GPU.iter().any(|known| whole.contains(known)) {
+        return Some(Some((Kind::Bad, format!("a GPU backend did not start: {m}"))));
+    }
+    if offloaded(m).is_some() {
+        return Some(Some((Kind::Ok, m.to_string())));
+    }
+    let lower = m.to_ascii_lowercase();
+    if whole.contains("ggml_") && lower.starts_with("found ") && lower.contains(" devices") {
+        return Some(Some((Kind::Ok, m.trim_end_matches(':').to_string())));
+    }
+    if let Some(at) = m.find(" exited with status ") {
+        let status = m[at + " exited with status ".len()..].trim();
+        let name = m[..at].rsplit("name=").next().unwrap_or("").trim();
+        return Some(match status {
+            "0" => None,
+            s if ABORT_STATUSES.contains(&s) => {
+                Some((Kind::Bad, format!("{name} aborted (assert, 0xC0000409) - the engine's assert line says where")))
+            }
+            s => Some((Kind::Bad, format!("{name} exited with status {s}"))),
+        });
+    }
+    None
+}
+
+/// `N` in `offloaded N/M layers to GPU`.
+fn offloaded(m: &str) -> Option<u32> {
+    let at = m.find("offloaded ")?;
+    let rest = &m[at + "offloaded ".len()..];
+    let (n, tail) = rest.split_once('/')?;
+    tail.contains("layers to GPU").then(|| n.trim().parse().ok()).flatten()
+}
+
 /// The log's lines, read.
 pub fn read(text: &str) -> Vec<Line> {
+    read_with(text, &[])
+}
+
+/// [`read`], with the preset's files (`file`, `section`) so a file the
+/// router cannot open is named by the section that needs it.
+pub fn read_with(text: &str, files: &[(String, String)]) -> Vec<Line> {
     let mut out: Vec<Line> = Vec::new();
     let mut ports: Vec<(String, String)> = Vec::new();
     // A spawn's argument lines, collected into one.
@@ -140,7 +232,18 @@ pub fn read(text: &str) -> Vec<Line> {
             let bare = raw_line.trim_start_matches(|c: char| c == '[' || c.is_ascii_digit() || c == ']').trim();
             if !bare.is_empty() {
                 flush_args(&mut args, &mut out);
-                out.push(Line { kind: Kind::Plain, model: String::new(), text: bare.to_string() });
+                // A child's stderr - an abort's assert line among it - carries
+                // its port and no stamp.
+                let model = raw_line
+                    .strip_prefix('[')
+                    .and_then(|r| r.split_once(']'))
+                    .and_then(|(p, _)| ports.iter().find(|(port, _)| port == p).map(|(_, m)| m.clone()))
+                    .unwrap_or_default();
+                match special(&model, bare, bare, files) {
+                    Some(Some((kind, text))) => out.push(Line { kind, model, text }),
+                    Some(None) => {}
+                    None => out.push(Line { kind: Kind::Plain, model, text: bare.to_string() }),
+                }
             }
             continue;
         };
@@ -167,7 +270,9 @@ pub fn read(text: &str) -> Vec<Line> {
         }
 
         let line = |kind: Kind, text: String| Line { kind, model: model.clone(), text };
-        let pushed: Option<Line> = if raw.level == 'E' {
+        let pushed: Option<Line> = if let Some(known) = special(&model, m, raw_line, files) {
+            known.map(|(kind, text)| line(kind, text))
+        } else if raw.level == 'E' {
             Some(line(Kind::Bad, m.to_string()))
         } else if m.starts_with("spawning server instance with name=") {
             let rest = &m["spawning server instance with name=".len()..];
@@ -332,6 +437,58 @@ mod tests {
                 "bad|qwen2.5-0.5b-instruct|failed to load model, cudaMalloc failed: out of memory",
             ]
         );
+    }
+
+    /// Lines from an RX 7800 XT on b11379, 2026-10-29: the 35B aborting
+    /// under Vulkan with `load-mode = mlock`, the router probing a preset
+    /// that is not downloaded, and the ROCm build's lock warning.
+    const AMD: &str = "\
+0.00.104.202 I srv    operator():   [    preset] ornith-1.5-9b
+0.00.104.900 E gguf_init_from_file: failed to open GGUF file 'mmproj-Ornith-1.5-9B-BF16.gguf'
+1.00.000.001 I srv          load: spawning server instance with name=ornith-1.5-35b on port 50123
+[50123] 0.00.090.000 W warning: failed to VirtualLock 5635227648-byte buffer (after previously locking 0 bytes): Insufficient quota
+[50123] D:/a/llama.cpp/llama.cpp/src/llama-mmap.cpp:804: GGML_ASSERT(addr) failed
+1.00.400.000 I srv           run: instance name=ornith-1.5-35b exited with status -1073740791
+[50123] 0.00.095.000 E gguf_init_from_file: failed to open GGUF file 'Ornith-1.5-35B-Q4_K_M.gguf'
+";
+
+    #[test]
+    fn an_abort_a_missing_file_and_a_refused_lock_say_what_they_are() {
+        let files = vec![
+            ("mmproj-Ornith-1.5-9B-BF16.gguf".to_string(), "ornith-1.5-9b".to_string()),
+            ("Ornith-1.5-35B-Q4_K_M.gguf".to_string(), "ornith-1.5-35b".to_string()),
+        ];
+        assert_eq!(
+            show(&read_with(AMD, &files)),
+            vec![
+                "jt||presets: ornith-1.5-9b",
+                "jt||[ornith-1.5-9b] not downloaded - golem pull ornith-1.5-9b",
+                "jf|ornith-1.5-35b|loading ornith-1.5-35b",
+                "warn|ornith-1.5-35b|mlock could not pin 5.2 GiB (Windows' working-set limit); those pages may be trimmed - load-mode = mmap+mlock pins the same way and loads",
+                "bad|ornith-1.5-35b|engine aborted (assert): D:/a/llama.cpp/llama.cpp/src/llama-mmap.cpp:804: GGML_ASSERT(addr) failed",
+                "bad||ornith-1.5-35b aborted (assert, 0xC0000409) - the engine's assert line says where",
+                "bad|ornith-1.5-35b|Ornith-1.5-35B-Q4_K_M.gguf is not downloaded - golem pull ornith-1.5-35b",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cpu_fallback_is_bad_and_an_offload_is_good() {
+        let text = "\
+0.00.001.000 E ggml_cuda_init: failed to initialize CUDA: no CUDA-capable device is detected
+0.00.002.000 I load_tensors: offloaded 0/41 layers to GPU
+0.00.003.000 I load_tensors: offloaded 41/41 layers to GPU
+0.00.004.000 I ggml_vulkan: Found 1 Vulkan devices:
+0.00.005.000 W llama_model_load: warning: not compiled with GPU offload support, --gpu-layers option will be ignored
+0.00.006.000 I srv           run: instance name=tiny exited with status 0
+";
+        let shown = show(&read(text));
+        assert!(shown[0].starts_with("bad||a GPU backend did not start: "), "{shown:?}");
+        assert_eq!(shown[1], "bad||engine started without a GPU backend: offloaded 0/41 layers to GPU");
+        assert_eq!(shown[2], "ok||offloaded 41/41 layers to GPU");
+        assert_eq!(shown[3], "ok||Found 1 Vulkan devices");
+        assert!(shown[4].starts_with("bad||a GPU backend did not start"), "{shown:?}");
+        assert_eq!(shown.len(), 5, "a clean exit says nothing: {shown:?}");
     }
 
     #[test]
