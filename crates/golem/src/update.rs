@@ -312,6 +312,8 @@ fn file_hash(path: &Path) -> Result<[u8; 32], String> {
 /// binary. Each old binary moves to `<name>.old` first (a running exe can be
 /// renamed, not overwritten) and the new one takes its place; any failure
 /// moves the `.old` files back, so a half-updated folder cannot happen.
+/// Its tests run on every platform; only a Windows build calls it.
+#[cfg(any(windows, test))]
 fn install_windows(extracted: &Path, target: &Path) -> Result<(), String> {
     let mut swapped: Vec<&str> = Vec::new();
     let result = (|| {
@@ -344,6 +346,7 @@ fn install_windows(extracted: &Path, target: &Path) -> Result<(), String> {
 
 /// `from` to `to`, rename first, a copy when the rename cannot (across
 /// volumes).
+#[cfg(any(windows, test))]
 fn move_over(from: &Path, to: &Path) -> Result<(), String> {
     if std::fs::rename(from, to).is_ok() {
         return Ok(());
