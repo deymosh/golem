@@ -68,10 +68,22 @@ impl Default for Config {
 struct App {
     cfg: Config,
     job: SharedJob,
+    /// This machine's slug, probed once in the background: on Windows the
+    /// probes are PowerShell calls that can take seconds on a cold box, and
+    /// `api/state` is polled while the page is open.
+    host: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 fn app(cfg: Config) -> Arc<App> {
-    Arc::new(App { cfg, job: Arc::new(std::sync::Mutex::new(Job::default())) })
+    let host = Arc::new(std::sync::Mutex::new(None));
+    let probed = host.clone();
+    std::thread::spawn(move || {
+        let slug = crate::machine::this_host();
+        if let Ok(mut slot) = probed.lock() {
+            *slot = Some(slug);
+        }
+    });
+    Arc::new(App { cfg, job: Arc::new(std::sync::Mutex::new(Job::default())), host })
 }
 
 /// `[{...},\n{...}]` from the file's record lines.
@@ -289,7 +301,8 @@ fn json(status: StatusCode, body: String) -> Response {
 async fn api_state(State(app): State<Arc<App>>) -> Response {
     let home = app.cfg.home.clone();
     let job = app.job.clone();
-    let snapshot = tokio::task::spawn_blocking(move || state::snapshot(&home, &job)).await;
+    let host = app.host.lock().ok().and_then(|h| h.clone()).unwrap_or_default();
+    let snapshot = tokio::task::spawn_blocking(move || state::snapshot(&home, &job, &host)).await;
     let Ok(snapshot) = snapshot else {
         return plain(StatusCode::INTERNAL_SERVER_ERROR, "state unavailable");
     };

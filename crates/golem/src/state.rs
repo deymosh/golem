@@ -257,7 +257,7 @@ fn update_notice(home: &Path) -> Option<UpdateNotice> {
     })
 }
 
-pub fn snapshot(home: &Path, job: &SharedJob) -> Snapshot {
+pub fn snapshot(home: &Path, job: &SharedJob, host: &str) -> Snapshot {
     let status = engine::status(home);
     let (job_running, job_action) = match job.lock() {
         Ok(job) => (job.running(), job.action().to_string()),
@@ -267,7 +267,7 @@ pub fn snapshot(home: &Path, job: &SharedJob) -> Snapshot {
         up: status.up,
         vram_mib: if status.up { machine::vram_used_mib() } else { None },
         device: crate::launch::device(home),
-        host: machine::this_host(),
+        host: host.to_string(),
         alias: config::get(home, "MODEL_ALIAS").unwrap_or_default(),
         engine: config::get(home, "ENGINE").unwrap_or_else(|| paths::DEFAULT_ENGINE.to_string()),
         presets: presets(home),
