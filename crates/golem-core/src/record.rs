@@ -66,6 +66,9 @@ pub struct Facts {
     pub engine_build: String,
     pub model: String,
     pub model_file: String,
+    /// The file's quant (`crate::quant::label`): part of what the row
+    /// measured.
+    pub quant: String,
     pub ctx: Option<u64>,
     pub threads: Option<u32>,
     pub params_b: Option<f64>,
@@ -99,6 +102,7 @@ impl Default for Facts {
             engine_build: String::new(),
             model: String::new(),
             model_file: String::new(),
+            quant: String::new(),
             ctx: None,
             threads: None,
             params_b: None,
@@ -214,6 +218,7 @@ fn row_with(facts: &Facts, captured: &str, metrics: Metrics) -> Result<String, S
     members.push(format!("\"engine_build\": {}", json::quote(&facts.engine_build)));
     members.push(format!("\"model\": {}", json::quote(&facts.model)));
     members.push(format!("\"model_file\": {}", json::quote(&facts.model_file)));
+    members.push(format!("\"quant\": {}", json::quote(&facts.quant)));
     members.push(format!("\"ctx\": {}", num_opt_u64(facts.ctx)));
     members.push(format!("\"threads\": {}", num_opt_u32(facts.threads)));
     members.push(format!("\"params_b\": {}", num_opt_f2(facts.params_b)));
@@ -519,6 +524,8 @@ pub struct ModelFacts {
     pub experts: Option<String>,
     pub n_layer: Option<u32>,
     pub ctx_train: Option<u64>,
+    /// `general.file_type`, when the header has it.
+    pub file_type: Option<u32>,
 }
 
 /// Read a model file's facts from its GGUF header. All-defaults when the file
@@ -535,6 +542,7 @@ pub fn model_facts(path: &Path) -> ModelFacts {
         experts: facts.moe.then(|| format!("{}x{}", facts.n_expert, facts.n_expert_used)),
         n_layer: Some(facts.n_layer as u32),
         ctx_train: Some(facts.n_ctx_train),
+        file_type: facts.file_type,
     }
 }
 
@@ -601,6 +609,7 @@ mod tests {
             engine_build: "b11379-1537a0a8b".into(),
             model: "ornith-1.5-35b".into(),
             model_file: "Ornith-1.5-35B-Q4_K_M.gguf".into(),
+            quant: "Q4_K_M".into(),
             ctx: Some(236544),
             threads: Some(16),
             params_b: Some(35.51),
@@ -631,7 +640,7 @@ mod tests {
             "\"gpu\": \"NVIDIA GeForce RTX 3060\", \"os\": \"windows\", ",
             "\"mode\": \"native\", \"engine\": \"llama.cpp\", ",
             "\"engine_build\": \"b11379-1537a0a8b\", \"model\": \"ornith-1.5-35b\", ",
-            "\"model_file\": \"Ornith-1.5-35B-Q4_K_M.gguf\", \"ctx\": 236544, ",
+            "\"model_file\": \"Ornith-1.5-35B-Q4_K_M.gguf\", \"quant\": \"Q4_K_M\", \"ctx\": 236544, ",
             "\"threads\": 16, \"params_b\": 35.51, \"params_active_b\": 3.52, ",
             "\"moe\": true, \"experts\": \"256x8\", \"n_layer\": 40, ",
             "\"ctx_train\": 262144, \"flags\": {\"ctx-size\": 236544, \"jinja\": true}, ",

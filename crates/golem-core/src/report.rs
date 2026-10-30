@@ -172,13 +172,13 @@ pub fn markdown(rows: &[Row]) -> String {
         }
 
         // The best rows are already ordered, so a model block is a run of
-        // consecutive entries that name the same model.
+        // consecutive entries that name the same model in the same quant.
         let host_best: Vec<&Best> = best.iter().filter(|e| e.row.host == host).collect();
         let mut i = 0;
         while i < host_best.len() {
-            let model = &host_best[i].row.model;
+            let model = host_best[i].row.identity();
             let mut j = i + 1;
-            while j < host_best.len() && &host_best[j].row.model == model {
+            while j < host_best.len() && host_best[j].row.identity() == model {
                 j += 1;
             }
             out.push('\n');
@@ -203,7 +203,7 @@ pub fn markdown(rows: &[Row]) -> String {
                 let _ = writeln!(
                     out,
                     "| {} | {} `{}` | {} |",
-                    row.model, row.engine, row.engine_build, row.note
+                    row.identity(), row.engine, row.engine_build, row.note
                 );
             }
         }
@@ -225,21 +225,21 @@ fn display_host(host: &str) -> &str {
     }
 }
 
-/// `{model} — {shape}`, the block heading. The shape names the parameters
+/// `{model} {quant} — {shape}`, the block heading. The shape names the parameters
 /// and, for a mixture of experts, the split: a 35B that does 3.5B of work
 /// per token is not the same machine load as a dense 35B.
 fn heading(row: &Row) -> String {
     match (row.params_b, row.params_active_b) {
         (Some(total), Some(active)) if active != total => {
             let mut s =
-                format!("{} \u{2014} {total:.2}B total, {active:.2}B active", row.model);
+                format!("{} \u{2014} {total:.2}B total, {active:.2}B active", row.identity());
             if let Some(experts) = &row.experts {
                 let _ = write!(s, ", {experts} experts");
             }
             s
         }
-        (Some(params), _) => format!("{} \u{2014} {params:.2}B", row.model),
-        (None, _) => row.model.clone(),
+        (Some(params), _) => format!("{} \u{2014} {params:.2}B", row.identity()),
+        (None, _) => row.identity(),
     }
 }
 

@@ -86,6 +86,7 @@ pub fn collect(
         engine: engine.to_string(),
         engine_build,
         model: model.to_string(),
+        quant: golem_core::quant::label(&model_file, model_facts.file_type),
         model_file,
         ctx,
         threads,

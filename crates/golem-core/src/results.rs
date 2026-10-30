@@ -75,6 +75,13 @@ pub struct Row {
     pub os: Option<String>,
     pub mode: Option<String>,
     pub model: String,
+    /// The GGUF file the model was served from, as recorded.
+    pub model_file: String,
+    /// The file's quant (`Q4_K_M`, `UD-Q4_K_XL`, `BF16`): the row's own
+    /// `quant`, else read from `model_file` (rows from before it was
+    /// recorded), else empty. Part of what the row measured
+    /// ([`Row::identity`]).
+    pub quant: String,
     pub engine: String,
     pub engine_build: String,
     pub ctx: Option<u64>,
@@ -220,6 +227,12 @@ impl Row {
             _ => Vec::new(),
         };
 
+        let model_file = str_of(value.get("model_file")).unwrap_or_default();
+        let quant = str_of(value.get("quant"))
+            .filter(|q| !q.is_empty())
+            .or_else(|| crate::quant::from_name(&model_file))
+            .unwrap_or_default();
+
         Ok(Row {
             kind,
             ts,
@@ -230,6 +243,8 @@ impl Row {
             os: str_of(value.get("os")),
             mode: str_of(value.get("mode")),
             model,
+            model_file,
+            quant,
             engine: str_of(value.get("engine")).unwrap_or_default(),
             engine_build: str_of(value.get("engine_build")).unwrap_or_default(),
             ctx: u64_of(value.get("ctx")),
@@ -263,8 +278,20 @@ impl Row {
         }
     }
 
+    /// The model as a result names it: the preset with its quant
+    /// (`ornith-1.5-35b Q4_K_M`). The same preset name over a file in
+    /// another quant is another model, and its numbers never mix with
+    /// these.
+    pub fn identity(&self) -> String {
+        if self.quant.is_empty() {
+            self.model.clone()
+        } else {
+            format!("{} {}", self.model, self.quant)
+        }
+    }
+
     /// The identity of the configuration a row measured: one line per
-    /// machine, model, engine, engine build and context.
+    /// machine, model and quant, engine, engine build and context.
     ///
     /// Tuning is deliberately *not* part of it: two runs of the same
     /// configuration with a different offload split, batch or thread count
@@ -276,7 +303,7 @@ impl Row {
         format!(
             "{}|{}|{}|{}|{}",
             self.host,
-            self.model,
+            self.identity(),
             self.engine,
             self.engine_build,
             self.ctx.map(|c| c.to_string()).unwrap_or_default(),
@@ -414,7 +441,7 @@ pub fn best_per_configuration(rows: &[Row]) -> Vec<Best> {
             continue;
         }
         if let Some(n) = row.eval.as_ref().and_then(|e| e.needle.clone()) {
-            let key = (row.host.clone(), row.model.clone(), row.engine.clone());
+            let key = (row.host.clone(), row.identity(), row.engine.clone());
             match needles.iter_mut().find(|(k, _)| k == &key) {
                 Some((_, existing)) => *existing = n,
                 None => needles.push((key, n)),
@@ -443,7 +470,7 @@ pub fn best_per_configuration(rows: &[Row]) -> Vec<Best> {
     let mut out: Vec<Best> = best
         .into_iter()
         .map(|(_, _, row)| {
-            let key = (row.host.clone(), row.model.clone(), row.engine.clone());
+            let key = (row.host.clone(), row.identity(), row.engine.clone());
             let needle = needles.iter().find(|(k, _)| k == &key).map(|(_, n)| n.clone());
             Best { row, needle }
         })
@@ -453,7 +480,7 @@ pub fn best_per_configuration(rows: &[Row]) -> Vec<Best> {
     // same host and size class.
     let mut model_best: Vec<((String, String), f64)> = Vec::new();
     for entry in &out {
-        let key = (entry.row.host.clone(), entry.row.model.clone());
+        let key = (entry.row.host.clone(), entry.row.identity());
         let decode =
             entry.row.decode_median.as_ref().map(|n| n.value).unwrap_or(f64::NEG_INFINITY);
         match model_best.iter_mut().find(|(k, _)| k == &key) {
@@ -468,7 +495,7 @@ pub fn best_per_configuration(rows: &[Row]) -> Vec<Best> {
     let best_of = |row: &Row| -> f64 {
         model_best
             .iter()
-            .find(|(k, _)| k.0 == row.host && k.1 == row.model)
+            .find(|(k, _)| k.0 == row.host && k.1 == row.identity())
             .map(|(_, v)| *v)
             .unwrap_or(f64::NEG_INFINITY)
     };
@@ -486,7 +513,7 @@ pub fn best_per_configuration(rows: &[Row]) -> Vec<Best> {
                     .partial_cmp(&best_of(&a.row))
                     .unwrap_or(std::cmp::Ordering::Equal),
             )
-            .then(a.row.model.cmp(&b.row.model))
+            .then(a.row.identity().cmp(&b.row.identity()))
             .then(ctx_key(a.row.ctx).cmp(&ctx_key(b.row.ctx)))
             .then(a.row.engine.cmp(&b.row.engine))
             .then(a.row.engine_build.cmp(&b.row.engine_build))
@@ -519,7 +546,7 @@ mod tests {
     /// A bench row shaped like the ones the recorder writes.
     const BENCH: &str = r#"{"ts": "2026-10-19T18:02:22Z", "kind": "bench", "host": "rtx-3060_12g_32g_i7-12700kf", "gpu": "NVIDIA GeForce RTX 3060", "os": "windows", "mode": "windows", "engine": "llama.cpp", "engine_build": "b11379-1537a0a8b", "model": "ornith-1.5-35b", "model_file": "Ornith-1.5-35B-Q4_K_M.gguf", "ctx": 236544, "threads": 16, "params_b": 35.51, "params_active_b": 3.52, "moe": true, "experts": "256x8", "n_layer": 40, "ctx_train": 262144, "flags": {"jinja": "true", "ctx-size": 236544}, "decode_best": 59.6, "decode_median": 59.3, "draft_accept": 0.66, "prefill": 832, "vram_mib": 11000, "ram_used_gib": 19.4, "ram_free_gib": 8.1, "quiet": true, "note": ""}"#;
 
-    const EVAL: &str = r#"{"ts": "2026-10-20T00:00:38Z", "kind": "eval", "host": "rtx-3060_12g_32g_i7-12700kf", "model": "ornith-1.5-35b", "engine": "llama.cpp", "engine_build": "b11379-1537a0a8b", "ctx": 236544, "eval": {"tools": "PASS", "needle": "PASS", "needle_tokens": 211818, "depth_decode": 30.6, "decode_best": 58.1}, "quiet": true, "note": ""}"#;
+    const EVAL: &str = r#"{"ts": "2026-10-20T00:00:38Z", "kind": "eval", "host": "rtx-3060_12g_32g_i7-12700kf", "model": "ornith-1.5-35b", "model_file": "Ornith-1.5-35B-Q4_K_M.gguf", "engine": "llama.cpp", "engine_build": "b11379-1537a0a8b", "ctx": 236544, "eval": {"tools": "PASS", "needle": "PASS", "needle_tokens": 211818, "depth_decode": 30.6, "decode_best": 58.1}, "quiet": true, "note": ""}"#;
 
     #[test]
     fn parses_a_bench_row() {
@@ -539,6 +566,22 @@ mod tests {
         assert_eq!(row.flags.len(), 2);
         assert_eq!(row.flags[0], ("jinja".to_string(), "true".to_string()));
         assert_eq!(row.flags[1], ("ctx-size".to_string(), "236544".to_string()));
+    }
+
+    #[test]
+    fn the_quant_is_the_rows_own_or_read_from_its_file() {
+        // A row from before quants were recorded: read from model_file.
+        let old = Row::parse(BENCH).expect("parse");
+        assert_eq!(old.quant, "Q4_K_M");
+        assert_eq!(old.identity(), "ornith-1.5-35b Q4_K_M");
+        // A row that records its own wins.
+        let new = Row::parse(&BENCH.replace(r#""ctx": 236544"#, r#""quant": "UD-Q4_K_XL", "ctx": 236544"#)).expect("parse");
+        assert_eq!(new.quant, "UD-Q4_K_XL");
+        // Two quants of one preset are two configurations, never one.
+        assert_ne!(old.configuration_key(), new.configuration_key());
+        // A row with no file says no quant, and is named by its preset alone.
+        let bare = Row::parse(&EVAL.replace(r#""model_file": "Ornith-1.5-35B-Q4_K_M.gguf", "#, "")).expect("parse");
+        assert_eq!((bare.quant.as_str(), bare.identity().as_str()), ("", "ornith-1.5-35b"));
     }
 
     #[test]

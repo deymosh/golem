@@ -86,6 +86,9 @@ pub struct ModelFacts {
     /// 1 when the file embeds an MTP/draft head (`blk.N.nextn.*`).
     pub mtp_tensors: u8,
     pub tensors: u64,
+    /// `general.file_type`: the file's quant as llama.cpp numbers it
+    /// (`crate::quant::from_file_type` names it), when the header says.
+    pub file_type: Option<u32>,
 }
 
 impl ModelFacts {
@@ -367,6 +370,7 @@ pub fn read(path: &Path) -> Result<ModelFacts, GgufError> {
         params_active,
         mtp_tensors: u8::from(mtp > 0),
         tensors: n_tensors,
+        file_type: kv.get("general.file_type").map(|v| v.as_u64() as u32),
     })
 }
 

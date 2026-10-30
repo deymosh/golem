@@ -29,6 +29,10 @@ pub mod tune;
 /// The router's `/models` listing: which models failed to load.
 pub mod router;
 
+/// A model file's quant, from its name or its GGUF header: part of a
+/// result's identity.
+pub mod quant;
+
 /// `llama-server --list-devices`, read: whether the engine has a GPU to run
 /// on or will fall back to the CPU.
 pub mod devices;

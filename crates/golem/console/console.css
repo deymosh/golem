@@ -242,6 +242,7 @@ pre.log { margin: 0; padding: 12px 14px; font: 12px/1.55 var(--code); color: var
 .chip { font-size: 12px; padding: 1px 8px; border-radius: 99px; color: var(--soft); background: color-mix(in srgb, var(--soft) 12%, transparent); }
 .chip.role { color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, transparent); }
 .chip.away { background: transparent; border: 1px dashed var(--hair); }
+.quant { font: 600 11px/1.6 var(--mono, ui-monospace, monospace); padding: 0 6px; margin-left: 6px; border-radius: 4px; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); vertical-align: 1px; white-space: nowrap; }
 .empty { padding: 28px 18px; color: var(--soft); text-align: center; }
 @media (max-width: 620px) { .model { grid-template-columns: minmax(0, 1fr); } .model .speed { grid-column: 1; grid-row: auto; text-align: left; } }
 

@@ -28,6 +28,9 @@ use crate::state;
 pub struct Model {
     pub name: String,
     pub file: String,
+    /// The file's quant (`Q4_K_M`): from its name, else its header; empty
+    /// when neither says.
+    pub quant: String,
     /// The `; Download:` repo `up` and `pull` fetch from.
     pub repo: String,
     /// `ctx-size`, or 0 when the section does not say.
@@ -81,6 +84,7 @@ pub fn list(home: &Path) -> Vec<Model> {
             let moe = facts.as_ref().is_some_and(|f| f.moe);
             Model {
                 name: section.name.clone(),
+                quant: golem_core::quant::label(&file, facts.as_ref().and_then(|f| f.file_type)),
                 file,
                 repo: section.downloads.first().map(|d| d.repo.clone()).unwrap_or_default(),
                 ctx: number(section.value("ctx-size")).unwrap_or(0),
@@ -125,11 +129,12 @@ pub fn to_json(models: &[Model]) -> String {
         .iter()
         .map(|m| {
             format!(
-                "{{\"Name\": {}, \"File\": {}, \"Repo\": {}, \"Ctx\": {}, \"NcMoe\": {}, \
+                "{{\"Name\": {}, \"File\": {}, \"Quant\": {}, \"Repo\": {}, \"Ctx\": {}, \"NcMoe\": {}, \
                  \"Mtp\": {}, \"Present\": {}, \"Gb\": {}, \"Default\": {}, \"ParamsB\": {}, \
                  \"ParamsActiveB\": {}, \"Moe\": {}, \"Experts\": {}, \"CtxTrain\": {},                  \"Role\": {}}}",
                 json::quote(&m.name),
                 json::quote(&m.file),
+                json::quote(&m.quant),
                 json::quote(&m.repo),
                 m.ctx,
                 m.nc_moe,

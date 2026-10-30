@@ -66,7 +66,7 @@ fn marked_row(text: &str) -> &str {
 }
 
 fn model(name: &str, role: &str, default: bool, present: bool, best: Option<&str>) -> ModelRow {
-    ModelRow { name: name.into(), role: role.into(), default, present, best: best.map(str::to_string) }
+    ModelRow { name: name.into(), quant: "Q4_K_M".into(), role: role.into(), default, present, best: best.map(str::to_string) }
 }
 
 /// An app with a machine's worth of facts and models, without a machine.

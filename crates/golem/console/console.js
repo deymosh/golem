@@ -26,6 +26,22 @@ const API_NAMES = { anthropic: "Messages", openai: "Chat Completions" };
 const parseRows = (text) => text.split("\n").filter((l) => l.trim().startsWith("{")).flatMap((l) => {
   try { return [JSON.parse(l)]; } catch (e) { return []; }
 });
+// A model file's quant, read from its name as golem_core::quant reads it:
+// a row recorded since quants are recorded carries its own, an older one
+// has only its model_file. A model in another quant is another model, so
+// rows are told apart and compared by the preset *and* its quant.
+function quantFromName(file) {
+  const parts = String(file || "").split(/[\\/]/).pop().replace(/\.gguf$/i, "").split(/[-.]/);
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const u = parts[i].toUpperCase();
+    const named = /^(BF16|F16|F32|FP16|FP32)$/.test(u) || u.startsWith("MXFP4") || (/^(IQ|TQ|Q)\d/.test(u) && u.includes("_"));
+    if (/^[A-Z0-9_]+$/.test(u) && named) return (i > 0 && parts[i - 1].toUpperCase() === "UD" ? "UD-" : "") + u;
+  }
+  return "";
+}
+const quantOf = (r) => r?.quant || quantFromName(r?.model_file);
+const idOf = (r) => (quantOf(r) ? `${r.model} ${quantOf(r)}` : r.model);
+const quantTag = (q) => (q ? ` <span class="quant">${esc(q)}</span>` : "");
 const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
 
 // ---- the window (golem app) -------------------------------------------
@@ -139,10 +155,10 @@ function fillSelect(id, values) {
   if (values.includes(cur)) sel.value = cur;
 }
 function fillFilters() {
-  modelNames = [...new Set(ROWS.map((r) => r.model))].sort();
+  modelNames = [...new Set(ROWS.map(idOf))].sort();
   fillSelect("f-host", [...new Set(ROWS.map((r) => r.host))].sort());
   fillSelect("f-engine", [...new Set(ROWS.map((r) => r.engine))].sort());
-  fillSelect("f-model", modelNames);
+  fillSelect("f-model", [...new Set(ROWS.map((r) => r.model))].sort());
 }
 fillFilters();
 fillSelect("f-class", CLASSES);
@@ -172,7 +188,7 @@ function filtered() {
 function renderBoard(rows) {
   const groups = {};
   rows.forEach((r) => {
-    const k = [r.host, r.engine, r.engine_build, r.model].join("|");
+    const k = [r.host, r.engine, r.engine_build, idOf(r)].join("|");
     const g = (groups[k] = groups[k] || { bench: [], eval: [], agent: [] });
     if (r.kind === "eval") g.eval.push(r); else if (r.kind !== "agent") g.bench.push(r);
     if (agentOf(r)) g.agent.push(r);
@@ -200,7 +216,7 @@ function renderBoard(rows) {
       const cls = classOf(r);
       const head = cls !== lastClass ? `<tr class="classrow"><td colspan="17">${esc(cls)}</td></tr>` : "";
       lastClass = cls;
-      return head + `<tr><td><span class="swatch" style="background:${colorOf(r.model)}"></span>${esc(r.model)}</td>
+      return head + `<tr><td><span class="swatch" style="background:${colorOf(idOf(r))}"></span>${esc(r.model)}${quantTag(quantOf(r))}</td>
         <td>${esc(r.engine)} <span class="flags">${esc(r.engine_build)}</span></td>
         <td>${paramsCell(r)}</td>
         <td class="num">${r.ctx ? (r.ctx / 1024).toFixed(0) + "K" : "–"}</td>
@@ -236,11 +252,11 @@ function renderScatter(rows) {
   svg += `<text x="${(L + W - R) / 2}" y="${H - 4}" text-anchor="middle">Prefill tok/s</text>`;
   svg += `<text x="12" y="${(T + H - B) / 2}" text-anchor="middle" transform="rotate(-90 12 ${(T + H - B) / 2})">Decode tok/s (median)</text>`;
   pts.forEach((p, i) => {
-    svg += `<circle cx="${X(p.prefill)}" cy="${Y(p.decode_median)}" r="6" fill="${colorOf(p.model)}" fill-opacity=".85"
-      stroke="var(--surface)" stroke-width="1.5" data-i="${i}" class="pt"><title>${esc(p.model)}</title></circle>`;
+    svg += `<circle cx="${X(p.prefill)}" cy="${Y(p.decode_median)}" r="6" fill="${colorOf(idOf(p))}" fill-opacity=".85"
+      stroke="var(--surface)" stroke-width="1.5" data-i="${i}" class="pt"><title>${esc(idOf(p))}</title></circle>`;
   });
   $("scatter").innerHTML = svg + "</svg>";
-  $("legend").innerHTML = [...new Set(pts.map((p) => p.model))].map((m) => `<span><span class="swatch" style="background:${colorOf(m)}"></span>${esc(m)}</span>`).join("");
+  $("legend").innerHTML = [...new Set(pts.map(idOf))].map((m) => `<span><span class="swatch" style="background:${colorOf(m)}"></span>${esc(m)}</span>`).join("");
   wireTip(pts);
 }
 
@@ -252,7 +268,7 @@ function wireTip(pts) {
     c.onmouseenter = (e) => {
       const p = pts[+c.dataset.i];
       tip.innerHTML =
-        `<b>${esc(p.model)}</b> <span class="flags">${esc(p.model_file || "")}</span><br>` +
+        `<b>${esc(p.model)}</b>${quantTag(quantOf(p))} <span class="flags">${esc(p.model_file || "")}</span><br>` +
         `${esc(modelLine(p))}<br>` +
         `${esc(p.engine)} <span class="flags">${esc(p.engine_build)}</span>, ${esc(day(p.ts))}<br>` +
         `<b>${fmt(p.decode_median)}</b> t/s decode (best ${fmt(p.decode_best)})` +
@@ -282,7 +298,7 @@ let sortKey = "ts", sortDir = -1;
 const COLS = [
   ["ts", "Time", (r) => esc((r.ts || "").replace("T", " ").slice(0, 16))],
   ["kind", "Kind", (r) => esc(r.kind)],
-  ["model", "Model", (r) => `<span class="swatch" style="background:${colorOf(r.model)}"></span>${esc(r.model)}`],
+  ["model", "Model", (r) => `<span class="swatch" style="background:${colorOf(idOf(r))}"></span>${esc(r.model)}${quantTag(quantOf(r))}`],
   ["engine_build", "Build", (r) => esc(`${r.engine} ${r.engine_build}`)],
   ["model_stats", "Params", (r) => paramsCell(r), false],
   ["ctx", "Ctx", (r) => (r.ctx ? (r.ctx / 1024).toFixed(0) + "K" : "–"), true],
@@ -298,7 +314,7 @@ const COLS = [
 ];
 const sortVal = (r, k) => k === "decode" ? (r.kind === "eval" ? r.eval?.decode_best : r.decode_median) ?? -1
   : k === "prefill" ? (r.kind === "eval" ? r.eval?.needle_prefill : r.prefill) ?? -1
-  : k === "flags" ? flagStr(r.flags) : k === "model_stats" ? (r.params_b ?? -1) : k === "result" ? r.eval?.needle || "" : r[k] ?? "";
+  : k === "model" ? idOf(r) : k === "flags" ? flagStr(r.flags) : k === "model_stats" ? (r.params_b ?? -1) : k === "result" ? r.eval?.needle || "" : r[k] ?? "";
 
 function renderRuns(rows) {
   const sorted = rows.slice().sort((a, b) => { const x = sortVal(a, sortKey), y = sortVal(b, sortKey); return (x > y ? 1 : x < y ? -1 : 0) * sortDir; });
@@ -328,16 +344,17 @@ render();
 
 // A model's best measured decode on this machine: the fastest bench row for
 // it, with that row's prefill.
-function bestRun(name) {
-  const runs = ROWS.filter((r) => r.kind === "bench" && r.model === name && r.decode_median);
+function bestRun(name, quant) {
+  const runs = ROWS.filter((r) => r.kind === "bench" && r.model === name && r.decode_median && (!topHost || r.host === topHost)
+    && (!quant || quantOf(r) === quant));
   return runs.reduce((a, b) => (!a || b.decode_median > a.decode_median ? b : a), null);
 }
 
 // What a model's numbers are worth on this machine, from its newest gate
 // (an eval with a needle) and its benches: proven, failed, measured, or
-// nothing at all. The machine is the host most rows come from.
-function evidence(name) {
-  const mine = ROWS.filter((r) => r.model === name && (!topHost || r.host === topHost));
+// nothing at all, on this machine (`topHost`).
+function evidence(name, quant) {
+  const mine = ROWS.filter((r) => r.model === name && (!topHost || r.host === topHost) && (!quant || quantOf(r) === quant));
   const gate = mine.filter((r) => r.kind === "eval" && r.eval?.needle).sort((a, b) => (a.ts < b.ts ? 1 : -1))[0];
   const build = (r) => (r.engine_build || "").split("-")[0];
   const size = (r) => (r.eval?.needle_tokens ? `${Math.round(r.eval.needle_tokens / 1000)}K` : "long-context");
@@ -360,8 +377,8 @@ function agentOf(r) {
   return { solved, total, pass, apis: runs.map(([k, a]) => `${API_NAMES[k] || k} ${a.solved}/${a.total}`).join(", ") };
 }
 // A model's newest agent verdict on this machine, as a seal, or null.
-function agentEvidence(name) {
-  const r = ROWS.filter((x) => x.model === name && (!topHost || x.host === topHost) && agentOf(x))
+function agentEvidence(name, quant) {
+  const r = ROWS.filter((x) => x.model === name && (!topHost || x.host === topHost) && (!quant || quantOf(x) === quant) && agentOf(x))
     .sort((a, b) => (a.ts < b.ts ? 1 : -1))[0];
   const a = agentOf(r);
   if (!a) return null;
@@ -373,15 +390,17 @@ function agentEvidence(name) {
 function renderServing(models, state) {
   const name = state?.alias || "";
   const m = models.find((x) => x.Name === name);
-  const run = bestRun(name);
+  const quant = m?.Quant || "";
+  SERVED_QUANT = quant;
+  const run = bestRun(name, quant);
   const busy = state?.job_running;
   $("sv-lead").textContent = busy ? `${state.job_action} running` : state?.up ? "Serving" : "Stopped";
   $("sv-lead").className = "lead" + (state?.up && !busy ? " up" : "");
-  $("sv-name").textContent = name || "No model yet";
-  const ev = evidence(name);
+  $("sv-name").innerHTML = name ? esc(name) + quantTag(quant) : "No model yet";
+  const ev = evidence(name, quant);
   $("sv-seal").className = "seal " + ev.tier;
   $("sv-seal").innerHTML = name ? sealHtml(ev) : "";
-  const ag = name ? agentEvidence(name) : null;
+  const ag = name ? agentEvidence(name, quant) : null;
   $("sv-agent").hidden = !ag;
   $("sv-agent").className = "seal " + (ag?.tier || "");
   $("sv-agent").innerHTML = ag ? sealHtml(ag) : "";
@@ -394,6 +413,9 @@ function renderServing(models, state) {
 // The exact setup for each client, from the host, port and key the service
 // answers with: the Anthropic API at the root, the OpenAI APIs under /v1.
 let CX = "claude", CX_SHOW = false, CX_STATE = null;
+// The default model's quant, from the Models list: Connect names it, since a
+// client's results belong to that file and not only to the preset's name.
+let SERVED_QUANT = "";
 try { CX = localStorage.getItem("golem.connect") || "claude"; } catch (e) { /* no storage */ }
 const WINDOWS = /Windows/.test(navigator.userAgent);
 function connectSetup(chat, state, key) {
@@ -436,6 +458,7 @@ function renderConnect(state) {
   $("cx-openai").textContent = shown.v1;
   $("cx-key").textContent = CX_SHOW ? CHAT.key : masked;
   $("cx-snippet").textContent = shown.text;
+  $("cx-model").innerHTML = CX_STATE?.alias ? esc(CX_STATE.alias) + quantTag(SERVED_QUANT) : "–";
   $("cx-note").textContent = shown.note + (shown.local && location.hostname !== CHAT.host && location.hostname !== "localhost"
     ? ` Golem's API listens on ${CHAT.host} only, so agents on other machines cannot reach it (LOCAL_AI_HOST in golem.toml).` : "");
   $("cx-show").textContent = CX_SHOW ? "Hide key" : "Show key";
@@ -490,7 +513,8 @@ function renderModels(models, state) {
   if (shown === modelsShown) return;
   modelsShown = shown;
   $("m-list").innerHTML = models.length ? models.map((m) => {
-    const run = bestRun(m.Name);
+    const run = bestRun(m.Name, m.Quant);
+    const ev = evidence(m.Name, m.Quant), ag = agentEvidence(m.Name, m.Quant);
     const chips = [
       m.Role ? `<span class="chip role">${esc(m.Role)}</span>` : "",
       m.Default ? `<span class="chip">default</span>` : "",
@@ -513,10 +537,10 @@ function renderModels(models, state) {
       m.Default ? "" : `<button class="btn quiet danger" data-delpreset="${esc(m.Name)}">Remove</button>`,
     ].join("");
     return `<li class="model${m.Name === serving ? " serving" : ""}">
-      <div class="name"><strong>${esc(m.Name)}</strong>${chips}</div>
+      <div class="name"><strong>${esc(m.Name)}</strong>${quantTag(m.Quant)}${chips}</div>
       <div class="facts">${facts}</div>
-      ${m.Present ? `<div class="seals"><div class="seal ${evidence(m.Name).tier}">${sealHtml(evidence(m.Name))}</div>${
-        agentEvidence(m.Name) ? `<div class="seal ${agentEvidence(m.Name).tier}">${sealHtml(agentEvidence(m.Name))}</div>` : ""}</div>` : ""}
+      ${m.Present ? `<div class="seals"><div class="seal ${ev.tier}">${sealHtml(ev)}</div>${
+        ag ? `<div class="seal ${ag.tier}">${sealHtml(ag)}</div>` : ""}</div>` : ""}
       <div class="speed${run ? "" : " none"}">${run ? `<b>${fmt(run.decode_median)}<small>t/s</small></b><span>${fmt(run.prefill, 0)} prefill</span>` : `<b>–</b><span>not measured yet</span>`}</div>
       <div class="acts">${acts}</div></li>`;
   }).join("") : `<li class="empty">No models yet. Pull one above.</li>`;
@@ -678,7 +702,6 @@ async function pollOnce() {
   catch (e) { $("c-state-text").textContent = "No state"; }
   ENGINE_UP = !!state?.up;
   if (!$("tab-chat").hidden) showChat();
-  if (await loadChat()) renderConnect(state);
   try {
     const models = await (await fetch("api/models", { cache: "no-store" })).json();
     renderServing(models, state);
@@ -687,6 +710,8 @@ async function pollOnce() {
   catch (e) {
     if (!$("m-list").children.length) $("m-list").innerHTML = `<li class="empty">The model list is not available from this service.</li>`;
   }
+  // After the strip, which reads the default model's quant for Connect.
+  if (await loadChat()) renderConnect(state);
   try {
     const l = await (await fetch("api/logs", { cache: "no-store" })).json();
     $("log-file").textContent = l.file ? l.file : "No engine log yet. It starts with the engine.";

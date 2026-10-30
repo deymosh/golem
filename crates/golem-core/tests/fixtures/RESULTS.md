@@ -18,7 +18,7 @@ honest cross-size ratio (active parameters are what the GPU pushes per token: 3.
 
 NVIDIA GeForce RTX 4090 · windows/docker
 
-### moe-35b-a3b — 35.51B total, 3.52B active, 256x8 experts
+### moe-35b-a3b Q4_K_M — 35.51B total, 3.52B active, 256x8 experts
 
 | ctx | engine | setup | decode t/s | prefill t/s | t/s / active B | VRAM GB | RAM GB | MTP acc. | needle | measured |
 |---:|---|---|---:|---:|---:|---:|---:|---:|---|---|
@@ -28,19 +28,19 @@ NVIDIA GeForce RTX 4090 · windows/docker
 
 | model | engine | why |
 |---|---|---|
-| moe-35b-a3b | ik_llama.cpp `main-b5483-3d9321e` | rejected: 3.1x slower decode than llama.cpp on this box |
+| moe-35b-a3b Q4_K_M | ik_llama.cpp `main-b5483-3d9321e` | rejected: 3.1x slower decode than llama.cpp on this box |
 
 ## test-box
 
 Test GPU · linux/native
 
-### dense-0.5b — 0.49B
+### dense-0.5b Q4_K_M — 0.49B
 
 | ctx | engine | setup | decode t/s | prefill t/s | t/s / active B | VRAM GB | RAM GB | MTP acc. | needle | measured |
 |---:|---|---|---:|---:|---:|---:|---:|---:|---|---|
 | 8K | llama.cpp `b11379-1537a0a8b` | threads=20 | **317.6** | 19704 | 648.2 | 1.6 | - | - | FAIL | 2026-10-19 |
 
-### moe-35b-a3b — 35.51B total, 3.52B active, 256x8 experts
+### moe-35b-a3b Q4_K_M — 35.51B total, 3.52B active, 256x8 experts
 
 | ctx | engine | setup | decode t/s | prefill t/s | t/s / active B | VRAM GB | RAM GB | MTP acc. | needle | measured |
 |---:|---|---|---:|---:|---:|---:|---:|---:|---|---|
@@ -51,7 +51,7 @@ Test GPU · linux/native
 
 | model | engine | why |
 |---|---|---|
-| moe-35b-a3b | ik_llama.cpp `main-b5483-3d9321e` | rejected: 3.4x slower decode than llama.cpp with the same split |
+| moe-35b-a3b Q4_K_M | ik_llama.cpp `main-b5483-3d9321e` | rejected: 3.4x slower decode than llama.cpp with the same split |
 
 ## unknown host
 

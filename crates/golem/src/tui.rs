@@ -182,6 +182,8 @@ impl Default for Facts {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelRow {
     pub name: String,
+    /// The file's quant (`Q4_K_M`), empty when nothing names it.
+    pub quant: String,
     /// The library's role, empty when it lists none.
     pub role: String,
     pub default: bool,
@@ -486,11 +488,13 @@ fn model_rows(home: &Path) -> Vec<ModelRow> {
         .map(|m| {
             let best = rows
                 .iter()
-                .filter(|r| r.kind == Kind::Bench && r.model == m.name)
+                // The preset in this file's quant: another quant's number
+                // is another model's.
+                .filter(|r| r.kind == Kind::Bench && r.model == m.name && (m.quant.is_empty() || r.quant == m.quant))
                 .filter_map(|r| r.decode_median.as_ref())
                 .max_by(|a, b| a.value.total_cmp(&b.value))
                 .map(|n| n.text.clone());
-            ModelRow { name: m.name, role: m.role, default: m.default, present: m.present, best }
+            ModelRow { name: m.name, quant: m.quant, role: m.role, default: m.default, present: m.present, best }
         })
         .collect()
 }
@@ -665,6 +669,7 @@ fn models(app: &App, rows: usize) -> Vec<Line<'static>> {
                         Style::default().add_modifier(Modifier::BOLD)
                     },
                 ),
+                Span::styled(format!(" {:<10}", m.quant.chars().take(10).collect::<String>()), dim()),
                 Span::styled(format!("{speed:>11}"), speed_style),
                 Span::styled(format!("   {:<9}", m.role), dim()),
             ];
