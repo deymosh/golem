@@ -11,7 +11,7 @@ tokens-per-second figure is one input, not the answer.
 
 ## Where it stands
 
-Checked against the code and `results/results.jsonl` (230 rows on the reference box):
+Checked against the code and `results/results.jsonl` (231 rows on the reference box):
 
 - **What holds up.** One binary owns the engine (`service.rs`); every decision is a pure,
   tested function in `golem-core` (599 tests); a row records host, build, flags and
