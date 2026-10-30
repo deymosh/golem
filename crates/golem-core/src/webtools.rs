@@ -258,17 +258,30 @@ pub fn status_error(status: u16) -> String {
     format!("HTTP {status}: {why}")
 }
 
-/// What curl's exit code means for a search or a fetch, in words: curl's own
-/// message is in the machine's language and its TLS library's terms, and the
-/// model reads English. `None` for a code with no plainer wording.
-pub fn curl_error(code: i32) -> Option<&'static str> {
+/// What curl's exit code and its own words mean for a search or a fetch, in
+/// words: curl's message is in the machine's language and its TLS library's
+/// terms, and the model reads English. `None` for a code with no plainer
+/// wording.
+pub fn curl_error(code: i32, said: &str) -> Option<&'static str> {
+    const CERTIFICATE: &str =
+        "the site's secure connection failed: its certificate is expired, self-signed or not trusted";
     Some(match code {
         3 => "the address is not a valid URL",
         6 => "the host does not resolve",
         7 => "the host refused the connection",
         28 => "the request timed out",
-        35 | 51 | 53 | 54 | 58 | 59 | 60 | 66 | 77 | 80 | 83 | 90 | 91 => {
-            "the site's secure connection failed: its certificate is expired, self-signed or not trusted"
+        // Windows answers an expired certificate and a reset connection with
+        // the same code (35); curl's own words tell them apart.
+        35 if names_certificate(said) => CERTIFICATE,
+        35 | 53 | 54 | 59 | 66 => {
+            "the secure connection did not complete - the TLS handshake was reset or refused: \
+             try again, or another source"
+        }
+        // curl names the site's certificate or its key.
+        51 | 60 | 83 | 90 | 91 => CERTIFICATE,
+        // curl's own certificate files, on this machine.
+        58 | 77 | 82 => {
+            "the request failed before the site answered: curl could not use this machine's certificate files"
         }
         47 => "the site redirects too many times",
         52 => "the site closed the connection without an answer",
@@ -277,6 +290,16 @@ pub fn curl_error(code: i32) -> Option<&'static str> {
         63 => "the page is too large",
         _ => return None,
     })
+}
+
+/// Whether curl's own words name a certificate, whatever the machine's
+/// language: schannel reports by symbol (`SEC_E_CERT_EXPIRED`,
+/// `SEC_E_UNTRUSTED_ROOT`, `CERT_E_...`), the other TLS stacks in English.
+fn names_certificate(said: &str) -> bool {
+    said.contains("SEC_E_CERT")
+        || said.contains("SEC_E_UNTRUSTED_ROOT")
+        || said.contains("CERT_E_")
+        || said.to_ascii_lowercase().contains("certificate")
 }
 
 /// An address as a model wrote it, made into one curl takes: the fragment
@@ -2311,6 +2334,23 @@ mod tests {
     }
 
     #[test]
+    fn a_tls_failure_names_only_what_curl_named() {
+        // curl (35) "Recv failure: Connection was reset" - the reference
+        // box's answer for example.com, where no certificate was read.
+        let reset = curl_error(35, "curl: (35) Recv failure: Connection was reset").expect("35");
+        assert!(reset.contains("handshake was reset"), "{reset}");
+        assert!(!reset.contains("certificate"), "{reset}");
+        // The same code for expired.badssl.com, whose schannel message is in
+        // the machine's language but carries the symbol.
+        assert!(curl_error(35, "curl: (35) schannel: next InitializeSecurityContext failed: SEC_E_CERT_EXPIRED (0x80090328)")
+            .is_some_and(|w| w.contains("certificate")));
+        // self-signed.badssl.com is curl's own code for an untrusted root.
+        assert!(curl_error(60, "curl: (60) schannel: SEC_E_UNTRUSTED_ROOT").is_some_and(|w| w.contains("certificate")));
+        assert_eq!(curl_error(6, ""), Some("the host does not resolve"));
+        assert_eq!(curl_error(80, ""), None);
+    }
+
+    #[test]
     fn search_text_is_the_numbered_list_the_model_reads() {
         assert_eq!(
             search_text("rust \"lang\"", Some("2026-10-28"), &results()),
@@ -2757,11 +2797,13 @@ mod tests {
         assert!(status_error(429).contains("limiting"));
         assert!(status_error(503).contains("failed to answer"));
         // The certificate errors Windows' TLS library words in the machine's
-        // language (exit 35 for an expired one, 60 for a self-signed one).
-        assert!(curl_error(35).is_some_and(|w| w.contains("certificate")));
-        assert!(curl_error(60).is_some_and(|w| w.contains("certificate")));
-        assert_eq!(curl_error(3), Some("the address is not a valid URL"));
-        assert_eq!(curl_error(1234), None);
+        // language (exit 60 for an untrusted root, 35 for an expired one,
+        // which a reset connection shares).
+        assert!(curl_error(35, "schannel: SEC_E_CERT_EXPIRED").is_some_and(|w| w.contains("certificate")));
+        assert!(curl_error(35, "Recv failure: Connection was reset").is_some_and(|w| !w.contains("certificate")));
+        assert!(curl_error(60, "schannel: SEC_E_UNTRUSTED_ROOT").is_some_and(|w| w.contains("certificate")));
+        assert_eq!(curl_error(3, ""), Some("the address is not a valid URL"));
+        assert_eq!(curl_error(1234, ""), None);
         // What a model writes, made into what curl takes.
         assert_eq!(clean_url(" https://httpbin.org/anything/a b#part "), "https://httpbin.org/anything/a%20b");
         assert_eq!(clean_url("https://ja.wikipedia.org/wiki/東京"), "https://ja.wikipedia.org/wiki/%E6%9D%B1%E4%BA%AC");

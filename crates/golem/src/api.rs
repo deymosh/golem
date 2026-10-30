@@ -1050,8 +1050,10 @@ fn curl(args: &[&str]) -> Result<Vec<u8>, String> {
     if !out.status.success() {
         let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
         // curl's own words are in the machine's language; the model gets
-        // English, and curl's only when there is no plainer wording.
-        return Err(match out.status.code().and_then(tools::curl_error) {
+        // English, and curl's only when there is no plainer wording. The
+        // words go with the code because one Windows code means both an
+        // expired certificate and a reset handshake.
+        return Err(match out.status.code().and_then(|code| tools::curl_error(code, &said)) {
             Some(words) => words.to_string(),
             None if said.is_ascii() && !said.is_empty() => said,
             None => format!("the request failed (curl exit {})", out.status.code().unwrap_or(-1)),
