@@ -30,6 +30,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use golem_core::adapter;
+use golem_core::devices;
 use golem_core::gpu;
 use golem_core::ini;
 use golem_core::record;
@@ -190,8 +191,112 @@ pub fn up(home: &Path, overrides: &Overrides, dry_run: bool, out: &mut dyn Write
 
     // After the engine is on disk and before anything is spawned.
     ensure_models(home, &plan, out)?;
+    probe_devices(home, &plan, out);
 
     start(home, &plan, &endpoint, out)
+}
+
+/// How long `--list-devices` may take: a driver initialising every backend
+/// the build carries answers in a second or two.
+const DEVICE_PROBE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Ask the installed engine which devices it can offload to, keep the answer
+/// in `paths::devices` for `status`, the console and the recorder, and say so
+/// loudly when there is none: such an engine starts, serves, and runs every
+/// layer on the CPU without a word in its log. An adapter without
+/// `list_devices = true` is not asked, and its old answer is removed.
+fn probe_devices(home: &Path, plan: &Startup, out: &mut dyn Write) {
+    let file = paths::devices(home);
+    let _ = std::fs::remove_file(&file);
+    let adapter = paths::adapter(home, &plan.engine).map(|text| ini::parse(&text)).ok();
+    if adapter.as_ref().and_then(|a| a.global("list_devices")) != Some("true") {
+        return;
+    }
+    let Some(text) = list_devices(&plan.program) else {
+        let _ = writeln!(out, "[WARN] {} --list-devices did not answer - the device is unknown", plan.server);
+        return;
+    };
+    let found = devices::parse(&text);
+    let _ = std::fs::write(&file, devices::to_text(&plan.backend, &found));
+    match devices::verdict(&found, &plan.backend, release::platform()) {
+        devices::Verdict::Gpu(device) => {
+            let _ = writeln!(out, "[ OK ] device: {} {}", device.name, device.description);
+        }
+        devices::Verdict::CpuOnly(advice) => {
+            let _ = writeln!(out, "[WARN] {advice}");
+            if plan.backend == "rocm" && cfg!(windows) {
+                let missing = devices::missing_hip(|lib| plan.bin.join(lib).is_file() || on_path(lib));
+                if !missing.is_empty() {
+                    let _ = writeln!(out, "       not found beside the engine or on PATH: {}", missing.join(", "));
+                }
+            }
+            let _ = writeln!(out, "       bench, eval and tune record nothing while the engine has no GPU");
+        }
+    }
+}
+
+/// Probe the devices of the engine `overrides` resolve to, without starting
+/// it: what a tune asks before its first load and `install` after it. The
+/// advice when the engine would run on the CPU; `None` otherwise - and for
+/// an engine not installed yet, one running (its start probed), or a setup
+/// that does not resolve, which the command's own start reports.
+pub fn probe(home: &Path, overrides: &Overrides, out: &mut dyn Write) -> Option<String> {
+    let plan = plan(home, overrides).ok()?;
+    // A model in VRAM can keep a backend from initialising at all, which
+    // would read as no device.
+    if !plan.program.is_file() || engine::status(home).up {
+        return None;
+    }
+    probe_devices(home, &plan, out);
+    device(home).and_then(|(_, advice)| advice)
+}
+
+/// What the last start's probe found: the device label (`CUDA0 NVIDIA
+/// GeForce RTX 3060`, or `CPU only`) and, for a CPU fallback, the advice.
+/// `None` when the engine was not probed.
+pub fn device(home: &Path) -> Option<(String, Option<String>)> {
+    let text = std::fs::read_to_string(paths::devices(home)).ok()?;
+    let (backend, found) = devices::from_text(&text)?;
+    let label = devices::label(&found, &backend, release::platform());
+    match devices::verdict(&found, &backend, release::platform()) {
+        devices::Verdict::Gpu(_) => Some((label, None)),
+        devices::Verdict::CpuOnly(advice) => Some((label, Some(advice))),
+    }
+}
+
+/// `<server> --list-devices`, its stdout, or `None` when it fails or hangs.
+fn list_devices(program: &Path) -> Option<String> {
+    let mut command = Command::new(program);
+    command.arg("--list-devices").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command.spawn().ok()?;
+    let deadline = Instant::now() + DEVICE_PROBE_DEADLINE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(child.stdout.as_mut()?, &mut text).ok()?;
+    Some(text)
+}
+
+/// Whether a file of that name is in one of PATH's directories.
+fn on_path(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
+        .unwrap_or(false)
 }
 
 /// `golem restart`: down, then up.
@@ -237,6 +342,15 @@ pub fn status(home: &Path, out: &mut dyn Write) -> i32 {
         None => {
             let _ = writeln!(out, "[ OK ] engine up on http://127.0.0.1:{}", status.port);
         }
+    }
+    match device(home) {
+        Some((label, None)) => {
+            let _ = writeln!(out, "       device: {label}");
+        }
+        Some((_, Some(advice))) => {
+            let _ = writeln!(out, "[WARN] device: CPU only - {advice}");
+        }
+        None => {}
     }
     let api = engine::api_port(home);
     let web = if crate::api::web_tools_on(home) { "web search on" } else { "web search off" };

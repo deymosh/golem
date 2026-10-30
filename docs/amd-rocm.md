@@ -17,7 +17,7 @@ GPU_BACKEND = "rocm"    # cuda | rocm | vulkan | metal; auto reads the card's ve
 
 | Where | What `rocm` selects |
 |---|---|
-| native (Linux, Windows) | the `linux_asset_rocm` / `windows_asset_rocm` release the adapter names — the official `llama-*-bin-ubuntu-rocm-*-x64.tar.gz` or `llama-*-bin-win-rocm-*-x64.zip`, installed by `golem up` or `golem install`. The HIP runtime ships inside the archive, so there is no ROCm equivalent of the separate `cudart` runtime the CUDA asset needs |
+| native (Linux, Windows) | the `linux_asset_rocm` / `windows_asset_rocm` release the adapter names — the official `llama-*-bin-ubuntu-rocm-*-x64.tar.gz` or `llama-*-bin-win-rocm-*-x64.zip`, installed by `golem up` or `golem install`. The Windows archive carries the HIP runtime (`amdhip64_7.dll`, `amd_comgr.dll`) but **not** the BLAS libraries `ggml-hip.dll` loads (`hipblas.dll`, `rocblas.dll` and its kernels): those come from the AMD ROCm/HIP SDK, below |
 | container | the `rocm` build arg: `docker build --build-arg GPU_BACKEND=rocm -t golem:rocm .`, run with `/dev/kfd` and `/dev/dri` passed through instead of `gpus: all` ([compose.yml](../compose.yml), `--profile rocm`) |
 
 ### Vulkan
@@ -33,16 +33,39 @@ non-CUDA path — install, start, bench, tune — is exercised on the NVIDIA ref
 
 - A [ROCm-supported](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/reference/system-requirements.html)
   AMD GPU (RDNA2/RDNA3 discrete cards and most recent ones are fine) with an up-to-date
-  driver. On Windows, the Adrenalin driver is enough for the official win-rocm build — no HIP
-  SDK install required, and no build tools at all, because golem installs a release.
+  driver. The release's ROCm build covers gfx1100, gfx1101 (RX 7800 XT), gfx1030 and the
+  other official targets.
+- **Windows, ROCm:** the AMD ROCm/HIP SDK whose version matches the archive's name
+  (`win-rocm-10.0` wants SDK 10.0), with its `bin` folder on PATH for `golem service` - the
+  engine inherits the service's environment, so set PATH before starting it. The Adrenalin
+  driver alone is not enough: without the SDK's `hipblas.dll` and `rocblas.dll` HIP never
+  initialises, and llama.cpp runs every layer on the CPU without an error. No build tools
+  are needed, because golem installs a release.
+- **Windows, Vulkan:** nothing beyond the driver. It is the low-friction path on Windows,
+  and the one to use when the SDK is not installed.
 - Container on **Linux**: nothing beyond the driver — the container maps `/dev/kfd` (compute)
   and `/dev/dri` (display) itself.
+
+### A build that found no GPU
+
+Before each start golem asks the installed engine `llama-server --list-devices`. The
+answer is kept for `golem status` (`device: ROCm0 AMD Radeon RX 7800 XT`) and the console's
+status strip. When it lists no device, `up` says so in plain words - for the Windows ROCm
+build, which of `hipblas.dll` and `rocblas.dll` it could not find beside the engine or on
+PATH - the console shows the model as served "on the CPU only", and `bench`, `eval` and
+`tune` refuse to run, so no CPU number is ever filed as the card's.
+
+### The 35B under Vulkan
+
+On b11379 the 35B aborts on load under Vulkan with `load-mode = mlock` (a failed
+`GGML_ASSERT` in the lock of its split host buffer); `load-mode = mmap+mlock` in its section
+loads it. [windows-native.md](windows-native.md#notes) has the details.
 
 ### WSL2 / Docker Desktop caveat
 
 ROCm inside WSL2 works only for a handful of card/driver combinations. On a Windows AMD host,
-run natively: the win-rocm binary talks to the driver directly, and that is what `golem up`
-installs by default there.
+run natively: the win-rocm binary talks to the driver directly (with the SDK above), and that
+is what `golem up` installs by default there.
 
 ## gfx targets
 

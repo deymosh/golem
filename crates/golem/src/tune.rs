@@ -507,6 +507,15 @@ fn sweep_with(home: &Path, opts: Options, mut out: Box<dyn Write>) -> Result<Ver
         let _ = writeln!(out, "[ .. ] stopping the engine so the card can be measured empty");
         service::request(home, "down", &Overrides::default(), &mut out)?;
     }
+    // An engine that would run on the CPU has nothing to tune: every point
+    // would measure the CPU. Asked with the card empty, so a model in VRAM
+    // cannot keep the backend from initialising.
+    if let Some(advice) = crate::launch::probe(home, &Overrides::default(), &mut out) {
+        if was_up {
+            let _ = service::request(home, "up", &Overrides::default(), &mut out);
+        }
+        return Err(format!("{advice} - nothing tuned"));
+    }
     // The put-back runs whatever the sweep did, a tuner that could not even
     // start (a missing model, an unreadable preset) included.
     let verdict = Tuner::new(home, opts, out).and_then(|mut tuner| tuner.sweep());

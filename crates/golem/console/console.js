@@ -147,11 +147,21 @@ function fillFilters() {
 fillFilters();
 fillSelect("f-class", CLASSES);
 fillSelect("f-class-chart", CLASSES);
-// The most common host by default: numbers only compare on the same box.
+// Numbers only compare on the same box, so one host is shown at a time:
+// this machine's, once the service names it (api/state), and until then -
+// or in a static report, which has no service - the host most rows come from.
 const hostCount = {};
 ROWS.forEach((r) => { hostCount[r.host] = (hostCount[r.host] || 0) + 1; });
-const topHost = Object.keys(hostCount).sort((a, b) => hostCount[b] - hostCount[a])[0];
+let topHost = Object.keys(hostCount).sort((a, b) => hostCount[b] - hostCount[a])[0];
 if (topHost) $("f-host").value = topHost;
+let THIS_HOST = "";
+function setThisHost(host) {
+  if (!host || host === THIS_HOST) return;
+  THIS_HOST = host;
+  const shown = $("f-host").value === topHost;
+  topHost = host;
+  if (shown && ROWS.some((r) => r.host === host)) { $("f-host").value = host; render(); }
+}
 
 function filtered() {
   const h = $("f-host").value, e = $("f-engine").value, m = $("f-model").value, q = $("f-quiet").checked, c = $("f-class").value;
@@ -536,12 +546,14 @@ function renderModels(models, state) {
 
 function renderState(s) {
   if (s.version) $("c-version").textContent = "v" + s.version;
+  setThisHost(s.host);
   const busy = s.job_running;
   jobRunning = !!busy;
   $("c-state").className = "state " + (busy ? "busy" : s.up ? "up" : "");
   const p = busy ? s.job_progress : null;
   $("c-state-text").innerHTML = busy ? `<b>${esc(s.job_action)}</b> running${p ? `, ${p.percent}%` : ""}`
-    : s.up ? `Serving <b>${esc(s.alias)}</b>${s.vram ? `<span class="extra">, ${(s.vram / 1024).toFixed(1)} GB VRAM</span>` : ""}`
+    : s.up && s.cpu_only ? `Serving <b>${esc(s.alias)}</b> <span class="cpu-only" title="${esc(s.cpu_only)}">on the CPU only - no GPU device</span>`
+    : s.up ? `Serving <b>${esc(s.alias)}</b>${s.vram ? `<span class="extra">, ${(s.vram / 1024).toFixed(1)} GB VRAM</span>` : ""}${s.device ? `<span class="extra"> on ${esc(s.device.replace(/^\S+\s+/, ""))}</span>` : ""}`
     : `Stopped, default <b>${esc(s.alias || "none")}</b>`;
   drawMark(busy ? "busy" : s.up ? "up" : "down");
   // Rebuilt only when the list or the setting changed: a choice not yet

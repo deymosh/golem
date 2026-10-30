@@ -468,9 +468,16 @@ impl App {
     }
 }
 
-/// The presets, the default first, each with its best measured decode.
+/// The presets, the default first, each with its best decode measured on
+/// this machine: another host's number is not this one's.
 fn model_rows(home: &Path) -> Vec<ModelRow> {
-    let rows = results::read(&paths::results(home)).map(|(rows, _)| rows).unwrap_or_default();
+    let host = crate::machine::this_host();
+    let rows: Vec<_> = results::read(&paths::results(home))
+        .map(|(rows, _)| rows)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.host == host)
+        .collect();
     let mut models = crate::models::list(home);
     // Stable: the default moves to the top, the rest keep the file's order.
     models.sort_by_key(|m| !m.default);

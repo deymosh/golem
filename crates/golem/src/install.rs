@@ -44,6 +44,11 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
                 plan.backend,
                 installed.dir.display()
             );
+            // Whether the build finds the card: an archive that installs
+            // cleanly can still lack the runtime its backend loads.
+            if let Some(advice) = launch::probe(home, &crate::config::Overrides::from_env(), &mut out) {
+                eprintln!("[WARN] {advice}");
+            }
             0
         }
         Err(message) => {

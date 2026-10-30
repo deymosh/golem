@@ -178,6 +178,12 @@ pub type SharedJob = Arc<Mutex<Job>>;
 pub struct Snapshot {
     pub up: bool,
     pub vram_mib: Option<u64>,
+    /// The device the engine computes on, from its last start's probe
+    /// (`CUDA0 NVIDIA GeForce RTX 3060`, `CPU only`), and the advice when it
+    /// is the CPU.
+    pub device: Option<(String, Option<String>)>,
+    /// This machine's slug (`machine::this_host`).
+    pub host: String,
     pub alias: String,
     pub engine: String,
     pub presets: Vec<String>,
@@ -240,6 +246,8 @@ pub fn snapshot(home: &Path, job: &SharedJob) -> Snapshot {
     Snapshot {
         up: status.up,
         vram_mib: if status.up { machine::vram_used_mib() } else { None },
+        device: crate::launch::device(home),
+        host: machine::this_host(),
         alias: config::get(home, "MODEL_ALIAS").unwrap_or_default(),
         engine: config::get(home, "ENGINE").unwrap_or_else(|| paths::DEFAULT_ENGINE.to_string()),
         presets: presets(home),

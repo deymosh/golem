@@ -87,6 +87,11 @@ fn run(
         return record_capture(home, kind, &captured);
     }
 
+    if let Some((_, Some(advice))) = crate::launch::device(home) {
+        eprintln!("[FAIL] {advice}");
+        eprintln!("       nothing measured: a run on the CPU would be filed as this setup's numbers");
+        return 1;
+    }
     let mut tee = Tee::default();
     let status = harness(home, args, &mut tee);
     // A run that failed is not a measurement, however much it printed.
@@ -217,6 +222,11 @@ pub fn record_with(
 ) -> Result<golem_core::record::Facts, String> {
     if !captured.lines().any(|line| line.starts_with("RESULT")) {
         return Err("no RESULT line in the captured output - nothing recorded".to_string());
+    }
+    // An engine that fell back to the CPU measures the CPU: its numbers are
+    // not this setup's, and a row would file them as if they were.
+    if let Some((_, Some(advice))) = crate::launch::device(home) {
+        return Err(format!("{advice} - nothing recorded"));
     }
     let facts = facts::collect(home, kind, engine, model, preset_rel, note);
     let line = record::row(&facts, captured)?;

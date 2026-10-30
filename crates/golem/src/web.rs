@@ -314,7 +314,8 @@ async fn api_state(State(app): State<Arc<App>>) -> Response {
         format!(
             "{{\"up\": {}, \"vram\": {}, \"alias\": {}, \"engine\": {}, \"presets\": [{}], \
              \"engines\": [{}], \"job_running\": {}, \"job_action\": {}, \"job_tail\": {}, \
-             \"job_progress\": {}, \"update\": {}, \"web\": {}, \"version\": {}}}",
+             \"job_progress\": {}, \"update\": {}, \"web\": {}, \"version\": {}, \
+             \"device\": {}, \"cpu_only\": {}, \"host\": {}}}",
             snapshot.up,
             vram,
             json::quote(&snapshot.alias),
@@ -332,6 +333,14 @@ async fn api_state(State(app): State<Arc<App>>) -> Response {
             // The version of the service answering, which is the one the
             // page names beside the brand.
             json::quote(env!("CARGO_PKG_VERSION")),
+            snapshot.device.as_ref().map_or_else(|| "null".to_string(), |(label, _)| json::quote(label)),
+            snapshot
+                .device
+                .as_ref()
+                .and_then(|(_, advice)| advice.as_ref())
+                .map_or_else(|| "null".to_string(), |advice| json::quote(advice)),
+            // This machine's slug: the host the page shows first.
+            json::quote(&snapshot.host),
         ),
     )
 }

@@ -173,6 +173,13 @@ pub fn load_failure(home: &Path) -> PathBuf {
     home.join(".local").join("load-failure.txt")
 }
 
+/// The devices the engine found at its last start (`--list-devices`, as
+/// `golem_core::devices::to_text` writes it). Absent for an engine that has
+/// no such probe.
+pub fn devices(home: &Path) -> PathBuf {
+    home.join(".local").join("devices.txt")
+}
+
 /// What the update check last found, under the home: `data/cache/update.txt`
 /// (`data/cache` is created on first run, so the file's directory is there).
 pub fn update_state(home: &Path) -> PathBuf {

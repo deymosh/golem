@@ -260,6 +260,14 @@ adapter and the preset, and spawns nothing - `golem up --dry-run` prints it.
   which reads zip) - the `tar` on PATH under Git for Windows is GNU tar and cannot.
   Releases only, on purpose: the pin is the artifact the 200K gate adopted, and a source
   build of today's upstream is a different binary.
+- **The device probe.** An engine whose GPU backend cannot initialise still starts, and
+  runs every layer on the CPU; its log at the router's verbosity does not say so. Before
+  each start (and before a tune's first load), with the card empty, `up` runs the server's
+  `--list-devices` when the adapter says `list_devices = true` and keeps the answer in
+  `.local/devices.txt` (`golem_core::devices`). `status` and the console show the device;
+  with none, `up` gives the fix for the backend (for the Windows ROCm build, the HIP SDK's
+  missing libraries) and `bench`, `eval` and `tune` refuse to run or record. The Settings
+  tab offers only the backends the card's vendor runs and this platform has an archive of.
 - **Router mode, always.** The models are a preset file (`MODELS_PRESET`, else the shipped
   `config/models.ini`), and an adapter with `router = true` starts the server with
   `--models-preset <file> --models-max 1`: the preset carries every per-model flag, and

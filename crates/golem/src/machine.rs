@@ -308,6 +308,19 @@ pub fn host_slug(gpu: &str, vram_total_mib: u64, ram_total_gb: u64, cpu: &str) -
     )
 }
 
+/// This machine's slug, as [`host_slug`] files its rows - read once per
+/// process, so the console and the screen can pick this machine's rows out
+/// of a results file other hosts wrote into too.
+pub fn this_host() -> String {
+    static HOST: OnceLock<String> = OnceLock::new();
+    HOST.get_or_init(|| {
+        let card = gpu();
+        let name = card.as_ref().map_or_else(|| "unknown".to_string(), |g| g.name.clone());
+        host_slug(&name, card.as_ref().map_or(0, |g| g.total_mib), ram_total_gb(), &cpu_name().unwrap_or_default())
+    })
+    .clone()
+}
+
 /// The machine's offset from UTC, in minutes east, read once per process:
 /// Windows asks .NET's own zone table, elsewhere `date +%z` says it. A probe
 /// that fails answers 0, and the stamps are UTC - an hour or so out, never
