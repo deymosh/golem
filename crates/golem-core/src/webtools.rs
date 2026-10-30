@@ -1263,6 +1263,28 @@ impl SseReader {
         }
         None
     }
+
+    /// An error answer golem makes itself, in the shape the API's clients
+    /// read: Anthropic's `{"type":"error","error":{type,message}}`, OpenAI's
+    /// `{"error":{message,type,code}}` for both of its APIs. `kind` is
+    /// Anthropic's error type (`overloaded_error`, `api_error`).
+    pub fn error_body(self, kind: &str, message: &str) -> String {
+        match self {
+            ChatApi::Anthropic => Value::object(vec![
+                ("type", Value::str("error")),
+                ("error", Value::object(vec![("type", Value::str(kind)), ("message", Value::str(message))])),
+            ]),
+            ChatApi::OpenAi | ChatApi::Responses => Value::object(vec![(
+                "error",
+                Value::object(vec![
+                    ("message", Value::str(message)),
+                    ("type", Value::str("server_error")),
+                    ("code", Value::str(kind.trim_end_matches("_error"))),
+                ]),
+            )]),
+        }
+        .to_json()
+    }
 }
 
 /// What a round's end asks of the front.

@@ -398,7 +398,14 @@ fn serve(front: &Front, mut client: TcpStream) -> std::io::Result<()> {
     let served = match (api, parsed) {
         (Some(api), Some(body)) => {
             request.target = api.engine_target(&request.target);
-            intercept(front, api, &request, body, &mut client)
+            let model = body.get("model").and_then(Value::as_str).unwrap_or("").to_string();
+            match downloading(&front.home, &model) {
+                Some(message) => {
+                    log_api(&front.home, &format!("{model}: not downloaded, answered 503"));
+                    respond(&mut client, 503, "Service Unavailable", "application/json", &api.error_body("overloaded_error", &message))
+                }
+                None => intercept(front, api, &request, body, &mut client),
+            }
         }
         _ => pass(front, &request, &request.body, &mut client),
     };
@@ -871,6 +878,53 @@ fn run_call(front: &Front, call: &ToolCall, server: Option<&tools::ServerSearch>
     };
     log_call(&front.home, &outcome.label);
     outcome
+}
+
+/// The downloads a request started, with the answer each one gives the
+/// requests that come while it runs.
+static DOWNLOADS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// Whether `model` names a preset whose files are not all here; then the
+/// answer for the client, and a `golem pull` started in the background if
+/// none is running for it.
+///
+/// Without this the router would try to load the model, fail on the missing
+/// file, and the request would fail with the engine's own words; golem knows
+/// where the file comes from, so it fetches it and says how long to wait. A
+/// request is never held for the download: the files are gigabytes.
+fn downloading(home: &Path, model: &str) -> Option<String> {
+    if model.is_empty() {
+        return None;
+    }
+    if let Some((_, message)) = DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(m, _)| m == model) {
+        return Some(message.clone());
+    }
+    // A local check first: this runs on every chat request.
+    if crate::pull::preset_jobs(home, model).map_or(true, |jobs| jobs.is_empty()) {
+        return None;
+    }
+    let (jobs, bytes) = crate::pull::missing(home, model)?;
+    let files: Vec<&str> = jobs.iter().map(|(_, file)| golem_core::hub::stored_name(file)).collect();
+    let size = bytes.map_or(String::new(), |b| format!(", {:.1} GB", b as f64 / 1e9));
+    let log = format!("logs/pull-{}.log", model.replace(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != '-', "_"));
+    let message = format!(
+        "golem is downloading {model} ({}{size}) - retry when it finishes; progress in {log}",
+        files.join(", ")
+    );
+    let mut downloads = DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, message)) = downloads.iter().find(|(m, _)| m == model) {
+        return Some(message.clone());
+    }
+    downloads.push((model.to_string(), message.clone()));
+    drop(downloads);
+    let (home, model) = (home.to_path_buf(), model.to_string());
+    std::thread::spawn(move || {
+        let ran = crate::proc::golem(&home, &["pull".to_string(), model.clone()])
+            .and_then(|command| crate::proc::run_to_file(command, &home.join(&log)));
+        log_api(&home, &format!("{model}: background pull ended ({ran:?})"));
+        DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(m, _)| m != &model);
+    });
+    Some(message)
 }
 
 /// One line in `logs/api.log`: a chat request the engine refused or that

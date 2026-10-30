@@ -337,11 +337,25 @@ pub fn fetch_all(home: &Path, jobs: &[(String, String)], out: &mut dyn Write) ->
     Ok(())
 }
 
+/// What the served preset's section `name` still lacks, and the bytes Hugging
+/// Face says it adds up to (`None` when it does not say for every file).
+/// `None` for a name that is not a section with `; Download:` lines, or one
+/// with every file here.
+pub fn missing(home: &Path, name: &str) -> Option<(Vec<(String, String)>, Option<u64>)> {
+    let jobs = preset_jobs(home, name).ok().filter(|jobs| !jobs.is_empty())?;
+    let token = config::get(home, "HF_TOKEN");
+    let sizes: Option<Vec<u64>> = jobs
+        .iter()
+        .map(|(repo, file)| linked_size(&format!("https://huggingface.co/{repo}/resolve/main/{file}"), token.as_deref()))
+        .collect();
+    Some((jobs, sizes.map(|s| s.iter().sum())))
+}
+
 /// The `(repo, file)` pairs for one preset section that `data/models` lacks.
 ///
 /// The preset file is the served one ([`config::models_preset`]), and a
 /// section with no `; Download:` comment at all is an error that names it.
-fn preset_jobs(home: &Path, name: &str) -> Result<Vec<(String, String)>, String> {
+pub fn preset_jobs(home: &Path, name: &str) -> Result<Vec<(String, String)>, String> {
     let preset = config::models_preset(home, &config::Overrides::default());
     let text = std::fs::read_to_string(home.join(&preset))
         .map_err(|e| format!("cannot read {preset}: {e}"))?;
@@ -491,7 +505,8 @@ fn floor_of(expected: Option<u64>) -> u64 {
 /// the redirects reports one, the last wins.
 fn linked_size(url: &str, token: Option<&str>) -> Option<u64> {
     let mut command = Command::new("curl");
-    command.arg("-sIL");
+    // A deadline: the API front asks this while a client waits for its 503.
+    command.args(["-sIL", "--max-time", "10"]);
     if let Some(token) = token {
         command.arg("-H").arg(format!("Authorization: Bearer {token}"));
     }
