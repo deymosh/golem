@@ -753,8 +753,13 @@ async function loadSettings() {
 function settingRow(s) {
   const id = "set-" + s.key;
   const placeholder = s.default ? `default ${s.default}` : "unset";
+  // The service lists only the choices this machine can use; a value the
+  // file already holds outside them is shown as what it is, and cannot be
+  // picked again.
+  const stale = s.shape === "choice" && s.value && !s.choices.includes(s.value)
+    ? `<option selected disabled>${esc(s.value)} - not on this machine</option>` : "";
   const field = s.shape === "choice"
-    ? `<select id="${id}" name="value">${s.choices.map((c) => `<option${c === (s.value || s.default) ? " selected" : ""}>${esc(c)}</option>`).join("")}</select>`
+    ? `<select id="${id}" name="value">${stale}${s.choices.map((c) => `<option${!stale && c === (s.value || s.default) ? " selected" : ""}>${esc(c)}</option>`).join("")}</select>`
     : s.shape === "secret"
       ? `<input type="password" id="${id}" name="value" autocomplete="off" placeholder="${s.set ? "set - type to replace" : "not set"}">`
       : `<input type="${s.shape === "whole" || s.shape === "decimal" || s.shape === "port" ? "number" : "text"}" id="${id}" name="value"

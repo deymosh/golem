@@ -177,6 +177,76 @@ pub fn find(key: &str) -> Option<&'static Setting> {
     SETTINGS.iter().find(|s| s.key == key)
 }
 
+/// What this machine allows beyond a value's shape: the GPU backends its
+/// card can run that the engine ships for its platform, and its logical
+/// cores.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Machine {
+    /// Empty when unknown: then every backend the shape allows is offered.
+    pub backends: Vec<String>,
+    /// 0 when unknown.
+    pub cores: u32,
+}
+
+/// The ports as they would be with `key` set to `value`: the API's, the
+/// engine's (the one after the API's when unset) and the console's.
+fn ports_with(key: &str, value: &str, current: &dyn Fn(&str) -> Option<String>) -> (u32, u32, u32) {
+    let get = |k: &str| -> Option<u32> {
+        let v = if k == key { Some(value.to_string()) } else { current(k) };
+        v.filter(|v| !v.is_empty()).and_then(|v| v.parse().ok())
+    };
+    let api = get("LOCAL_AI_PORT").unwrap_or(8000);
+    (api, get("ENGINE_PORT").unwrap_or(api + 1), get("CONSOLE_PORT").unwrap_or(8787))
+}
+
+/// [`check`], and then what the shape cannot see: a backend this machine's
+/// card cannot run, more threads than it has cores, two services on one
+/// port, an engine build that is not a build, or the API opened to the
+/// network with the default key. `current` answers for the file as it is.
+pub fn check_on(key: &str, value: &str, machine: &Machine, current: impl Fn(&str) -> Option<String>) -> Result<String, String> {
+    let value = check(key, value)?;
+    match key {
+        "GPU_BACKEND" if value != "auto" && !machine.backends.is_empty() && !machine.backends.contains(&value) => {
+            Err(format!("this machine's card cannot run {value}; it can run: auto, {}", machine.backends.join(", ")))
+        }
+        "CPU_THREADS" if machine.cores > 0 && value.parse::<u32>().is_ok_and(|n| n > machine.cores) => {
+            Err(format!("at most {} - the CPU's logical cores", machine.cores))
+        }
+        "LOCAL_AI_PORT" | "ENGINE_PORT" | "CONSOLE_PORT" => {
+            let (api, engine, console) = ports_with(key, &value, &current);
+            if api == engine || api == console || engine == console {
+                Err(format!(
+                    "the API ({api}), the engine ({engine}) and the console ({console}) each need their own port"
+                ))
+            } else {
+                Ok(value)
+            }
+        }
+        "ENGINE_BUILD"
+            if !(value.is_empty()
+                || value == "latest"
+                || value.strip_prefix('b').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))) =>
+        {
+            Err("a llama.cpp build tag (b1234), latest, or empty for the gated one".into())
+        }
+        "LOCAL_AI_HOST" if value != "127.0.0.1" && value != "localhost" && value != "::1" => {
+            match current("LOCAL_AI_API_KEY").filter(|k| !k.is_empty()).as_deref() {
+                None | Some("local-ai-key") => Err("set your own API key first: the default one is public".into()),
+                _ => Ok(value),
+            }
+        }
+        "LOCAL_AI_API_KEY" if value == "local-ai-key" || value.is_empty() => {
+            let host = current("LOCAL_AI_HOST").unwrap_or_default();
+            if !host.is_empty() && host != "127.0.0.1" && host != "localhost" && host != "::1" {
+                Err("the API is open to the network: it needs a key of your own".into())
+            } else {
+                Ok(value)
+            }
+        }
+        _ => Ok(value),
+    }
+}
+
 /// The value to write for `key`, or why it cannot be. Empty is always
 /// allowed and puts the default back - or leaves the key empty where unset
 /// has a meaning of its own (the help says which).
@@ -237,18 +307,36 @@ pub fn check(key: &str, value: &str) -> Result<String, String> {
 
 /// The settings as the page reads them: each key's description and its
 /// current value, `value_of` answering for the file. A secret's value is
-/// never sent; the page learns only whether one is set.
-pub fn to_json(value_of: impl Fn(&str) -> Option<String>) -> String {
+/// never sent; the page learns only whether one is set. A choice lists only
+/// what `machine` can use, so the page cannot offer a backend the card does
+/// not run, and a whole number's maximum is the machine's where it has one.
+pub fn to_json(value_of: impl Fn(&str) -> Option<String>, machine: &Machine) -> String {
     let items: Vec<String> = SETTINGS
         .iter()
         .map(|s| {
             let current = value_of(s.key).unwrap_or_default();
             let (shape, extra) = match s.shape {
-                Shape::Whole { min, max } => ("whole", format!(", \"min\": {min}, \"max\": {max}")),
+                Shape::Whole { min, max } => {
+                    let max = if s.key == "CPU_THREADS" && machine.cores > 0 { machine.cores as u64 } else { max };
+                    ("whole", format!(", \"min\": {min}, \"max\": {max}"))
+                }
                 Shape::Decimal { min, max } => ("decimal", format!(", \"min\": {min}, \"max\": {max}")),
                 Shape::Choice(words) => (
                     "choice",
-                    format!(", \"choices\": [{}]", words.iter().map(|w| json::quote(w)).collect::<Vec<_>>().join(", ")),
+                    format!(
+                        ", \"choices\": [{}]",
+                        words
+                            .iter()
+                            .filter(|w| {
+                                s.key != "GPU_BACKEND"
+                                    || **w == "auto"
+                                    || machine.backends.is_empty()
+                                    || machine.backends.iter().any(|b| b.as_str() == **w)
+                            })
+                            .map(|w| json::quote(w))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
                 ),
                 Shape::Port => ("port", String::new()),
                 Shape::Host => ("host", String::new()),
@@ -314,12 +402,66 @@ mod tests {
     }
 
     #[test]
+    fn what_the_machine_cannot_use_is_refused_and_not_offered() {
+        let nvidia = Machine { backends: vec!["cuda".into(), "vulkan".into()], cores: 16 };
+        let none = |_: &str| None;
+        assert_eq!(check_on("GPU_BACKEND", "cuda", &nvidia, none), Ok("cuda".into()));
+        assert_eq!(check_on("GPU_BACKEND", "auto", &nvidia, none), Ok("auto".into()));
+        let err = check_on("GPU_BACKEND", "rocm", &nvidia, none).expect_err("an NVIDIA card runs no ROCm");
+        assert!(err.contains("cuda, vulkan"), "{err}");
+        assert!(check_on("GPU_BACKEND", "metal", &nvidia, none).is_err());
+        assert!(check_on("CPU_THREADS", "32", &nvidia, none).is_err());
+        assert_eq!(check_on("CPU_THREADS", "16", &nvidia, none), Ok("16".into()));
+        // An unknown machine keeps what the shape allows.
+        assert_eq!(check_on("GPU_BACKEND", "rocm", &Machine::default(), none), Ok("rocm".into()));
+
+        let page = to_json(none, &nvidia);
+        let doc = json::parse(&page).expect("json");
+        let Some(json::Value::Array(items)) = Some(doc) else { panic!() };
+        let backend = items.iter().find(|i| i.get("key").and_then(json::Value::as_str) == Some("GPU_BACKEND")).expect("listed");
+        let choices: Vec<&str> = match backend.get("choices") {
+            Some(json::Value::Array(c)) => c.iter().filter_map(json::Value::as_str).collect(),
+            _ => panic!("choices"),
+        };
+        assert_eq!(choices, vec!["auto", "cuda", "vulkan"]);
+        assert!(page.contains("\"max\": 16"), "threads capped at the cores: {page}");
+    }
+
+    #[test]
+    fn settings_that_would_break_the_service_are_refused() {
+        let file = |key: &str| match key {
+            "LOCAL_AI_PORT" => Some("8000".to_string()),
+            "LOCAL_AI_HOST" => Some("0.0.0.0".to_string()),
+            "LOCAL_AI_API_KEY" => Some("my-own".to_string()),
+            _ => None,
+        };
+        let m = Machine::default();
+        // The engine's port is the API's plus one when unset.
+        assert!(check_on("CONSOLE_PORT", "8001", &m, file).is_err());
+        assert!(check_on("CONSOLE_PORT", "8000", &m, file).is_err());
+        assert_eq!(check_on("CONSOLE_PORT", "8788", &m, file), Ok("8788".into()));
+        // 8786 puts the engine on the console's 8787.
+        assert!(check_on("LOCAL_AI_PORT", "8786", &m, file).is_err());
+        assert!(check_on("LOCAL_AI_PORT", "8787", &m, file).is_err());
+        assert!(check_on("LOCAL_AI_PORT", "9000", &m, file).is_ok());
+        assert!(check_on("ENGINE_BUILD", "b11379", &m, file).is_ok());
+        assert!(check_on("ENGINE_BUILD", "latest", &m, file).is_ok());
+        assert!(check_on("ENGINE_BUILD", "", &m, file).is_ok());
+        assert!(check_on("ENGINE_BUILD", "master", &m, file).is_err());
+        // The API on the network needs a key of its own, both ways round.
+        assert!(check_on("LOCAL_AI_API_KEY", "local-ai-key", &m, file).is_err());
+        let local = |key: &str| (key == "LOCAL_AI_API_KEY").then(|| "local-ai-key".to_string());
+        assert!(check_on("LOCAL_AI_HOST", "0.0.0.0", &m, local).is_err());
+        assert!(check_on("LOCAL_AI_HOST", "127.0.0.1", &m, local).is_ok());
+    }
+
+    #[test]
     fn a_secret_is_never_sent_back() {
         let page = to_json(|key| match key {
             "HF_TOKEN" => Some("hf_secret".into()),
             "LOCAL_AI_PORT" => Some("8000".into()),
             _ => None,
-        });
+        }, &Machine::default());
         assert!(!page.contains("hf_secret"), "{page}");
         assert!(page.contains("\"key\": \"HF_TOKEN\""));
         assert!(page.contains("\"set\": true"));

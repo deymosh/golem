@@ -436,7 +436,11 @@ async fn api_delpreset(State(app): State<Arc<App>>, body: Bytes) -> Response {
 /// (`golem_core::settings`) with their values in golem.toml.
 async fn api_settings(State(app): State<Arc<App>>) -> Response {
     let home = app.cfg.home.clone();
-    match tokio::task::spawn_blocking(move || golem_core::settings::to_json(|key| crate::config::get(&home, key))).await {
+    let settings = move || {
+        let machine = crate::launch::settings_machine(&home);
+        golem_core::settings::to_json(|key| crate::config::get(&home, key), &machine)
+    };
+    match tokio::task::spawn_blocking(settings).await {
         Ok(body) => json(StatusCode::OK, body),
         Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "settings unavailable"),
     }
@@ -449,12 +453,22 @@ async fn api_settings(State(app): State<Arc<App>>) -> Response {
 async fn api_set(State(app): State<Arc<App>>, body: Bytes) -> Response {
     let form = parse_form(&body);
     let key = form.get("key").cloned().unwrap_or_default();
-    let value = match golem_core::settings::check(&key, form.get("value").map(String::as_str).unwrap_or("")) {
-        Ok(value) => value,
-        Err(why) => return plain(StatusCode::BAD_REQUEST, why),
+    let raw = form.get("value").cloned().unwrap_or_default();
+    let home = app.cfg.home.clone();
+    let checked = {
+        let (home, key) = (home.clone(), key.clone());
+        tokio::task::spawn_blocking(move || {
+            let machine = crate::launch::settings_machine(&home);
+            golem_core::settings::check_on(&key, &raw, &machine, |k| crate::config::get(&home, k))
+        })
+        .await
+    };
+    let value = match checked {
+        Ok(Ok(value)) => value,
+        Ok(Err(why)) => return plain(StatusCode::BAD_REQUEST, why),
+        Err(_) => return plain(StatusCode::INTERNAL_SERVER_ERROR, "the setting did not run"),
     };
     let applies = golem_core::settings::find(&key).map_or("now", |s| s.applies.word());
-    let home = app.cfg.home.clone();
     match tokio::task::spawn_blocking(move || crate::config::set(&home, &key, &value)).await {
         Ok(Ok(())) => json(
             StatusCode::OK,

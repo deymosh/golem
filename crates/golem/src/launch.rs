@@ -978,6 +978,26 @@ fn resolve_backend(home: &Path, fallback: &str) -> String {
     }
 }
 
+/// What the Settings tab may offer on this machine: the backends the engine
+/// ships an archive of for this platform that the card's vendor can run, and
+/// the CPU's logical cores. The card is read once per process.
+pub fn settings_machine(home: &Path) -> golem_core::settings::Machine {
+    static VENDOR: std::sync::OnceLock<Option<gpu::Vendor>> = std::sync::OnceLock::new();
+    let vendor = *VENDOR.get_or_init(|| machine::gpu().map(|card| card.vendor));
+    let engine = config::get(home, "ENGINE").unwrap_or_else(|| "llama.cpp".to_string());
+    let adapter = paths::adapter(home, &engine).map(|text| ini::parse(&text)).ok();
+    let offered: Vec<&str> = ["cuda", "rocm", "vulkan", "metal"]
+        .into_iter()
+        .filter(|b| {
+            adapter
+                .as_ref()
+                .and_then(|a| a.global(&format!("{}_asset_{b}", release::platform())))
+                .is_some_and(|v| !v.is_empty())
+        })
+        .collect();
+    golem_core::settings::Machine { backends: gpu::backends_for(vendor, &offered), cores: machine::logical_cores() }
+}
+
 /// The server executable's name on this platform.
 ///
 /// The adapter names the binary and the platform supplies the extension: a

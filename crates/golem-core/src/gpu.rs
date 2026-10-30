@@ -44,6 +44,22 @@ pub fn backend(vendor: Vendor) -> &'static str {
     }
 }
 
+/// The backends a card of `vendor` can run, among `offered` (the ones the
+/// engine ships an archive of for this platform), in the order offered.
+/// Vulkan runs on every vendor but Apple; CUDA only on NVIDIA, ROCm only on
+/// AMD, Metal only on Apple. An unknown card (`None`) keeps every offered
+/// backend: nothing says which would fail.
+pub fn backends_for(vendor: Option<Vendor>, offered: &[&str]) -> Vec<String> {
+    let runs = |backend: &str| match vendor {
+        None => true,
+        Some(Vendor::Nvidia) => matches!(backend, "cuda" | "vulkan"),
+        Some(Vendor::Amd) => matches!(backend, "rocm" | "vulkan"),
+        Some(Vendor::Intel) => backend == "vulkan",
+        Some(Vendor::Apple) => backend == "metal",
+    };
+    offered.iter().filter(|b| runs(b)).map(|b| b.to_string()).collect()
+}
+
 // ---------------------------------------------------------------
 // Apple silicon
 // ---------------------------------------------------------------
@@ -219,6 +235,18 @@ mod tests {
         assert_eq!(backend(Vendor::Amd), "rocm");
         assert_eq!(backend(Vendor::Intel), "vulkan");
         assert_eq!(backend(Vendor::Apple), "metal");
+    }
+
+    #[test]
+    fn a_card_is_offered_only_the_backends_it_runs() {
+        let windows = ["cuda", "rocm", "vulkan"];
+        assert_eq!(backends_for(Some(Vendor::Nvidia), &windows), vec!["cuda", "vulkan"]);
+        assert_eq!(backends_for(Some(Vendor::Amd), &windows), vec!["rocm", "vulkan"]);
+        assert_eq!(backends_for(Some(Vendor::Intel), &windows), vec!["vulkan"]);
+        assert_eq!(backends_for(Some(Vendor::Apple), &["metal"]), vec!["metal"]);
+        // Metal is not shipped for Windows, so an NVIDIA box never sees it.
+        assert!(!backends_for(Some(Vendor::Nvidia), &windows).contains(&"metal".to_string()));
+        assert_eq!(backends_for(None, &windows), vec!["cuda", "rocm", "vulkan"]);
     }
 
     #[test]
