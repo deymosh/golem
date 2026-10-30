@@ -13,8 +13,8 @@ fn fixture(name: &str) -> String {
 
 /// The page as the model reads its first part.
 fn page(name: &str) -> (webtools::Page, String) {
-    let page = webtools::page_from_html(&fixture(name));
-    let text = webtools::fetch_text("https://example.test/", &page, 1);
+    let page = webtools::page_from_html(&fixture(name), webtools::PART_CHARS);
+    let text = webtools::fetch_text("https://example.test/", &page, 1, false);
     (page, text)
 }
 

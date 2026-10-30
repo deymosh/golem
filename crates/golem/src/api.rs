@@ -49,12 +49,21 @@ const BODY_MAX: usize = 64 * 1024 * 1024;
 /// How long the engine may take to accept a connection on the loopback.
 const ENGINE_CONNECT: Duration = Duration::from_millis(500);
 
-/// How long a search may take.
-const SEARCH_SECS: &str = "15";
+/// Whether an Anthropic client sees golem's searches and page reads as
+/// Anthropic's own server tools (`server_tool_use` with
+/// `web_search_tool_result` or `web_fetch_tool_result`) when it did not ask
+/// for them - what Claude Code draws as a search and a fetch - rather than
+/// as a text label alone. The label follows the blocks either way.
+const ANTHROPIC_NATIVE: bool = true;
 
-/// How long one fetch hop may take, and the largest page fetched.
-const FETCH_SECS: &str = "20";
+/// The largest page fetched.
 const FETCH_MAX_BYTES: &str = "5000000";
+
+/// How many searches are kept for `WEB_CACHE_MINUTES`.
+const SEARCH_CACHE: usize = 64;
+
+/// How long a search waits before its one retry.
+const SEARCH_RETRY_WAIT: Duration = Duration::from_millis(1500);
 
 /// How many redirects a fetch follows.
 const FETCH_HOPS: usize = 5;
@@ -81,6 +90,42 @@ struct Front {
     /// Pages fetched for this service's requests, newest last, so `page=2`
     /// reads the same document as `page=1`.
     pages: Mutex<VecDeque<(String, tools::Page)>>,
+    /// Searches answered lately, newest last, with when.
+    searches: Mutex<VecDeque<(String, std::time::Instant, Vec<html::SearchResult>)>>,
+}
+
+/// The web tools' limits as `golem.toml` sets them now.
+fn limits(home: &Path) -> tools::Limits {
+    tools::Limits::from_config(|key| crate::config::get(home, key))
+}
+
+/// How a search or a fetch went, for `logs/web.log`.
+#[derive(Debug, Default)]
+struct Detail {
+    millis: u128,
+    status: u16,
+    bytes: usize,
+    cached: bool,
+    tries: u32,
+}
+
+impl Detail {
+    fn words(&self) -> String {
+        if self.cached {
+            return "cached".to_string();
+        }
+        let mut out = format!("{} ms", self.millis);
+        if self.status > 0 {
+            out.push_str(&format!(", HTTP {}", self.status));
+        }
+        if self.bytes > 0 {
+            out.push_str(&format!(", {} KB", (self.bytes + 1023) / 1024));
+        }
+        if self.tries > 1 {
+            out.push_str(&format!(", {} tries", self.tries));
+        }
+        out
+    }
 }
 
 /// Start answering the API port, for as long as this process runs. The
@@ -89,7 +134,11 @@ pub fn start(home: &Path, overrides: &Overrides) -> Result<String, String> {
     let host = overrides.get(home, "LOCAL_AI_HOST").unwrap_or_else(|| "127.0.0.1".to_string());
     let address = format!("{host}:{}", engine::api_port(home));
     let listener = TcpListener::bind(&address).map_err(|e| format!("cannot bind {address}: {e}"))?;
-    let front = Arc::new(Front { home: home.to_path_buf(), pages: Mutex::new(VecDeque::new()) });
+    let front = Arc::new(Front {
+        home: home.to_path_buf(),
+        pages: Mutex::new(VecDeque::new()),
+        searches: Mutex::new(VecDeque::new()),
+    });
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
@@ -474,11 +523,16 @@ fn relay_answer(answer: &mut Answer, client: &mut TcpStream) -> std::io::Result<
 fn intercept(front: &Front, api: ChatApi, request: &Request, body: Value, client: &mut TcpStream) -> std::io::Result<()> {
     let measuring = request.header(tools::MEASURE_HEADER).is_some_and(|v| v.trim().eq_ignore_ascii_case("off"));
     let on = web_tools_on(&front.home) && !measuring;
-    let prepared = match api {
+    let mut prepared = match api {
         ChatApi::Anthropic => tools::prepare_anthropic(body, on),
         ChatApi::OpenAi => tools::prepare_openai(body, on),
         ChatApi::Responses => tools::prepare_responses(body, on),
     };
+    // Anthropic's server tool may name its own budget; otherwise it is
+    // `WEB_MAX_CALLS`.
+    if prepared.server_search.as_ref().and_then(|s| s.max_uses).is_none() {
+        prepared.max_calls = limits(&front.home).calls;
+    }
     // A Responses stream always goes through the relay, which writes the
     // fields the engine's stream leaves out and clients read.
     if !prepared.tools_added && !(api == ChatApi::Responses && prepared.stream) {
@@ -565,7 +619,7 @@ fn anthropic_stream(front: &Front, request: &Request, prepared: tools::Prepared,
             RoundEnd::Done => return send(client, &relay.finish(server)),
             RoundEnd::Calls(calls) => {
                 let ran = run_calls(front, &calls, relay.calls_made(), prepared.max_calls, prepared.server_search.as_ref());
-                let (events, assistant) = relay.results(&ran, server);
+                let (events, assistant) = relay.results(&ran, server || ANTHROPIC_NATIVE);
                 send(client, &events)?;
                 tools::anthropic_continue(&mut body, assistant, &answers(&ran));
             }
@@ -755,8 +809,18 @@ fn whole(front: &Front, api: ChatApi, request: &Request, prepared: tools::Prepar
             ChatApi::Responses => {
                 let output = value.get("output").and_then(Value::as_array).cloned().unwrap_or_default();
                 shown_items.extend(tools::responses_shown(&output));
-                let labels: Vec<&str> = ran.iter().map(|(_, outcome)| outcome.label.as_str()).collect();
-                shown_items.push(tools::responses_message(&format!("msg_golem_{calls_made}"), &labels.join("\n\n")));
+                // Each search and page read as the API's own item; the rest
+                // as golem's label message.
+                let mut labels: Vec<&str> = Vec::new();
+                for (call, outcome) in &ran {
+                    match tools::responses_web_call(&call.id, outcome) {
+                        Some(item) => shown_items.push(item),
+                        None => labels.push(outcome.label.as_str()),
+                    }
+                }
+                if !labels.is_empty() {
+                    shown_items.push(tools::responses_message(&format!("msg_golem_{calls_made}"), &labels.join("\n\n")));
+                }
                 tools::responses_continue(&mut body, &output, &answers(&ran));
             }
             ChatApi::Anthropic => {
@@ -767,7 +831,7 @@ fn whole(front: &Front, api: ChatApi, request: &Request, prepared: tools::Prepar
                 }).cloned());
                 for (call, outcome) in &ran {
                     searches += u64::from(outcome.results.is_some());
-                    shown_blocks.extend(tools::anthropic_result_blocks(&call.id, outcome, server));
+                    shown_blocks.extend(tools::anthropic_result_blocks(&call.id, outcome, server || ANTHROPIC_NATIVE));
                 }
                 tools::anthropic_continue(&mut body, content, &answers(&ran));
             }
@@ -819,6 +883,7 @@ fn run_calls(
                     label: "🔎 Golem web tools: this answer's limit is reached".to_string(),
                     results: None,
                     query: None,
+                    fetched: None,
                 }
             } else {
                 run_call(front, call, server)
@@ -830,14 +895,17 @@ fn run_calls(
 
 /// One call, run.
 fn run_call(front: &Front, call: &ToolCall, server: Option<&tools::ServerSearch>) -> Outcome {
+    let limits = limits(&front.home);
+    let mut detail = Detail::default();
     let outcome = match tools::parse_call(&call.name, &call.arguments) {
         Err(message) => Outcome {
             text: format!("Golem: {message}"),
             label: format!("⚠ Golem web tools: {message}"),
             results: None,
             query: None,
+            fetched: None,
         },
-        Ok(WebCall::Search { query }) => match search(&query) {
+        Ok(WebCall::Search { query }) => match search_cached(front, &query, &limits, &mut detail) {
             Ok(results) => {
                 let results = match server {
                     Some(server) => server.filter(results),
@@ -848,6 +916,7 @@ fn run_call(front: &Front, call: &ToolCall, server: Option<&tools::ServerSearch>
                     label: tools::search_label(&query, results.len()),
                     results: Some(results),
                     query: Some(query),
+                    fetched: None,
                 }
             }
             Err(message) => Outcome {
@@ -855,17 +924,19 @@ fn run_call(front: &Front, call: &ToolCall, server: Option<&tools::ServerSearch>
                 label: format!("🔎 Golem web search: {query} - {message}"),
                 results: None,
                 query: None,
+                fetched: None,
             },
         },
-        Ok(WebCall::Fetch { url, page }) => match page_of(front, &url) {
+        Ok(WebCall::Fetch { url, page, links }) => match page_of(front, &url, &limits, &mut detail) {
             Ok(fetched) => {
                 let parts = fetched.parts.len().max(1);
                 let part = page.clamp(1, parts);
                 Outcome {
-                    text: tools::fetch_text(&url, &fetched, part),
+                    text: tools::fetch_text(&url, &fetched, part, links),
                     label: tools::fetch_label(&url, part, parts),
                     results: None,
                     query: None,
+                    fetched: Some((url.clone(), fetched.title.clone())),
                 }
             }
             Err(message) => Outcome {
@@ -873,10 +944,11 @@ fn run_call(front: &Front, call: &ToolCall, server: Option<&tools::ServerSearch>
                 label: format!("🌐 Golem web fetch: {url} - {message}"),
                 results: None,
                 query: None,
+                fetched: None,
             },
         },
     };
-    log_call(&front.home, &outcome.label);
+    log_call(&front.home, &format!("{} | {}", outcome.label, detail.words()));
     outcome
 }
 
@@ -1010,11 +1082,50 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// A search, from this service's recent ones when it ran within
+/// `WEB_CACHE_MINUTES`, else asked of DuckDuckGo - twice, a moment apart,
+/// when the first answer is a refusal or a timeout.
+fn search_cached(
+    front: &Front,
+    query: &str,
+    limits: &tools::Limits,
+    detail: &mut Detail,
+) -> Result<Vec<html::SearchResult>, String> {
+    let key = query.trim().to_lowercase();
+    let fresh = Duration::from_secs(limits.cache_minutes * 60);
+    if let Ok(searches) = front.searches.lock() {
+        if let Some((_, _, results)) = searches.iter().rev().find(|(q, at, _)| *q == key && at.elapsed() < fresh) {
+            detail.cached = true;
+            return Ok(results.iter().take(limits.results).cloned().collect());
+        }
+    }
+    let started = std::time::Instant::now();
+    let mut answer = search(query, limits, detail);
+    detail.tries = 1;
+    if answer.is_err() {
+        std::thread::sleep(SEARCH_RETRY_WAIT);
+        answer = search(query, limits, detail);
+        detail.tries = 2;
+    }
+    detail.millis = started.elapsed().as_millis();
+    let results = answer?;
+    if limits.cache_minutes > 0 {
+        if let Ok(mut searches) = front.searches.lock() {
+            searches.push_back((key, std::time::Instant::now(), results.clone()));
+            while searches.len() > SEARCH_CACHE {
+                searches.pop_front();
+            }
+        }
+    }
+    Ok(results)
+}
+
 /// DuckDuckGo's results for a query.
-fn search(query: &str) -> Result<Vec<html::SearchResult>, String> {
+fn search(query: &str, limits: &tools::Limits, detail: &mut Detail) -> Result<Vec<html::SearchResult>, String> {
     let form = format!("q={query}");
+    let timeout = limits.timeout_secs.to_string();
     let output = curl(&[
-        "-sS", "-m", SEARCH_SECS, "--compressed", "-A", USER_AGENT,
+        "-sS", "-m", &timeout, "--compressed", "-A", USER_AGENT,
         "-H", "Accept-Language: en-US,en;q=0.9",
         "-D", "-",
         "--data-urlencode", &form,
@@ -1022,21 +1133,27 @@ fn search(query: &str) -> Result<Vec<html::SearchResult>, String> {
     ])?;
     let (head, body) = split_head(&output);
     let status = tools::parse_head(&head).map_or(0, |(status, _)| status);
+    detail.status = status;
+    detail.bytes = body.len();
     let page = String::from_utf8_lossy(&body);
     if status != 200 || html::duckduckgo_blocked(&page) {
         return Err(format!("DuckDuckGo did not answer (HTTP {status}); try again in a minute"));
     }
-    Ok(html::duckduckgo_results(&page, tools::SEARCH_RESULTS))
+    Ok(html::duckduckgo_results(&page, limits.results))
 }
 
 /// A page, from this service's cache or fetched.
-fn page_of(front: &Front, url: &str) -> Result<tools::Page, String> {
+fn page_of(front: &Front, url: &str, limits: &tools::Limits, detail: &mut Detail) -> Result<tools::Page, String> {
     if let Ok(pages) = front.pages.lock() {
         if let Some((_, page)) = pages.iter().find(|(u, _)| u == url) {
+            detail.cached = true;
             return Ok(page.clone());
         }
     }
-    let page = fetch(url)?;
+    let started = std::time::Instant::now();
+    let fetched = fetch(url, limits, detail);
+    detail.millis = started.elapsed().as_millis();
+    let page = fetched?;
     if let Ok(mut pages) = front.pages.lock() {
         pages.push_back((url.to_string(), page.clone()));
         while pages.len() > PAGE_CACHE {
@@ -1050,8 +1167,9 @@ fn page_of(front: &Front, url: &str) -> Result<tools::Page, String> {
 /// checked: a fetch reaches only the public web, never this machine or the
 /// local network, whatever a page or a prompt points it at. The address
 /// curl connects to is the one checked (`--resolve`).
-fn fetch(url: &str) -> Result<tools::Page, String> {
+fn fetch(url: &str, limits: &tools::Limits, detail: &mut Detail) -> Result<tools::Page, String> {
     let mut url = url.to_string();
+    let timeout = limits.timeout_secs.to_string();
     for _ in 0..=FETCH_HOPS {
         let (host, port) = tools::host_port(&url).ok_or("not an http(s) URL")?;
         if tools::private_name(&host) {
@@ -1063,7 +1181,7 @@ fn fetch(url: &str) -> Result<tools::Page, String> {
             SocketAddr::V6(v6) => format!("{host}:{port}:[{}]", v6.ip()),
         };
         let output = curl(&[
-            "-sS", "-m", FETCH_SECS, "--compressed", "--max-filesize", FETCH_MAX_BYTES,
+            "-sS", "-m", &timeout, "--compressed", "--max-filesize", FETCH_MAX_BYTES,
             "--proto", "=http,https", "-A", USER_AGENT,
             "-H", "Accept: text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
             "-H", "Accept-Language: en-US,en;q=0.9",
@@ -1073,6 +1191,8 @@ fn fetch(url: &str) -> Result<tools::Page, String> {
         ])?;
         let (head, body) = split_head(&output);
         let (status, headers) = tools::parse_head(&head).ok_or("no answer")?;
+        detail.status = status;
+        detail.bytes += body.len();
         let header = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
         if (300..400).contains(&status) {
             let location = header("location").ok_or_else(|| format!("HTTP {status} without a Location"))?;
@@ -1085,8 +1205,8 @@ fn fetch(url: &str) -> Result<tools::Page, String> {
         let content_type = header("content-type").unwrap_or("");
         let text = tools::decode_body(&body, content_type);
         return match tools::body_kind(content_type) {
-            tools::BodyKind::Html => Ok(tools::page_from_html(&text)),
-            tools::BodyKind::Text => Ok(tools::page_from_text(&text)),
+            tools::BodyKind::Html => Ok(tools::page_from_html(&text, limits.part_chars)),
+            tools::BodyKind::Text => Ok(tools::page_from_text(&text, limits.part_chars)),
             tools::BodyKind::Unsupported => Err(format!("{content_type} is not a page Golem can read")),
         };
     }
@@ -1124,7 +1244,7 @@ mod tests {
     #[test]
     fn a_private_address_is_never_fetched() {
         for url in ["http://127.0.0.1:8787/", "http://localhost/", "http://[::1]/", "http://192.168.1.1/admin", "http://2130706433/"] {
-            let err = fetch(url).expect_err(url);
+            let err = fetch(url, &tools::Limits::default(), &mut Detail::default()).expect_err(url);
             assert!(err.contains("local network") || err.contains("resolve"), "{url}: {err}");
         }
     }

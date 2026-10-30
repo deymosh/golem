@@ -334,6 +334,44 @@ impl Document {
         }
     }
 
+    /// The links in the page's main content, in page order: each one's text
+    /// and `href` as written, at most `max`, one per address, without
+    /// in-page anchors, `javascript:` and `mailto:` - the list `golem_web_fetch` gives
+    /// after the text when it is asked for links.
+    pub fn links(&self, max: usize) -> Vec<(String, String)> {
+        let root = self.main_content();
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut todo = vec![root];
+        // Depth first in page order: children pushed in reverse.
+        while let Some(id) = todo.pop() {
+            if out.len() >= max {
+                break;
+            }
+            if id != root && self.is_noise(id) {
+                continue;
+            }
+            if self.name(id) == "a" {
+                let href = self.attr(id, "href").unwrap_or("").trim();
+                let text = self.text(id);
+                if !href.is_empty()
+                    && !href.starts_with('#')
+                    && !href.to_ascii_lowercase().starts_with("javascript:")
+                    && !href.to_ascii_lowercase().starts_with("mailto:")
+                    && !out.iter().any(|(_, h)| h == href)
+                {
+                    out.push((if text.is_empty() { href.to_string() } else { text }, href.to_string()));
+                }
+                continue;
+            }
+            for &child in self.children(id).iter().rev() {
+                if matches!(self.nodes[child], Node::Element { .. }) {
+                    todo.push(child);
+                }
+            }
+        }
+        out
+    }
+
     /// The page's main content as Markdown.
     pub fn markdown(&self) -> String {
         let root = self.main_content();

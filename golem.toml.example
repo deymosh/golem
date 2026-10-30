@@ -114,6 +114,17 @@ LOCAL_AI_PORT = "8000"
 # account - and each one is labelled "Golem web search" and logged in
 # logs/web.log. "off" hands requests to the engine without them.
 WEB_SEARCH = "on"
+# Their limits, read on every request: results per search, characters per
+# part of a fetched page (20000 is about 6K tokens), golem tool calls per
+# answer, seconds a search or a fetch hop may take, and how many minutes the
+# same search is answered from memory (0 asks again every time). A failed
+# search is tried once more before the model hears of it. logs/web.log has
+# each call's time, HTTP status, size, and whether it came from memory.
+#WEB_RESULTS = "8"
+#WEB_FETCH_CHARS = "20000"
+#WEB_MAX_CALLS = "8"
+#WEB_TIMEOUT = "20"
+#WEB_CACHE_MINUTES = "10"
 
 # The console `golem service` hosts beside the engine. It has no login, and
 # its buttons start engines and delete model files: keep it on 127.0.0.1
