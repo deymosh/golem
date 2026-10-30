@@ -414,6 +414,8 @@ async fn api_addmodel(State(app): State<Arc<App>>, body: Bytes) -> Response {
         ctx: form.get("ctx").cloned().unwrap_or_default(),
         ncpu: form.get("ncpu").cloned().unwrap_or_default(),
         mtp: form.get("mtp").map(String::as_str) == Some("on"),
+        mmproj: form.get("mmproj").cloned().unwrap_or_default(),
+        draft: form.get("draft").cloned().unwrap_or_default(),
     };
     edit(app, move |home| models::add(home, &new)).await
 }

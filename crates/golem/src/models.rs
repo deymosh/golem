@@ -160,6 +160,10 @@ pub struct NewModel {
     pub ctx: String,
     pub ncpu: String,
     pub mtp: bool,
+    /// The vision projector's file in the same repository, or empty.
+    pub mmproj: String,
+    /// A draft model's file in the same repository, or empty.
+    pub draft: String,
 }
 
 /// `POST /api/addmodel`: append a section to the preset file.
@@ -173,9 +177,13 @@ pub fn add(home: &Path, form: &NewModel) -> Result<&'static str, std::io::Error>
     let name = sanitize(&form.name);
     let repo = form.repo.trim().to_string();
     let file = form.file.trim().to_string();
+    let mmproj = form.mmproj.trim().to_string();
+    let draft = form.draft.trim().to_string();
     if name.is_empty()
         || !is_repo(&repo)
         || !is_file(&file)
+        || !(mmproj.is_empty() || is_file(&mmproj))
+        || !(draft.is_empty() || is_file(&draft))
         || preset_names(home).iter().any(|n| n == &name)
     {
         return Ok("bad-input");
@@ -190,9 +198,19 @@ pub fn add(home: &Path, form: &NewModel) -> Result<&'static str, std::io::Error>
     // hand-written in the file.
     let mut block = String::from("\n");
     block.push_str(&format!("; Added from the web console {}\n", golem_core::time::today()));
-    block.push_str(&format!("; Download: {repo} -> {file}\n"));
+    // One Download line per file the section names, so `up` and `pull`
+    // fetch the projector and the draft with the model.
+    for f in [&file, &mmproj, &draft].into_iter().filter(|f| !f.is_empty()) {
+        block.push_str(&format!("; Download: {repo} -> {f}\n"));
+    }
     block.push_str(&format!("[{name}]\n"));
-    block.push_str(&format!("model = {file}\n"));
+    block.push_str(&format!("model = {}\n", golem_core::hub::stored_name(&file)));
+    if !mmproj.is_empty() {
+        block.push_str(&format!("mmproj = {}\nno-mmproj-offload = true\n", golem_core::hub::stored_name(&mmproj)));
+    }
+    if !draft.is_empty() {
+        block.push_str(&format!("spec-draft-model = {}\n", golem_core::hub::stored_name(&draft)));
+    }
     block.push_str(&format!("ctx-size = {ctx}\n"));
     block.push_str("load-mode = mlock\n");
     block.push_str(&format!("n-cpu-moe = {ncpu}\n"));
@@ -509,6 +527,8 @@ ctx-size = 8192
             ctx: "65536".into(),
             ncpu: "20".into(),
             mtp: true,
+            mmproj: "mmproj-F16.gguf".into(),
+            draft: String::new(),
         };
         assert_eq!(add(&dir, &form).expect("write"), "added");
 
@@ -523,6 +543,9 @@ ctx-size = 8192
         assert_eq!(added.value("load-mode"), Some("mlock"));
         assert_eq!(added.value("ubatch-size"), Some("2048"));
         assert_eq!(added.downloads.first().map(|d| d.file.as_str()), Some("Thing-Q4_K_M.gguf"));
+        // The projector is fetched with the model and named by the section.
+        assert_eq!(added.downloads.get(1).map(|d| d.file.as_str()), Some("mmproj-F16.gguf"));
+        assert_eq!(added.value("mmproj"), Some("mmproj-F16.gguf"));
         assert!(text.contains("; Added from the web console 2"), "a dated comment:\n{text}");
         // The file is backed up before it is touched.
         assert!(dir.join("config/models.ini.bak").is_file());
@@ -539,6 +562,8 @@ ctx-size = 8192
             ctx: String::new(),
             ncpu: String::new(),
             mtp: false,
+            mmproj: String::new(),
+            draft: String::new(),
         };
         // The name is already a preset.
         let taken = NewModel { name: "model-a".into(), ..good.clone() };
@@ -650,6 +675,8 @@ ctx-size = 8192
             ctx: String::new(),
             ncpu: String::new(),
             mtp: false,
+            mmproj: String::new(),
+            draft: String::new(),
         };
         assert_eq!(add(&dir, &form).expect("write"), "added");
         let text = std::fs::read_to_string(dir.join("config/models.ini")).expect("read");
