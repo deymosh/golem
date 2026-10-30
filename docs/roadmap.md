@@ -11,12 +11,12 @@ tokens-per-second figure is one input, not the answer.
 
 ## Where it stands
 
-Checked against the code and `results/results.jsonl` (176 rows on the reference box):
+Checked against the code and `results/results.jsonl` (230 rows on the reference box):
 
 - **What holds up.** One binary owns the engine (`service.rs`); every decision is a pure,
-  tested function in `golem-core` (558 tests); a row records host, build, flags and
+  tested function in `golem-core` (599 tests); a row records host, build, flags and
   model file, so a number is always traceable; nothing is adopted without the 200K gate.
-  The tuner places a model in eight or nine loads where a grid spent seventeen.
+  The tuner places a model in eight to ten loads where a grid spent seventeen.
 - **The gate measures plumbing, not work.** `golem eval` checks arithmetic, one tool call
   with no result round trip, vision, throughput and a needle (`eval.rs`). It never runs a
   multi-step tool loop, never grades a coding answer, and never speaks `/v1/messages` -
@@ -70,6 +70,16 @@ inside each; the levers are fewer loads and less bench per load.
   loads than the last two predictions could buy. A prediction now has to promise more
   context than 128 MiB of VRAM is worth at the fitted slope (`READING_NOISE_MIB`); on
   that run's readings the search stops after 242688, two loads sooner.
+- **Measured** on the reference box, 2026-10-30: ten loads and 30 min 43 s to the verdict
+  `n-cpu-moe 36` at 250880 tokens. The gate passed - needle at 655 t/s prefill and 33.8 t/s
+  at depth, the agent suite ten of eleven on both APIs - but the verdict is not the served
+  setup's: 36 experts on the CPU where the served preset has 35, 250880 tokens where it has
+  248832, and the served setup solves eleven of eleven. The desktop held 895 MiB of the
+  card at the start and RAM free fell to 0.4 GB of 22.2 by the gate: `n-cpu-moe 35`
+  measured 53.6 t/s there and 11343 MiB, over the run's 11264 MiB wall, where on 2026-10-29
+  the same split fitted at 11115 MiB. Backed out - the preset, the overlays and the winner
+  are restored from `.local/backup/2026-10-30-tune/`. The "done when" is not met: ten loads
+  is over seven, and the split it ranked was set by this desktop's memory, not by the card.
 - **Done when:** the reference box's `golem tune ornith-1.5-35b` reaches the same verdict
   in at most seven loads and measurably less wall-clock than the same day's run of the
   previous build, and the 200K gate passes on the result.
@@ -123,10 +133,21 @@ file with search, recover from a tool error, two independent calls in one turn.
   kinds break, and its last turn runs out at 16384 tokens (440 s). The 9B also writes half again as many tokens (30.7K against 19.5K): it reasons
   longer for less. At the old 4096 cap the two had tied at ten, the 35B's miss a turn
   cut mid-thought.
-- **Next:** the first questions above, through the suite on the 35B; then tasks that
-  separate models nearer the 35B, since it now solves every one. A missed task leaves its
-  calls, last answer and changed files in `logs/agent/`, and `--task NAME` reruns one
-  task.
+- **Measured, the flags**, 2026-10-30, on the 35B at the 16384-token cap:
+  `--no-reasoning-preserve` solves eleven of eleven on both APIs for the same 230K prompt
+  tokens as the served preset. The flag reaches the engine - its load echoes
+  `--no-reasoning-preserve` and the init line turns from "enabled by default" to "consider
+  enabling it via --reasoning-preserve" - but b11379 renders no history reasoning into the
+  prompt either way: a two-turn request whose assistant turn carries forty short sentences
+  as `reasoning_content` measures 913 prompt tokens under both presets. `--image-min-tokens
+  1024` changes nothing either: the vision check reads the picture's colour with it and
+  without it, so it is not adopted. The KV cache answers the same way: `q4_0` solves the
+  same eleven of eleven as `q8_0` (446-477 s against 452-486 s) and buys nothing, and
+  `f16`, whose cache is twice `q8_0`'s and whose preset holds 131072 tokens where the
+  served one holds 248832, solves ten. The served preset keeps `q8_0`.
+- **Next:** tasks that separate models nearer the 35B, since it solves every one. A missed
+  task leaves its calls, last answer and changed files in `logs/agent/`, and `--task NAME`
+  reruns one task.
 
 ## 3. Discovery: fit before download, rank by local results
 
@@ -203,8 +224,17 @@ and holding the 200K gate. What is still open, from
 - **Strata 0.2.7.** A routing prior for cards of 13 GiB or less (+15-37% decode on a 3060
   by its own notes) may close the gap that kept 0.2.6 at half llama.cpp's decode.
 - **`load-mode = none` for the coder.** With experts on the CPU the engine says a load
-  without mmap may run faster; the served preset pins with `mlock`. One alternating pair
-  of benches decides it.
+  without mmap may run faster; the served preset pins with `mlock`. Measured 2026-10-30 on
+  the served split, `mlock` / `none` / `none` / `mlock`: decode best 60.8 and 60.9 against
+  60.5 and 60.8 t/s, median 60.5 and 60.2 against 59.8 and 60.6, prefill 854 and 854
+  against 854 and 825. `none` wins nothing, so `mlock` stays and no gate run is owed.
+- **`fit` on a box that never tuned the presets.** A checkout served on another machine
+  would let llama.cpp place the model instead of carrying this box's split. b11379 refuses:
+  the shipped presets' `[*]` sets `n-gpu-layers = 99`, and fit aborts beside it
+  (`common_fit_params: failed to fit params to free device memory: n_gpu_layers already set
+  by user to 99, abort`), after which the load hangs rather than failing. Dropping that
+  global line as well is untested, and what fit places for a model with its experts in RAM
+  is unknown.
 - **MTP for the everyday model.** Ornith-1.5-9B decodes 76-78 t/s with its MTP head, but
   the draft's own KV cache stops the context at 209920 tokens on 12 GB. A build or flag
   that shrinks the draft's cache below the wall at 223232 tokens would be a ~40% faster
