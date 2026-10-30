@@ -99,7 +99,9 @@ what `docker stop` stops cleanly); `golem service stop` ends the service and the
 ### Updating
 
 Golem offers a new release of itself in the console (a banner over the tabs), and in a
-terminal before `up` and `tui`, at most once a day; `golem update` does it on demand
+terminal before `up` and `tui`. It asks GitHub once a day, and when the console opens (at
+most every 15 minutes); the Settings tab's Check for updates asks at once, and brings back
+a release that was skipped. `golem update` does it on demand
 (`--check` only looks, `--yes` skips the question). It downloads this platform's asset,
 verifies it against the release's `.sha256`, and replaces its own binary — close the app
 window or run `golem service stop` and start Golem again to run the new one.

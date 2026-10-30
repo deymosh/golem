@@ -118,6 +118,7 @@ pub fn router(cfg: Config) -> axum::Router {
         .route("/api/delmodel", post(api_delmodel))
         .route("/api/delpreset", post(api_delpreset))
         .route("/api/settings", get(api_settings).post(api_set))
+        .route("/api/update-check", post(api_update_check))
         .fallback(not_found)
         .layer(axum::middleware::from_fn(move |request: axum::extract::Request, next: axum::middleware::Next| {
             let bind_host = bind_host.clone();
@@ -476,6 +477,19 @@ async fn api_set(State(app): State<Arc<App>>, body: Bytes) -> Response {
         ),
         Ok(Err(e)) => plain(StatusCode::INTERNAL_SERVER_ERROR, format!("cannot write golem.toml: {e}")),
         Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "the setting did not run"),
+    }
+}
+
+/// `POST /api/update-check` (`force=1` from the Check button): ask GitHub
+/// for the latest release when the page opens or the user asks
+/// (`update::console_check`); the banner then reads it from `api/state`.
+async fn api_update_check(State(app): State<Arc<App>>, body: Bytes) -> Response {
+    let forced = parse_form(&body).get("force").map(String::as_str) == Some("1");
+    let home = app.cfg.home.clone();
+    match tokio::task::spawn_blocking(move || crate::update::console_check(&home, forced)).await {
+        Ok(Ok(body)) => json(StatusCode::OK, body),
+        Ok(Err(why)) => plain(StatusCode::CONFLICT, why),
+        Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "the check did not run"),
     }
 }
 

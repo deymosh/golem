@@ -695,6 +695,9 @@ async function pollOnce() {
     LIVE = live;
     document.querySelectorAll('.tabs a[data-tab="models"], .tabs a[data-tab="chat"], .tabs a[data-tab="log"], .tabs a[data-tab="settings"]').forEach((a) => { a.hidden = !live; });
     showTab(location.hash.slice(1) || (live ? "models" : "results"));
+    // A console that opens asks about updates; the service decides whether
+    // its last answer is fresh enough.
+    if (live) checkUpdates(false);
   }
   if (!live) return;
   let state = null;
@@ -772,8 +775,39 @@ async function loadSettings() {
   catch (e) { box.innerHTML = `<div class="surface empty">This service has no settings to offer: update Golem.</div>`; return; }
   const groups = [];
   list.forEach((s) => { let g = groups.find((x) => x.name === s.group); if (!g) groups.push(g = { name: s.group, items: [] }); g.items.push(s); });
-  box.innerHTML = groups.map((g) => `<h2>${esc(g.name)}</h2><div class="surface settings">${g.items.map(settingRow).join("")}</div>`).join("");
+  box.innerHTML = groups.map((g) => `<h2>${esc(g.name)}</h2><div class="surface settings">${g.items.map(settingRow).join("")}${g.name === "Updates" ? checkRow() : ""}</div>`).join("");
   box.querySelectorAll("form.set-row").forEach((f) => f.onsubmit = (e) => { e.preventDefault(); saveSetting(f); });
+  const check = $("update-check");
+  if (check) check.onclick = () => checkUpdates(true);
+}
+// The Updates group's last row: ask GitHub now, whatever the setting.
+function checkRow() {
+  return `<div class="set-row">
+    <label>Check now</label>
+    <span class="help">Ask GitHub for the latest release. A newer one shows in the banner, even one skipped before.</span>
+    <div class="field"></div>
+    <div class="acts"><button class="btn" type="button" id="update-check">Check for updates</button></div>
+    <small class="note" id="update-check-note" aria-live="polite"></small></div>`;
+}
+// The page asks when it opens (the service answers from its last check when
+// that is under a quarter of an hour old); the button forces it.
+async function checkUpdates(forced) {
+  const note = $("update-check-note"), btn = $("update-check");
+  if (forced && note) { note.className = "note"; note.textContent = "Checking..."; }
+  if (forced && btn) btn.disabled = true;
+  try {
+    const r = await post("api/update-check", `force=${forced ? 1 : 0}`);
+    if (forced && note) {
+      if (r.ok) {
+        const a = await r.json();
+        note.className = "note ok";
+        note.textContent = a.newer ? `${a.latest} is available (this is ${a.current}): see the banner above.` : `Up to date: ${a.current} is the latest release.`;
+        updateShown = "";
+        pollOnce();
+      } else { note.className = "note bad"; note.textContent = (await r.text()).trim() || `HTTP ${r.status}`; }
+    }
+  } catch (e) { if (forced && note) { note.className = "note bad"; note.textContent = "The service did not answer."; } }
+  if (forced && btn) btn.disabled = false;
 }
 function settingRow(s) {
   const id = "set-" + s.key;

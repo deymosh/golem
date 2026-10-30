@@ -168,9 +168,10 @@ MODEL_ALIAS = "ornith-1.5-35b"
 # Updates
 # ------------------------------------------------------------
 
-# Golem checks GitHub for a new release of itself once a day and offers it
-# in the console and, in a terminal, before `up` and `tui`. "off" stops the
-# automatic checks; `golem update` still works. A checkout never updates
+# Golem checks GitHub for a new release of itself once a day, and when the
+# console opens (at most every 15 minutes), and offers it in the console and,
+# in a terminal, before `up` and `tui`. "off" stops the automatic checks;
+# the console's Check for updates and `golem update` still work. A checkout never updates
 # itself: `git pull` and `./scripts/cargo.sh build`.
 UPDATE_CHECK = "ask"
 

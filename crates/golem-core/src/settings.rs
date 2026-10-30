@@ -165,7 +165,7 @@ pub const SETTINGS: &[Setting] = &[
       "The sampling the eval's throughput runs use.",
       Shape::Decimal { min: 0.0, max: 1.0 }, "0.95", Applies::NextRun),
     s("UPDATE_CHECK", "Updates", "Check for updates",
-      "ask checks GitHub once a day and offers a new release; off stops the checks.",
+      "ask checks GitHub when the console opens (at most every 15 minutes) and once a day in the background, and offers a new release; off stops the automatic checks.",
       Shape::Choice(&["ask", "off"]), "ask", Applies::Now),
     s("HF_TOKEN", "Updates", "Hugging Face token",
       "For a gated or private repo. Never shown again once saved.",

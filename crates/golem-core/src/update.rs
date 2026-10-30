@@ -225,6 +225,19 @@ pub fn due(checked: Option<u64>, now: u64) -> bool {
     }
 }
 
+/// How old a check may be when the console opens before it asks again:
+/// opening the page several times in a row asks GitHub once.
+pub const OPEN_RECHECK_SECS: u64 = 15 * 60;
+
+/// Whether opening the console at `now` asks GitHub again: when there was
+/// never a check, or the last is [`OPEN_RECHECK_SECS`] old.
+pub fn due_on_open(checked: Option<u64>, now: u64) -> bool {
+    match checked {
+        Some(checked) => now.saturating_sub(checked) >= OPEN_RECHECK_SECS,
+        None => true,
+    }
+}
+
 /// The tag to offer the user running `current`, if any: `latest` is a
 /// newer release, and not the one they declined.
 pub fn offer(current: &str, state: &State) -> Option<String> {
@@ -394,6 +407,14 @@ mod tests {
         assert!(due(Some(now - FRESH_SECS - 1), now));
         // A checked stamp from the future (a clock moved back) is not due.
         assert!(!due(Some(now + 3600), now));
+    }
+
+    #[test]
+    fn opening_the_console_asks_again_after_a_quarter_hour() {
+        let now = 1_798_200_000;
+        assert!(due_on_open(None, now));
+        assert!(!due_on_open(Some(now - 60), now));
+        assert!(due_on_open(Some(now - OPEN_RECHECK_SECS), now));
     }
 
     #[test]

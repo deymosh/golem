@@ -1,8 +1,9 @@
 //! `golem update`: replace this binary with the latest release.
 //!
 //! Golem asks GitHub for `deymosh/golem`'s latest release once a day - from
-//! the service, in the console, and before `golem up` in a terminal - and
-//! installs it on the user's yes. The decisions are `golem_core::update`'s;
+//! the service, and before `golem up` in a terminal - and when the console
+//! opens, at most every quarter of an hour; the console's Check for updates
+//! asks at once. It installs a release on the user's yes. The decisions are `golem_core::update`'s;
 //! this is the transport and the file surgery.
 //!
 //! - **A checkout never updates itself.** Where the binary's directory or
@@ -162,6 +163,36 @@ pub fn background_check(home: &Path) {
         return;
     }
     let _ = check(home);
+}
+
+/// The console's check: when the page opens (`forced` false) it asks GitHub
+/// if the last check is a quarter of an hour old and checks are on; the
+/// Check button (`forced`) asks whatever the setting and the time, and brings
+/// back a release the user once skipped. A checkout never offers an update.
+/// The answer is the page's: `{"current", "latest", "newer", "url", "checked"}`
+/// with `checked` false when nothing was asked, or an error.
+pub fn console_check(home: &Path, forced: bool) -> Result<String, String> {
+    let current = env!("CARGO_PKG_VERSION");
+    if is_checkout(home) {
+        return Err("this is a checkout: it updates with git pull and a build".to_string());
+    }
+    let mut state = read_state(home);
+    let ask = forced || (automatic(home) && core::due_on_open(state.checked, now()));
+    if ask {
+        state = check(home)?;
+        if forced && state.skipped.is_some() {
+            state.skipped = None;
+            let _ = write_state(home, &state);
+        }
+    }
+    let latest = state.latest.clone().unwrap_or_default();
+    let newer = !latest.is_empty() && core::is_newer(current, &latest);
+    Ok(format!(
+        "{{\"current\": {}, \"latest\": {}, \"newer\": {newer}, \"url\": {}, \"checked\": {ask}}}",
+        golem_core::json::quote(&format!("v{current}")),
+        golem_core::json::quote(&latest),
+        golem_core::json::quote(state.url.as_deref().unwrap_or("")),
+    ))
 }
 
 /// Ask GitHub what the latest release is, and remember it.
