@@ -208,20 +208,21 @@ function renderBoard(rows) {
     if (!(c in bestByClass) || (r.decode_median ?? 0) > bestByClass[c]) bestByClass[c] = r.decode_median;
   });
   let lastClass = null;
-  $("board").innerHTML = `<thead><tr><th>Model</th><th>Engine</th><th>Params</th><th class="num">Ctx</th><th class="num">Threads</th><th class="num">Decode</th><th class="num">Best</th>
-    <th class="num">MTP</th><th class="num">Prefill</th><th class="num">t/s per active B</th><th class="num">VRAM GB</th><th class="num">RAM GB</th><th>200K needle</th><th class="num">At depth</th><th>Agent</th><th>Date</th><th>Flags</th></tr></thead><tbody>` +
+  // The board fits a laptop's width: threads, the best single run and the
+  // flags are in the run list below and the engine cell's tooltip.
+  $("board").innerHTML = `<thead><tr><th>Model</th><th>Engine</th><th>Params</th><th class="num">Ctx</th><th class="num">Decode</th>
+    <th class="num">MTP</th><th class="num">Prefill</th><th class="num">t/s per active B</th><th class="num">VRAM GB</th><th class="num">RAM GB</th><th>200K needle</th><th class="num">At depth</th><th>Agent</th><th>Date</th></tr></thead><tbody>` +
     lines.map(({ best: r, ev, ag }) => {
       const needle = ev?.eval?.needle;
       const work = agentOf(ag);
       const cls = classOf(r);
-      const head = cls !== lastClass ? `<tr class="classrow"><td colspan="17">${esc(cls)}</td></tr>` : "";
+      const head = cls !== lastClass ? `<tr class="classrow"><td colspan="14">${esc(cls)}</td></tr>` : "";
       lastClass = cls;
       return head + `<tr><td><span class="swatch" style="background:${colorOf(idOf(r))}"></span>${esc(r.model)}${quantTag(quantOf(r))}</td>
-        <td>${esc(r.engine)} <span class="flags">${esc(r.engine_build)}</span></td>
+        <td title="${esc([r.threads != null ? `${r.threads} threads` : "", r.decode_best ? `best run ${fmt(r.decode_best)} t/s` : "", flagStr(r.flags)].filter(Boolean).join(" · "))}">${esc(r.engine)} <span class="flags">${esc(r.engine_build)}</span></td>
         <td>${paramsCell(r)}</td>
         <td class="num">${r.ctx ? (r.ctx / 1024).toFixed(0) + "K" : "–"}</td>
-        <td class="num">${r.threads != null ? r.threads : "–"}</td>
-        <td class="num ${r.decode_median === bestByClass[cls] ? "best" : ""}">${fmt(r.decode_median)}</td><td class="num">${fmt(r.decode_best)}</td>
+        <td class="num ${r.decode_median === bestByClass[cls] ? "best" : ""}">${fmt(r.decode_median)}</td>
         <td class="num">${r.draft_accept == null ? "–" : Math.round(r.draft_accept * 100) + "%"}</td>
         <td class="num">${fmt(r.prefill, 0)}</td><td class="num">${fmt(efficiency(r), 1)}</td>
         <td class="num">${r.vram_mib ? fmt(r.vram_mib / 1024) : "–"}</td>
@@ -231,7 +232,7 @@ function renderBoard(rows) {
           : `<span class="seal none">${SEALS.none}<span>Not gated</span></span>`}${ev?.eval?.tools === "FAIL" ? ` <span class="badge FAIL">Tools</span>` : ""}</td>
         <td class="num">${fmt(ev?.eval?.depth_decode)}</td>
         <td>${work ? `<span class="seal ${work.pass ? "proven" : "failed"}" title="${esc(work.apis)}, ${esc(day(ag.ts))}">${work.pass ? SEALS.proven : SEALS.failed}<span>${work.solved}/${work.total}</span></span>` : "–"}</td>
-        <td>${esc(day(r.ts))}</td><td class="flags">${esc(flagStr(r.flags))}</td></tr>`;
+        <td>${esc(day(r.ts))}</td></tr>`;
     }).join("") + "</tbody>";
 }
 
