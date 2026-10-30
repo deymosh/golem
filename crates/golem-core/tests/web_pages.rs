@@ -85,6 +85,26 @@ fn duckduckgo_results_come_back_with_their_real_addresses() {
     let text = webtools::search_text("best running shoes 2026", Some("2026-10-28"), &got);
     assert!(text.starts_with("Golem web search: \"best running shoes 2026\" (DuckDuckGo, 2026-10-28), 8 results\n\n1. "));
     assert!(text.len() < 4000, "about 1K tokens, not {} bytes", text.len());
+
+    // Every address is a real http(s) one, and none of them DuckDuckGo's.
+    for page in ["duckduckgo-post.html", "duckduckgo-get.html"] {
+        let results = html::duckduckgo_results(&fixture(page), webtools::SEARCH_RESULTS);
+        assert!(results.iter().all(|r| r.url.starts_with("https://") || r.url.starts_with("http://")), "{results:?}");
+        assert!(!html::duckduckgo_no_results(&fixture(page)), "{page} has results");
+    }
+}
+
+#[test]
+fn a_search_that_finds_nothing_says_so_and_is_told_from_an_unreadable_page() {
+    // DuckDuckGo's own "No results found" page: an answer, and the model is
+    // told to try other words.
+    let none = fixture("duckduckgo-none.html");
+    assert!(html::duckduckgo_results(&none, webtools::SEARCH_RESULTS).is_empty());
+    assert!(html::duckduckgo_no_results(&none));
+    let text = webtools::search_text("\"zxqv\"", None, &[]);
+    assert!(text.contains("0 results\nNo results. Try other words."), "{text}");
+    // A page with no results that does not say so is not that answer.
+    assert!(!html::duckduckgo_no_results("<html><body><p>Something else</p></body></html>"));
 }
 
 #[test]

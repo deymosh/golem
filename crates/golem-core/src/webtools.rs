@@ -154,6 +154,8 @@ pub fn page_from_html(text: &str, part_chars: usize) -> Page {
              only its static text is shown.)",
         );
         markdown = if markdown.is_empty() { note } else { format!("{note}\n\n{markdown}") };
+    } else if markdown.trim().is_empty() {
+        markdown = "(The page has no readable text.)".to_string();
     }
     Page { title: doc.title(), parts: split_parts(&markdown, part_chars), links: doc.links(LINKS_MAX) }
 }
@@ -161,7 +163,8 @@ pub fn page_from_html(text: &str, part_chars: usize) -> Page {
 /// A page that is already text - plain text, Markdown, JSON - split into
 /// parts as it is.
 pub fn page_from_text(text: &str, part_chars: usize) -> Page {
-    Page { title: String::new(), parts: split_parts(text.trim(), part_chars), links: Vec::new() }
+    let text = if text.trim().is_empty() { "(The page is empty.)" } else { text.trim() };
+    Page { title: String::new(), parts: split_parts(text, part_chars), links: Vec::new() }
 }
 
 /// `text` in parts of at most `max` characters, split between paragraphs
@@ -239,6 +242,65 @@ pub fn fetch_text(url: &str, page: &Page, part: usize, links: bool) -> String {
 /// A fetch that did not produce a page, as the model reads it.
 pub fn fetch_error(url: &str, message: &str) -> String {
     format!("Golem web fetch: {url}\nError: {message}")
+}
+
+/// An HTTP status that is not a page, in words the model can act on: what
+/// happened and what to try instead.
+pub fn status_error(status: u16) -> String {
+    let why = match status {
+        404 | 410 => "the page does not exist (or no longer does): check the address, or search for the page",
+        401 | 403 => "the site refused to serve the page - it may need a login or turn automated readers away: try another source",
+        429 => "the site is limiting requests: try another source, or this one later",
+        400..=499 => "the site rejected the request: check the address",
+        500..=599 => "the site failed to answer: try again later, or another source",
+        _ => "the answer is not a page",
+    };
+    format!("HTTP {status}: {why}")
+}
+
+/// What curl's exit code means for a search or a fetch, in words: curl's own
+/// message is in the machine's language and its TLS library's terms, and the
+/// model reads English. `None` for a code with no plainer wording.
+pub fn curl_error(code: i32) -> Option<&'static str> {
+    Some(match code {
+        3 => "the address is not a valid URL",
+        6 => "the host does not resolve",
+        7 => "the host refused the connection",
+        28 => "the request timed out",
+        35 | 51 | 53 | 54 | 58 | 59 | 60 | 66 | 77 | 80 | 83 | 90 | 91 => {
+            "the site's secure connection failed: its certificate is expired, self-signed or not trusted"
+        }
+        47 => "the site redirects too many times",
+        52 => "the site closed the connection without an answer",
+        55 | 56 => "the connection broke while the page was read",
+        61 => "the site's compression could not be read",
+        63 => "the page is too large",
+        _ => return None,
+    })
+}
+
+/// An address as a model wrote it, made into one curl takes: the fragment
+/// (`#...`, never sent) dropped, and spaces, quotes, angle brackets and any
+/// byte outside printable ASCII percent-encoded - a model writes "a b" or a
+/// non-Latin path as it reads it.
+pub fn clean_url(url: &str) -> String {
+    let url = url.trim();
+    let url = url.split('#').next().unwrap_or(url);
+    let mut out = String::with_capacity(url.len());
+    for b in url.bytes() {
+        match b {
+            b' ' | b'"' | b'<' | b'>' | b'`' | b'{' | b'}' | b'|' | b'\\' | b'^' => out.push_str(&format!("%{b:02X}")),
+            0x21..=0x7e => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Whether a body that says nothing of its type is binary: a NUL byte in
+/// its first kilobyte, which no text page has.
+pub fn looks_binary(body: &[u8]) -> bool {
+    body.iter().take(1024).any(|&b| b == 0)
 }
 
 /// A search that did not produce results, as the model reads it.
@@ -2686,6 +2748,31 @@ mod tests {
         let input = json::parse(r#"[{"type":"web_search_call","id":"ws_golem_1"},{"role":"user","content":"hi"}]"#).unwrap();
         let Value::Array(items) = input else { panic!() };
         assert_eq!(responses_history(items).len(), 1);
+    }
+
+    #[test]
+    fn a_fetch_that_fails_says_why_in_words_the_model_can_act_on() {
+        assert!(status_error(404).starts_with("HTTP 404: the page does not exist"));
+        assert!(status_error(403).contains("refused"));
+        assert!(status_error(429).contains("limiting"));
+        assert!(status_error(503).contains("failed to answer"));
+        // The certificate errors Windows' TLS library words in the machine's
+        // language (exit 35 for an expired one, 60 for a self-signed one).
+        assert!(curl_error(35).is_some_and(|w| w.contains("certificate")));
+        assert!(curl_error(60).is_some_and(|w| w.contains("certificate")));
+        assert_eq!(curl_error(3), Some("the address is not a valid URL"));
+        assert_eq!(curl_error(1234), None);
+        // What a model writes, made into what curl takes.
+        assert_eq!(clean_url(" https://httpbin.org/anything/a b#part "), "https://httpbin.org/anything/a%20b");
+        assert_eq!(clean_url("https://ja.wikipedia.org/wiki/東京"), "https://ja.wikipedia.org/wiki/%E6%9D%B1%E4%BA%AC");
+        assert_eq!(clean_url("https://a.example/x?q=1&r=%20"), "https://a.example/x?q=1&r=%20");
+        assert!(looks_binary(b"%PDF-1.4
+ "));
+        assert!(!looks_binary(b"<html>hello</html>"));
+        // A page with nothing to read says so rather than nothing.
+        let empty = page_from_html("<html><body><div></div></body></html>", PART_CHARS);
+        assert_eq!(empty.parts, vec!["(The page has no readable text.)".to_string()]);
+        assert_eq!(page_from_text("  ", PART_CHARS).parts, vec!["(The page is empty.)".to_string()]);
     }
 
     #[test]

@@ -927,7 +927,7 @@ fn run_call(front: &Front, call: &ToolCall, server: Option<&tools::ServerSearch>
                 fetched: None,
             },
         },
-        Ok(WebCall::Fetch { url, page, links }) => match page_of(front, &url, &limits, &mut detail) {
+        Ok(WebCall::Fetch { url, page, links }) => match page_of(front, &tools::clean_url(&url), &limits, &mut detail) {
             Ok(fetched) => {
                 let parts = fetched.parts.len().max(1);
                 let part = page.clamp(1, parts);
@@ -1049,13 +1049,12 @@ fn curl(args: &[&str]) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("cannot run curl: {e}"))?;
     if !out.status.success() {
         let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(match out.status.code() {
-            Some(28) => "the request timed out".to_string(),
-            Some(63) => "the page is too large".to_string(),
-            Some(6) => "the host does not resolve".to_string(),
-            Some(7) => "the host refused the connection".to_string(),
-            _ if !said.is_empty() => said,
-            code => format!("curl failed ({code:?})"),
+        // curl's own words are in the machine's language; the model gets
+        // English, and curl's only when there is no plainer wording.
+        return Err(match out.status.code().and_then(tools::curl_error) {
+            Some(words) => words.to_string(),
+            None if said.is_ascii() && !said.is_empty() => said,
+            None => format!("the request failed (curl exit {})", out.status.code().unwrap_or(-1)),
         });
     }
     Ok(out.stdout)
@@ -1139,7 +1138,13 @@ fn search(query: &str, limits: &tools::Limits, detail: &mut Detail) -> Result<Ve
     if status != 200 || html::duckduckgo_blocked(&page) {
         return Err(format!("DuckDuckGo did not answer (HTTP {status}); try again in a minute"));
     }
-    Ok(html::duckduckgo_results(&page, limits.results))
+    let results = html::duckduckgo_results(&page, limits.results);
+    // No results is an answer only when DuckDuckGo says so; a page with none
+    // that does not is one golem could not read.
+    if results.is_empty() && !html::duckduckgo_no_results(&page) {
+        return Err("DuckDuckGo's answer had no results golem could read; try again in a minute".to_string());
+    }
+    Ok(results)
 }
 
 /// A page, from this service's cache or fetched.
@@ -1200,14 +1205,20 @@ fn fetch(url: &str, limits: &tools::Limits, detail: &mut Detail) -> Result<tools
             continue;
         }
         if !(200..300).contains(&status) {
-            return Err(format!("HTTP {status}"));
+            return Err(tools::status_error(status));
         }
         let content_type = header("content-type").unwrap_or("");
+        if content_type.is_empty() && tools::looks_binary(&body) {
+            return Err("the address serves a file, not a page Golem can read".to_string());
+        }
         let text = tools::decode_body(&body, content_type);
         return match tools::body_kind(content_type) {
             tools::BodyKind::Html => Ok(tools::page_from_html(&text, limits.part_chars)),
             tools::BodyKind::Text => Ok(tools::page_from_text(&text, limits.part_chars)),
-            tools::BodyKind::Unsupported => Err(format!("{content_type} is not a page Golem can read")),
+            tools::BodyKind::Unsupported => Err(format!(
+                "the address serves a file ({}), not a page Golem can read",
+                content_type.split(';').next().unwrap_or(content_type).trim()
+            )),
         };
     }
     Err(format!("more than {FETCH_HOPS} redirects"))

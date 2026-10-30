@@ -12,3 +12,4 @@ them.
 | `js-only-excalidraw.html` | excalidraw.com | a page that renders only with JavaScript | MIT |
 | `duckduckgo-post.html` | html.duckduckgo.com/html/, POST `q=rust std::fs::read_to_string` | search results, direct links | DuckDuckGo's |
 | `duckduckgo-get.html` | html.duckduckgo.com/html/?q=best+running+shoes+2026 | search results, `/l/?uddg=` redirects | DuckDuckGo's |
+| `duckduckgo-none.html` | html.duckduckgo.com/html/, POST a quoted string nothing matches (2026-10-30) | no results: its `result--no-result` block | DuckDuckGo's |

@@ -964,6 +964,12 @@ pub fn duckduckgo_results(page: &str, max: usize) -> Vec<SearchResult> {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             continue;
         }
+        // DuckDuckGo's own pages (a related search, its settings) are not
+        // results: every address the model gets is the site's.
+        let host = url.split("://").nth(1).and_then(|r| r.split(['/', '?', '#']).next()).unwrap_or("");
+        if host == "duckduckgo.com" || host.ends_with(".duckduckgo.com") {
+            continue;
+        }
         let key = dedupe_key(&url);
         if seen.contains(&key) {
             continue;
@@ -983,6 +989,13 @@ pub fn duckduckgo_results(page: &str, max: usize) -> Vec<SearchResult> {
 }
 
 /// Whether a DuckDuckGo page is its bot check rather than an answer.
+/// Whether DuckDuckGo's page says it found nothing (its `result--no-result`
+/// block, "No results found for ..."). A page with no results that does not
+/// say so is one golem could not read, which is not the same answer.
+pub fn duckduckgo_no_results(page: &str) -> bool {
+    page.contains("result--no-result") || page.contains("no-results__message")
+}
+
 pub fn duckduckgo_blocked(page: &str) -> bool {
     page.contains("anomaly-modal") || page.contains("challenge-form") || page.contains("/anomaly.js")
 }
