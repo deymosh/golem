@@ -58,6 +58,10 @@ Measuring:
                    Find the fastest setup this machine can serve, gate it,
                    and with --adopt serve it
   tune --auto      Pick the best installed model, then tune it
+  tune [preset] --profile chat
+                   Tune and gate a 32K setup for chat beside the coder's
+  profile [coder|chat]
+                   Which tuned setup serves: show it, or switch (then restart)
 
 Front ends and results:
   app              The Golem window and tray
@@ -101,6 +105,7 @@ async fn main() -> ExitCode {
         Some("tui") => cmd_tui().await,
         Some("app") => cmd_open_console().await,
         Some("status") => cmd_status(),
+        Some("profile") => cmd_profile(&args[1..]),
         Some("bench") => code(measure::bench(&prepare_home(), &args[1..])),
         Some("eval") => code(measure::eval(&prepare_home(), &args[1..])),
         Some("logs") => code(logs::run(&prepare_home(), &args[1..])),

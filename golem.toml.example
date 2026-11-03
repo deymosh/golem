@@ -89,6 +89,13 @@ ENGINE = "llama.cpp"
 # work or guesses wrong (a headless box, a remote host, two GPUs).
 GPU_BACKEND = "auto"
 
+# Which tuned setup serves: "coder" (the largest context the card holds,
+# gated at 200K) or "chat" (32K). `golem tune <preset> --profile chat` tunes
+# and gates one; a preset with none for the profile keeps its
+# coder tune. Switch with `golem profile <name>` or the Settings tab, then
+# restart.
+PROFILE = "coder"
+
 # Pin a different engine build than the adapter names. "latest" follows
 # upstream, ungated - the adapter's `build` is the one the 200K gate adopted.
 #ENGINE_BUILD = "latest"

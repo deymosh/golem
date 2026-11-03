@@ -343,6 +343,24 @@ pub fn write_candidate(text: &str, section: &str, overrides: &[Entry]) -> String
     out
 }
 
+/// The preset with `keys` dropped from `section`; every other line passes
+/// through untouched.
+pub fn remove_keys(text: &str, section: &str, keys: &[String]) -> String {
+    let eol = ending(text);
+    let mut out = String::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        if let Some(name) = header_of(line) {
+            current = name.to_string();
+        } else if current == section && entry_of(line).is_some_and(|e| keys.contains(&e.key)) {
+            continue;
+        }
+        out.push_str(line);
+        out.push_str(eol);
+    }
+    out
+}
+
 /// The preset with `overlay`'s entries merged into it.
 ///
 /// An existing key is replaced where it stands, a key the section does not

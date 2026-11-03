@@ -123,6 +123,13 @@ pub struct Options {
     /// MiB of the card left for the desktop to grow into (see
     /// [`Machine::wall_mib`]).
     pub headroom_mib: u64,
+    /// Measure every point again rather than take a kept one
+    /// (`golem_core::tune::reuse`).
+    pub fresh: bool,
+    /// The profile the run tunes for (`golem_core::profile`): its overlay
+    /// is the one written, and a profile with a context pins it and sizes
+    /// the gate.
+    pub profile: String,
 }
 
 /// The default [`Options::headroom_mib`]. The desktop's own use drifts
@@ -130,6 +137,65 @@ pub struct Options {
 /// and the driver spills silently once the card is full, so a setup tuned to
 /// the last megabyte is one a browser tab can push over.
 const VRAM_HEADROOM_MIB: u64 = 1024;
+
+/// The points kept for later runs, in `data/tuned/<host>/`.
+const KEPT_POINTS: &str = "points.jsonl";
+
+/// The profile this machine serves (`PROFILE`, the coder's when unset).
+pub fn active_profile(home: &Path) -> String {
+    config::get(home, "PROFILE")
+        .filter(|p| golem_core::profile::get(p).is_some())
+        .unwrap_or_else(|| golem_core::profile::DEFAULT.to_string())
+}
+
+/// The overlay files in an engine's overlay directory, by name.
+fn overlay_files(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|entries| entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    names.retain(|n| n.ends_with(".ini"));
+    names.sort();
+    names
+}
+
+/// Serve the profile `to`: the effective preset's outgoing overlays undone
+/// and `to`'s merged (`golem_core::profile::switch`), and `PROFILE` set. A
+/// restart serves it. Says which presets have an overlay of their own for
+/// it; the rest keep the coder's.
+pub fn switch_profile(home: &Path, to: &str) -> Result<String, String> {
+    if golem_core::profile::get(to).is_none() {
+        let names: Vec<&str> = golem_core::profile::PROFILES.iter().map(|p| p.name).collect();
+        return Err(format!("no profile {to:?}: {}", names.join(", ")));
+    }
+    let from = active_profile(home);
+    let engine = config::get(home, "ENGINE").unwrap_or_else(|| paths::DEFAULT_ENGINE.to_string());
+    let dir = home.join("data/tuned").join(machine::this_host()).join(&engine);
+    let files = overlay_files(&dir);
+    let read = |names: Vec<String>| -> Vec<String> {
+        names.iter().filter_map(|n| std::fs::read_to_string(dir.join(n)).ok()).collect()
+    };
+    let effective_path = home.join(paths::EFFECTIVE_PRESET);
+    if let Ok(effective) = std::fs::read_to_string(&effective_path) {
+        let base_rel = base_preset(home);
+        let base = std::fs::read_to_string(home.join(&base_rel)).map_err(|e| format!("cannot read {base_rel}: {e}"))?;
+        // An overlay both profiles serve is left where it stands.
+        let (was, will) = (golem_core::profile::chosen(&files, &from), golem_core::profile::chosen(&files, to));
+        let outgoing = read(was.iter().filter(|f| !will.contains(f)).cloned().collect());
+        let incoming = read(will.iter().filter(|f| !was.contains(f)).cloned().collect());
+        let text = golem_core::profile::switch(&effective, &base, &outgoing, &incoming);
+        std::fs::write(&effective_path, text).map_err(|e| format!("cannot write {}: {e}", paths::EFFECTIVE_PRESET))?;
+    }
+    config::set(home, "PROFILE", to).map_err(|e| format!("cannot write golem.toml: {e}"))?;
+    let own: Vec<String> = files
+        .iter()
+        .filter_map(|f| f.strip_suffix(&format!("@{to}.ini")).map(str::to_string))
+        .collect();
+    Ok(match (to == golem_core::profile::DEFAULT, own.is_empty()) {
+        (true, _) => "the coder profile: every preset as its coder tune serves it".to_string(),
+        (false, true) => format!("the {to} profile: no preset is tuned for it yet (golem tune <preset> --profile {to}), so each keeps the coder's"),
+        (false, false) => format!("the {to} profile: {} tuned for it, the rest keep the coder's", own.join(", ")),
+    })
+}
 
 /// How far the context may grow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +227,8 @@ impl Default for Options {
             ctx: CtxPolicy::Max,
             gate_tokens_max: 200_000,
             headroom_mib: VRAM_HEADROOM_MIB,
+            fresh: false,
+            profile: golem_core::profile::DEFAULT.to_string(),
         }
     }
 }
@@ -236,6 +304,19 @@ impl Options {
                     opts.engines = vec![name];
                 }
                 "--adopt" => opts.adopt = true,
+                "--fresh" => opts.fresh = true,
+                "--profile" => {
+                    let name = value("--profile")?;
+                    let profile = golem_core::profile::get(&name).ok_or_else(|| {
+                        let names: Vec<&str> = golem_core::profile::PROFILES.iter().map(|p| p.name).collect();
+                        format!("no profile {name:?}: {}", names.join(", "))
+                    })?;
+                    opts.profile = name;
+                    if let Some(ctx) = profile.ctx {
+                        opts.ctx = CtxPolicy::Pinned(ctx);
+                        opts.gate_tokens_max = golem_core::profile::gate_tokens(ctx);
+                    }
+                }
                 "--dry-run" => opts.dry_run = true,
                 "--min-decode" => opts.floor.decode = number(&value("--min-decode")?)? as f64,
                 "--min-prefill" => opts.floor.prefill = number(&value("--min-prefill")?)? as f64,
@@ -1762,21 +1843,19 @@ impl<'a> Tuner<'a> {
     /// the base, with every gated overlay this machine has for `engine`
     /// merged in. An overlay for a section the base does not have is skipped
     /// - merged, it would be a section with no model to serve.
-    fn effective_text(&self, engine: &str, overlay: &str) -> String {
+    /// The base preset with the overlays of `profile` merged
+    /// (`golem_core::profile::chosen`), this run's `overlay` in place of the
+    /// target's when one is given.
+    fn effective_text(&self, engine: &str, profile: &str, overlay: Option<&str>) -> String {
         let base = ini::parse(&self.preset_text);
         let mut text = self.preset_text.clone();
-        let own = format!("{}.ini", self.opts.target);
-        let mut others: Vec<PathBuf> = std::fs::read_dir(self.out_dir.join(engine))
-            .map(|entries| entries.flatten().map(|e| e.path()).collect())
-            .unwrap_or_default();
-        others.sort();
-        for path in others {
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let section = name.trim_end_matches(".ini");
-            if !name.ends_with(".ini") || name == own || base.get(section).is_none() {
+        let dir = self.out_dir.join(engine);
+        for name in golem_core::profile::chosen(&overlay_files(&dir), profile) {
+            let section = name.trim_end_matches(".ini").split('@').next().unwrap_or_default();
+            if base.get(section).is_none() || (overlay.is_some() && section == self.opts.target) {
                 continue;
             }
-            if let Ok(other) = std::fs::read_to_string(&path) {
+            if let Ok(other) = std::fs::read_to_string(dir.join(&name)) {
                 text = ini::write_overlay(&text, &other);
             }
         }
@@ -1790,26 +1869,35 @@ impl<'a> Tuner<'a> {
     fn stage(&self, engine: &str, overlay: &str) -> Result<String, String> {
         let rel = format!("data/tuned/candidates/{}-gate.ini", self.opts.target);
         std::fs::create_dir_all(&self.cand_dir).map_err(|e| format!("cannot create {}: {e}", self.cand_dir.display()))?;
-        std::fs::write(self.home.join(&rel), self.effective_text(engine, overlay))
+        std::fs::write(self.home.join(&rel), self.effective_text(engine, &self.opts.profile, Some(overlay)))
             .map_err(|e| format!("cannot write {rel}: {e}"))?;
         Ok(rel)
     }
 
     /// Make the winner this machine's: its overlay under `data/tuned/<host>/`
-    /// and the effective preset rebuilt from every overlay there.
+    /// (`<preset>@<profile>.ini` for a profile other than the coder's) and
+    /// the effective preset rebuilt from the overlays of the profile the
+    /// machine serves - which carries this one only when it is that profile.
     fn promote(&self, engine: &str, overlay: &str) -> Result<(), String> {
         let dir = self.out_dir.join(engine);
         std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        let overlay_path = dir.join(format!("{}.ini", self.opts.target));
-        let effective = self.effective_text(engine, overlay);
+        let overlay_path = dir.join(golem_core::profile::overlay_file(&self.opts.target, &self.opts.profile));
         std::fs::write(&overlay_path, overlay)
             .map_err(|e| format!("cannot write {}: {e}", overlay_path.display()))?;
+        let serving = active_profile(self.home);
+        let effective = self.effective_text(engine, &serving, None);
         std::fs::write(self.home.join(paths::EFFECTIVE_PRESET), effective)
             .map_err(|e| format!("cannot write {}: {e}", paths::EFFECTIVE_PRESET))?;
         self.emit(format_args!(
             "[ OK ] overlay: {}",
             overlay_path.strip_prefix(self.home).unwrap_or(&overlay_path).display()
         ));
+        if serving != self.opts.profile {
+            self.emit(format_args!(
+                "       this machine serves the {serving} profile: `golem profile {}` serves this one",
+                self.opts.profile
+            ));
+        }
         Ok(())
     }
 
@@ -2117,6 +2205,12 @@ mod tests {
         assert_eq!(doc.value("a", "n-cpu-moe"), Some("35"), "this run's overlay, not the old one: {text}");
         assert_eq!(doc.value("b", "n-cpu-moe"), Some("7"), "the other preset keeps its tune: {text}");
         assert!(doc.get("gone").is_none(), "no section without a model: {text}");
+        // A chat overlay serves under the chat profile only; b keeps the coder's.
+        std::fs::write(host.join("a@chat.ini"), "[a]\nn-cpu-moe = 20\nctx-size = 32768\n").expect("write");
+        let coder = ini::parse(&tuner.effective_text("llama.cpp", "coder", None));
+        assert_eq!(coder.value("a", "n-cpu-moe"), Some("1"));
+        let chat = ini::parse(&tuner.effective_text("llama.cpp", "chat", None));
+        assert_eq!((chat.value("a", "n-cpu-moe"), chat.value("b", "n-cpu-moe")), (Some("20"), Some("7")));
         std::fs::remove_dir_all(&dir).ok();
     }
 
