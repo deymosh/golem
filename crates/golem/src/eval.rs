@@ -126,8 +126,8 @@ pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
 pub fn run_with(home: &Path, args: &[String], out: &mut dyn Write, progress: bool) -> i32 {
     // The command line first: a bad argument is refused before anything is
     // printed or any request is made.
-    let long = match parse_args(args) {
-        Ok(long) => long,
+    let Args { long, agent } = match parse_args(args) {
+        Ok(args) => args,
         Err(arg) => {
             // stderr, so it is not part of what the recorder captures.
             eprintln!("unknown arg: {arg}");
@@ -153,7 +153,7 @@ pub fn run_with(home: &Path, args: &[String], out: &mut dyn Write, progress: boo
         .unwrap_or_else(|| DEFAULT_ALIAS.to_string());
     let temperature = setting(home, "TEMPERATURE", DEFAULT_TEMPERATURE);
     let top_p = setting(home, "TOP_P", DEFAULT_TOP_P);
-    let mut steps = Steps::new(long.is_some(), progress);
+    let mut steps = Steps::new(long.is_some(), agent, progress);
 
     // ------------------------------------------------------------
     // 1. HEALTH + IDENTITY
@@ -315,8 +315,12 @@ pub fn run_with(home: &Path, args: &[String], out: &mut dyn Write, progress: boo
         // the engine stopped answering prints why and leaves no RESULT
         // line, which the floor reads as not passed.
         section(out, "6. AGENT SUITE (both APIs)");
-        steps.next(out, "agent suite");
-        let _ = crate::agent::suite(&base, &model, &[Api::Anthropic, Api::OpenAi], None, Some(&crate::agent::reports_dir(home)), out);
+        if agent {
+            steps.next(out, "agent suite");
+            let _ = crate::agent::suite(&base, &model, &[Api::Anthropic, Api::OpenAi], None, Some(&crate::agent::reports_dir(home)), out);
+        } else {
+            let _ = writeln!(out, "not run (--no-agent): the caller keeps an earlier run of this setup's suite");
+        }
     }
 
     // ------------------------------------------------------------
@@ -348,8 +352,13 @@ struct Steps {
 }
 
 impl Steps {
-    fn new(long: bool, on: bool) -> Steps {
-        Steps { on, done: 0, total: if long { 9 } else { 6 } }
+    fn new(long: bool, agent: bool, on: bool) -> Steps {
+        let total = match (long, agent) {
+            (false, _) => 6,
+            (true, true) => 9,
+            (true, false) => 8,
+        };
+        Steps { on, done: 0, total }
     }
 
     /// The request about to run.
@@ -365,16 +374,29 @@ impl Steps {
 // The command line
 // ---------------------------------------------------------------
 
-/// `--long TOKENS`, and nothing else.
-///
-/// `Ok(None)` is no `--long` at all, which is what skips section 5. A flag
-/// with a missing or empty value is a *different* thing: 32768 tokens,
-/// measured.
-fn parse_args(args: &[String]) -> Result<Option<String>, String> {
+/// The command line: `--long TOKENS` and `--no-agent`.
+#[derive(Debug, PartialEq)]
+struct Args {
+    /// `None` is no `--long` at all, which is what skips section 5. A flag
+    /// with a missing or empty value is a *different* thing: 32768 tokens,
+    /// measured.
+    long: Option<String>,
+    /// Whether `--long` goes on to the agent suite: off with `--no-agent`,
+    /// which the tuner's gate passes when it keeps the suite from an
+    /// earlier gate of the same setup (`golem_core::tune::kept_agent`).
+    agent: bool,
+}
+
+fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut long = None;
+    let mut agent = true;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--no-agent" => {
+                agent = false;
+                i += 1;
+            }
             "--long" => {
                 let value = args
                     .get(i + 1)
@@ -392,7 +414,7 @@ fn parse_args(args: &[String]) -> Result<Option<String>, String> {
             other => return Err(other.to_string()),
         }
     }
-    Ok(long)
+    Ok(Args { long, agent })
 }
 
 /// One golem.toml value, or `default` when it is missing or empty.
@@ -807,29 +829,34 @@ fn best_of(speeds: &[Option<String>]) -> String {
 /// The haystack is sized by the server's own tokenizer rather than by the
 /// characters-per-token guess: that ratio belongs to the model's tokenizer,
 /// and a gate that asks for 200K while sending 165K is testing something
-/// else. One correction pass against the measured count is enough - the
-/// ratio is linear enough that a second is noise.
+/// else. One count is enough: the haystack is its filler line repeated, so
+/// the ratio the first pass measures sizes the second within a few tokens
+/// of the target (199998 of 200000 on every gate of the reference box), and
+/// the needle's `prompt_n` says what the engine read.
 fn long_context(out: &mut dyn Write, base: &Base, model: &str, long: &str, steps: &mut Steps) {
     section(out, &format!("5. NEEDLE-IN-HAYSTACK (~{long} tokens) + DECODE AT DEPTH"));
 
     let target: f64 = long.trim().parse().unwrap_or(0.0);
     let mut bodies = haystack_bodies(model, target, CHARS_PER_TOKEN);
-    let mut counted = tokenize_count(base, &bodies.tokenize);
-    if counted.is_some_and(|count| count > 0) {
-        if counted != Some(target as u64) {
+    match tokenize_count(base, &bodies.tokenize) {
+        Some(counted) => {
             // The corrected ratio, rounded to three decimals so a rerun
             // builds the same haystack.
-            let corrected = format!("{:.3}", CHARS_PER_TOKEN * target / counted.unwrap_or(1) as f64);
-            bodies = haystack_bodies(model, target, corrected.parse().unwrap_or(CHARS_PER_TOKEN));
-            counted = tokenize_count(base, &bodies.tokenize);
+            let corrected = format!("{:.3}", CHARS_PER_TOKEN * target / counted as f64);
+            if counted != target as u64 {
+                bodies = haystack_bodies(model, target, corrected.parse().unwrap_or(CHARS_PER_TOKEN));
+            }
+            let _ = writeln!(
+                out,
+                "haystack: sized for {long} tokens at {corrected} chars/token (the server counted {counted} at {CHARS_PER_TOKEN})"
+            );
         }
-        let count = counted.map(|count| count.to_string()).unwrap_or_default();
-        let _ = writeln!(out, "haystack: {count} tokens (asked for {long})");
-    } else {
-        let _ = writeln!(
-            out,
-            "haystack: sized by the {CHARS_PER_TOKEN} chars/token estimate (no /tokenize on this engine)"
-        );
+        None => {
+            let _ = writeln!(
+                out,
+                "haystack: sized by the {CHARS_PER_TOKEN} chars/token estimate (no /tokenize on this engine)"
+            );
+        }
     }
 
     // The needle first, the depth request second: the follow-up shares the
@@ -1069,13 +1096,18 @@ mod tests {
     // -----------------------------------------------------------
 
     #[test]
-    fn the_command_line_takes_only_the_long_flag() {
+    fn the_command_line_takes_the_long_flag_and_no_agent() {
+        let long = |tokens: Option<&str>| Ok(Args { long: tokens.map(str::to_string), agent: true });
         // No `--long`: no long-context section at all.
-        assert_eq!(parse_args(&[]), Ok(None));
+        assert_eq!(parse_args(&[]), long(None));
         // `--long` with no value, and with an empty one: both ask for 32768.
-        assert_eq!(parse_args(&args(&["--long"])), Ok(Some("32768".to_string())));
-        assert_eq!(parse_args(&args(&["--long", ""])), Ok(Some("32768".to_string())));
-        assert_eq!(parse_args(&args(&["--long", "200000"])), Ok(Some("200000".to_string())));
+        assert_eq!(parse_args(&args(&["--long"])), long(Some("32768")));
+        assert_eq!(parse_args(&args(&["--long", ""])), long(Some("32768")));
+        assert_eq!(parse_args(&args(&["--long", "200000"])), long(Some("200000")));
+        assert_eq!(
+            parse_args(&args(&["--long", "200000", "--no-agent"])),
+            Ok(Args { long: Some("200000".to_string()), agent: false })
+        );
         // Anything else is refused, and the message is the argument itself.
         assert_eq!(parse_args(&args(&["--bogus"])), Err("--bogus".to_string()));
         assert_eq!(
@@ -1394,9 +1426,9 @@ mod tests {
     fn the_long_context_section_reports_the_needle_and_the_depth_speed() {
         let mut replies = short_run("391", tool_reply("Munich"));
         // The first count is wrong (120 for 100 asked), so the run corrects
-        // the ratio once and re-counts - which is what the second answer is.
+        // the ratio once and sends the corrected haystack without a second
+        // count: the needle's `prompt_n` is the count of what was read.
         replies.push(tokenize_reply(120));
-        replies.push(tokenize_reply(98));
         replies.push(
             "{\"choices\": [{\"message\": {\"content\": \"8127\"}}], \
              \"timings\": {\"prompt_n\": 120, \"prompt_per_second\": 19311.0}}"
@@ -1416,7 +1448,10 @@ mod tests {
             text.contains(" 5. NEEDLE-IN-HAYSTACK (~100 tokens) + DECODE AT DEPTH\n"),
             "{text}"
         );
-        assert!(text.contains("haystack: 98 tokens (asked for 100)\n"), "{text}");
+        assert!(
+            text.contains("haystack: sized for 100 tokens at 3.917 chars/token (the server counted 120 at 4.7)\n"),
+            "{text}"
+        );
         assert!(text.contains("needle : prompt=120 tok @ 19311 t/s; answer: 8127\n"), "{text}");
         assert!(
             text.contains("depth  : prompt=120 tok @ 19311 t/s, gen=256 tok @ 254.3 t/s (prefix from cache)\n"),

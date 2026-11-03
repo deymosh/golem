@@ -39,6 +39,7 @@ use golem_core::evalparse::{self, Verdict as Gate};
 use golem_core::gguf;
 use golem_core::ini::{self, Entry};
 use golem_core::progress::Progress;
+use golem_core::results;
 use golem_core::time;
 use golem_core::tune::{self, ContextSearch, Exclusion, Floor, Phase, Point, Probe, Rung, RungOutcome};
 
@@ -113,6 +114,9 @@ pub struct Options {
     pub prefill: u32,
     pub gate: bool,
     pub refine: bool,
+    /// Measure the split frontier and stop: no refine, no context growth,
+    /// no gate (`--frontier`, `tune --auto`'s cheap pass).
+    pub frontier: bool,
     /// Explicit offload splits instead of the sweep around the seed.
     pub candidates: Vec<u32>,
     pub adopt: bool,
@@ -220,6 +224,7 @@ impl Default for Options {
             prefill: 8000,
             gate: true,
             refine: true,
+            frontier: false,
             candidates: Vec::new(),
             adopt: false,
             dry_run: false,
@@ -284,6 +289,11 @@ impl Options {
                 "--no-gate" => opts.gate = false,
                 "--refine" => opts.refine = true,
                 "--no-refine" => opts.refine = false,
+                "--frontier" => {
+                    opts.frontier = true;
+                    opts.refine = false;
+                    opts.gate = false;
+                }
                 "--candidates" => {
                     opts.candidates = value("--candidates")?
                         .split(',')
@@ -524,6 +534,11 @@ struct Tuner<'a> {
     ubatch: String,
     port: u16,
     points: Vec<Measured>,
+    /// The points earlier runs measured on this host
+    /// (`data/tuned/<host>/points.jsonl`), and the model file as their key
+    /// names it (`<file>:<bytes>`).
+    kept: Vec<tune::Kept>,
+    model_id: String,
     /// MiB per context token, measured by an earlier context search, by
     /// [`slope_key`]: the next candidate with the same key starts from it.
     ctx_slopes: Vec<(String, f64)>,
@@ -652,9 +667,20 @@ impl<'a> Tuner<'a> {
             .map_err(|e| format!("cannot read {}: {e}", model_path.display()))?;
         let out_dir = home.join("data/tuned").join(machine.host_slug());
         let port = engine::Endpoint::from_home(home).port;
-        let ctx_seed =
-            doc.value(&opts.target, "ctx-size").and_then(|v| v.parse().ok()).unwrap_or(4096);
+        // A pinned context is the one every point is measured at: a split
+        // found at the coder's 236544 tokens is not the one 32768 leaves room
+        // for.
+        let ctx_seed = match opts.ctx {
+            CtxPolicy::Pinned(pin) => pin,
+            _ => doc.value(&opts.target, "ctx-size").and_then(|v| v.parse().ok()).unwrap_or(4096),
+        };
         let ubatch = doc.value(&opts.target, "ubatch-size").unwrap_or_default().to_string();
+        let model_id = format!("{model_file}:{}", std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0));
+        let kept = std::fs::read_to_string(out_dir.join(KEPT_POINTS))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(tune::Kept::parse)
+            .collect();
         Ok(Tuner {
             home,
             opts,
@@ -669,6 +695,8 @@ impl<'a> Tuner<'a> {
             ubatch,
             port,
             points: Vec::new(),
+            kept,
+            model_id,
             ctx_slopes: Vec::new(),
             out: RefCell::new(out),
             progress: !std::io::stdout().is_terminal(),
@@ -1213,6 +1241,15 @@ impl<'a> Tuner<'a> {
     /// continues either way, but a point that produced no number is not a
     /// point.
     fn measure(&mut self, engine: &str, label: &str, overrides: &[Entry]) -> Option<()> {
+        // Under a pinned context every point carries it, the frontier's too.
+        let pinned: Vec<Entry>;
+        let overrides = match self.opts.ctx {
+            CtxPolicy::Pinned(pin) if !overrides.iter().any(|e| e.key == "ctx-size") => {
+                pinned = std::iter::once(Entry::new("ctx-size", pin.to_string())).chain(overrides.iter().cloned()).collect();
+                &pinned[..]
+            }
+            _ => overrides,
+        };
         let candidate_rel = format!("data/tuned/candidates/{}-{label}.ini", self.opts.target);
         let candidate = self.home.join(&candidate_rel);
         std::fs::create_dir_all(&self.cand_dir).ok()?;
@@ -1227,12 +1264,20 @@ impl<'a> Tuner<'a> {
         // by the number, so the placement is measured in the cheap mode.
         //
         // The gate is where the real mode is measured, and it is the one that
-        // decides: one load, the preset's own flags, the serving config. And
+        // decides: one load, the preset's own flags, the serving config - as
+        // the engine is served them, so a mode the backend's build cannot
+        // load (`mlock` under b11379's Vulkan) is gated as the adapter's
+        // `served.*` key replaces it (`launch::plan`). And
         // the override deliberately does not enter `Measured::overrides`, so
         // the winner's overlay keeps the `load-mode` the preset serves with.
         let for_file = candidate_overrides(self.locks_ram(), overrides);
         let text = ini::write_candidate(&self.preset_text, &self.opts.target, &for_file);
+        let key = self.point_key(engine, &text);
         std::fs::write(&candidate, text).ok()?;
+        if let Some(kept) = key.as_deref().and_then(|key| self.kept_point(key)) {
+            self.reuse(engine, label, overrides, &kept);
+            return Some(());
+        }
 
         self.load();
         self.emit(format_args!("  {engine} {label}: restarting..."));
@@ -1356,7 +1401,88 @@ impl<'a> Tuner<'a> {
             wall_only: over_wall.is_some(),
             after_load_mib: after_load_reading(&text),
         });
+        if let Some(key) = key {
+            let point = self.points.last().cloned().expect("just pushed");
+            self.keep(key, &point);
+        }
         Some(())
+    }
+
+    /// The reuse key of the candidate `text` on `engine`
+    /// (`golem_core::tune::point_key`), or `None` when the engine's build
+    /// cannot be named - such a point is measured and not kept.
+    fn point_key(&self, engine: &str, text: &str) -> Option<String> {
+        let plan = crate::launch::plan(self.home, &Overrides::default().with("ENGINE", engine)).ok()?;
+        let flags = golem_core::record::preset_flags(text, &self.opts.target);
+        let build = format!("{}-{}", plan.build, plan.backend);
+        Some(tune::point_key(&self.model_id, engine, &build, &flags, self.opts.runs, self.opts.prefill))
+    }
+
+    /// A kept point that stands for this one now, unless the run was asked
+    /// to measure everything again.
+    fn kept_point(&self, key: &str) -> Option<tune::Kept> {
+        if self.opts.fresh {
+            return None;
+        }
+        let wall = self.machine.wall_mib(self.opts.headroom_mib);
+        tune::reuse(&self.kept, key, self.machine.vram_used_mib as f64, wall)
+    }
+
+    /// Take a kept point as this run's measurement: no load, no bench, no
+    /// row - the row was recorded when it was measured.
+    fn reuse(&mut self, engine: &str, label: &str, overrides: &[Entry], kept: &tune::Kept) {
+        let value = |key: &str| overrides.iter().rev().find(|e| e.key == key).map(|e| e.value.clone());
+        let measured = Measured {
+            engine: engine.to_string(),
+            label: label.to_string(),
+            decode: kept.decode,
+            decode_best: kept.decode_best,
+            prefill: kept.prefill,
+            vram_mib: kept.vram_mib,
+            ctx: value("ctx-size").and_then(|v| v.parse().ok()).unwrap_or(self.ctx_seed),
+            ubatch: value("ubatch-size").unwrap_or_else(|| self.ubatch.clone()).parse().unwrap_or(0),
+            overrides: overrides.to_vec(),
+            n_cpu_moe: value("n-cpu-moe").unwrap_or_default(),
+            passed_gate: None,
+            depth_decode: None,
+            wall_only: kept.wall_only,
+            after_load_mib: kept.after_load_mib,
+        };
+        let day = kept.ts.get(..10).unwrap_or(&kept.ts);
+        if kept.wall_only {
+            self.emit(format_args!(
+                "  {engine:<14} {label:<12} over the wall: {:.0} MiB, kept from {day}, not loaded",
+                kept.vram_mib
+            ));
+        } else {
+            self.emit(format_args!(
+                "  {engine:<14} {label:<12} decode {:>6.1} t/s  prefill {:>6.0} t/s  vram {:>5.0} MiB  (kept from {day}, not loaded)",
+                kept.decode, kept.prefill, kept.vram_mib
+            ));
+        }
+        self.points.push(measured);
+    }
+
+    /// Keep a measured point for later runs, with the desktop's share at
+    /// this run's start.
+    fn keep(&mut self, key: String, m: &Measured) {
+        let kept = tune::Kept {
+            key,
+            ts: time::now_iso(),
+            desktop_mib: self.machine.vram_used_mib as f64,
+            decode: m.decode,
+            decode_best: m.decode_best,
+            prefill: m.prefill,
+            vram_mib: m.vram_mib,
+            wall_only: m.wall_only,
+            after_load_mib: m.after_load_mib,
+        };
+        let path = self.out_dir.join(KEPT_POINTS);
+        let _ = std::fs::create_dir_all(&self.out_dir);
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(file, "{}", kept.to_json());
+        }
+        self.kept.push(kept);
     }
 
     /// Restart the engine on `preset`, asked of the service with the
@@ -1543,6 +1669,14 @@ impl<'a> Tuner<'a> {
                     "[ OK ] candidate winner: {engine} {} ({:.1} t/s decode)",
                     self.points[candidate].label, self.points[candidate].decode
                 ));
+                // The cheap pass ranks presets by what their frontier
+                // measured; the full tune of the one it picks grows the
+                // context and gates it, with these points kept.
+                if self.opts.frontier {
+                    self.emit(format_args!("  [ .. ] frontier only (--frontier): the context is not grown, nothing is gated"));
+                    let n_cpu_moe = self.points[candidate].n_cpu_moe.clone();
+                    return Ok(self.verdict(candidate, &engine, n_cpu_moe, None));
+                }
                 // The second pass holds points whose context was already grown.
                 let key = if pass == 0 { self.maximize_ctx(candidate) } else { candidate };
                 let ctx = self.points[key].ctx;
@@ -1585,7 +1719,8 @@ impl<'a> Tuner<'a> {
                     self.emit(format_args!("  [WARN] the engine did not come back on the effective preset - trying the next candidate"));
                     continue;
                 }
-                let eval = self.gate(&engine, &staged, gate_tokens);
+                let kept = self.kept_agent(&engine, &staged, ctx);
+                let eval = self.gate(&engine, &staged, gate_tokens, kept.as_ref());
                 // A gate whose model did not load says nothing about the
                 // candidate's needle, and the next candidate loads the same way:
                 // the sweep loaded every point with mmap, the gate with the
@@ -1671,7 +1806,7 @@ impl<'a> Tuner<'a> {
         let overrides = self.points[candidate].overrides.clone();
 
         if let CtxPolicy::Pinned(pin) = self.opts.ctx {
-            let mut with_ctx = overrides.clone();
+            let mut with_ctx: Vec<Entry> = overrides.iter().filter(|e| e.key != "ctx-size").cloned().collect();
             with_ctx.push(Entry::new("ctx-size", pin.to_string()));
             let label = format!("{engine}-ctx{pin}");
             if self.measure(&engine, &label, &with_ctx).is_some() {
@@ -1859,7 +1994,10 @@ impl<'a> Tuner<'a> {
                 text = ini::write_overlay(&text, &other);
             }
         }
-        ini::write_overlay(&text, overlay)
+        match overlay {
+            Some(overlay) => ini::write_overlay(&text, overlay),
+            None => text,
+        }
     }
 
     /// The preset file the gate serves the winner from: a candidate, so
@@ -1901,24 +2039,64 @@ impl<'a> Tuner<'a> {
         Ok(())
     }
 
+    /// The agent suite an earlier gate ran on this setup, when it stands for
+    /// this gate's (`golem_core::tune::kept_agent`), unless the run was asked
+    /// to measure everything again.
+    fn kept_agent(&self, engine: &str, staged: &str, ctx: u64) -> Option<results::Row> {
+        if self.opts.fresh {
+            return None;
+        }
+        let plan = crate::launch::plan(self.home, &Overrides::default().with("ENGINE", engine)).ok()?;
+        let text = std::fs::read_to_string(self.home.join(staged)).ok()?;
+        let (rows, _) = results::read(&paths::results(self.home)).ok()?;
+        let setup = tune::GateSetup {
+            host: self.machine.host_slug(),
+            model_file: Path::new(&self.model_file).file_name()?.to_string_lossy().into_owned(),
+            engine: engine.to_string(),
+            build: plan.build,
+            backend: plan.backend,
+            flags: golem_core::record::preset_flags(&text, &self.opts.target),
+            ctx,
+        };
+        tune::kept_agent(&rows, &setup, self.opts.floor.agent).cloned()
+    }
+
     /// `eval --long N` against the staged preset, read through the
     /// RESULT-line contract. A child, like the bench, so it records its own
-    /// row under the preset it actually measured.
-    fn gate(&self, engine: &str, preset: &str, tokens: u64) -> Option<evalparse::Eval> {
+    /// row under the preset it actually measured. With a `kept` suite the
+    /// child skips its own (`--no-agent`) and the gate holds the kept one
+    /// to the floor: half a coder's tune was that suite.
+    fn gate(&self, engine: &str, preset: &str, tokens: u64, kept: Option<&results::Row>) -> Option<evalparse::Eval> {
         let out_file = self.out_dir.join(format!("eval-{}.txt", self.opts.target));
-        let args = vec!["eval".to_string(), "--long".to_string(), tokens.to_string()];
+        let mut args = vec!["eval".to_string(), "--long".to_string(), tokens.to_string()];
+        let mut note = format!("tune {}: {tokens}-token needle gate", self.opts.target);
+        if let Some(row) = kept {
+            args.push("--no-agent".to_string());
+            note.push_str(&format!(", agent suite kept from {}", row.ts));
+            let scores: Vec<String> = row.agent.iter().map(|s| format!("{} {}/{}", s.api, s.solved, s.total)).collect();
+            self.emit(format_args!(
+                "  agent suite kept from the gate of {} at {} tokens ({}): same model file, build and answering flags",
+                row.ts,
+                row.ctx.unwrap_or_default(),
+                scores.join(", ")
+            ));
+        }
         let mut command = proc::golem(self.home, &args).ok()?;
         command
             .env("GOLEM_ENGINE", engine)
             .env("GOLEM_MODEL_ALIAS", &self.opts.target)
             .env("GOLEM_MODELS_PRESET", preset)
-            .env("RECORD_NOTE", format!("tune {}: {tokens}-token needle gate", self.opts.target));
+            .env("RECORD_NOTE", note);
         proc::run_to_file(command, &out_file).ok()?;
         let text = std::fs::read_to_string(&out_file).unwrap_or_default();
         for line in text.lines().rev().filter(|l| l.trim_start().starts_with("RESULT")) {
             self.emit(format_args!("    {line}"));
         }
-        Some(evalparse::Eval::parse(text.lines()))
+        let mut eval = evalparse::Eval::parse(text.lines());
+        if let Some(row) = kept {
+            eval.agent = row.agent.clone();
+        }
+        Some(eval)
     }
 
     fn verdict(&self, key: usize, engine: &str, n_cpu_moe: String, gated: Option<u64>) -> Verdict {
@@ -2200,7 +2378,7 @@ mod tests {
         tuner.opts.target = "a".into();
         tuner.out_dir = dir.join("data/tuned/host");
         tuner.preset_text = "[a]\nmodel = a.gguf\nn-cpu-moe = 30\n[b]\nmodel = b.gguf\n".into();
-        let text = tuner.effective_text("llama.cpp", "[a]\nn-cpu-moe = 35\n");
+        let text = tuner.effective_text("llama.cpp", "coder", Some("[a]\nn-cpu-moe = 35\n"));
         let doc = ini::parse(&text);
         assert_eq!(doc.value("a", "n-cpu-moe"), Some("35"), "this run's overlay, not the old one: {text}");
         assert_eq!(doc.value("b", "n-cpu-moe"), Some("7"), "the other preset keeps its tune: {text}");
@@ -2267,6 +2445,8 @@ mod tests {
             ubatch: String::new(),
             port: 8000,
             points: Vec::new(),
+            kept: Vec::new(),
+            model_id: String::new(),
             ctx_slopes: Vec::new(),
             out: RefCell::new(Box::new(std::io::sink())),
             progress: false,
@@ -2359,6 +2539,10 @@ mod tests {
         assert_eq!(opts.engines, vec!["llama.cpp".to_string()]);
         assert_eq!(opts.floor.decode, 5.0, "a flag beats the file");
         assert_eq!(opts.ctx, CtxPolicy::Max);
+        assert!(!opts.frontier);
+        // `--frontier` is the frontier and nothing after it.
+        let frontier = Options::parse(&dir, &["smoke".to_string(), "--frontier".to_string()]).expect("frontier");
+        assert!(frontier.frontier && !frontier.refine && !frontier.gate);
         std::fs::remove_dir_all(&dir).ok();
     }
 

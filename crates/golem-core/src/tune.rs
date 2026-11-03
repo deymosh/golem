@@ -639,6 +639,156 @@ pub fn required_ctx(gate_tokens: u64, ctx_train: u64) -> u64 {
     }
 }
 
+/// A measured point kept for later runs (`data/tuned/<host>/points.jsonl`):
+/// what one candidate measured, under the key that says when it is the same
+/// candidate ([`point_key`]), with the desktop's share of the card at the
+/// start of the run that measured it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Kept {
+    pub key: String,
+    pub ts: String,
+    pub desktop_mib: f64,
+    pub decode: f64,
+    pub decode_best: f64,
+    pub prefill: f64,
+    pub vram_mib: f64,
+    /// The load went over the wall and was not benched.
+    pub wall_only: bool,
+    pub after_load_mib: Option<f64>,
+}
+
+/// A candidate's identity for reuse: the model file, the engine and its
+/// build on its backend, the candidate's effective flags in order, and the
+/// bench's runs and prefill size. A change to any of them is another point.
+pub fn point_key(model: &str, engine: &str, build: &str, flags: &[(String, String)], runs: u32, prefill: u32) -> String {
+    let mut flags: Vec<String> = flags.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    flags.sort();
+    format!("{model}|{engine}|{build}|{}|runs={runs}|prefill={prefill}", flags.join(","))
+}
+
+impl Kept {
+    pub fn to_json(&self) -> String {
+        use crate::json::Value;
+        let num = |n: f64| crate::json::parse(&format!("{n}")).unwrap_or(Value::Null);
+        Value::object(vec![
+            ("key", Value::str(&self.key)),
+            ("ts", Value::str(&self.ts)),
+            ("desktop_mib", num(self.desktop_mib)),
+            ("decode", num(self.decode)),
+            ("decode_best", num(self.decode_best)),
+            ("prefill", num(self.prefill)),
+            ("vram_mib", num(self.vram_mib)),
+            ("wall_only", Value::Bool(self.wall_only)),
+            ("after_load_mib", self.after_load_mib.map_or(Value::Null, num)),
+        ])
+        .to_json()
+    }
+
+    /// One line of the file read back; `None` for a line that is not one.
+    pub fn parse(line: &str) -> Option<Kept> {
+        let v = crate::json::parse(line).ok()?;
+        let f = |k: &str| v.get(k).and_then(crate::json::Value::as_f64);
+        Some(Kept {
+            key: v.get("key")?.as_str()?.to_string(),
+            ts: v.get("ts").and_then(|t| t.as_str()).unwrap_or_default().to_string(),
+            desktop_mib: f("desktop_mib")?,
+            decode: f("decode")?,
+            decode_best: f("decode_best").unwrap_or(0.0),
+            prefill: f("prefill").unwrap_or(0.0),
+            vram_mib: f("vram_mib")?,
+            wall_only: v.get("wall_only").and_then(|b| b.as_bool()).unwrap_or(false),
+            after_load_mib: f("after_load_mib"),
+        })
+    }
+}
+
+/// Whether a kept point stands for a measurement now, and as what: the
+/// newest one under `key` in `kept`, its readings moved by how far the
+/// desktop's share moved since (`desktop_now_mib`). It stands when the
+/// desktop moved no more than a reading's noise ([`READING_NOISE_MIB`]) -
+/// the speeds are the same setup's - or when it read over the wall and the
+/// moved reading still is, whichever way the desktop went. Anything else is
+/// measured again.
+pub fn reuse(kept: &[Kept], key: &str, desktop_now_mib: f64, wall_mib: u64) -> Option<Kept> {
+    let newest = kept.iter().filter(|k| k.key == key).max_by(|a, b| a.ts.cmp(&b.ts))?;
+    let drift = desktop_now_mib - newest.desktop_mib;
+    let moved = Kept {
+        vram_mib: newest.vram_mib + drift,
+        after_load_mib: newest.after_load_mib.map(|m| m + drift),
+        desktop_mib: desktop_now_mib,
+        ..newest.clone()
+    };
+    if drift.abs() <= READING_NOISE_MIB {
+        return Some(moved);
+    }
+    (newest.wall_only && moved.vram_mib > wall_mib as f64).then_some(moved)
+}
+
+/// The flags that place a model on the machine: how much of it sits on the
+/// card, how much context it holds, how it is batched, threaded and loaded.
+/// They move its speed and its memory, not what it answers.
+pub const PLACEMENT_FLAGS: &[&str] = &[
+    "ctx-size",
+    "n-cpu-moe",
+    "n-gpu-layers",
+    "batch-size",
+    "ubatch-size",
+    "threads",
+    "threads-batch",
+    "load-mode",
+    "fit",
+    "fit-target",
+    "fit-ctx",
+];
+
+/// A gate's setup, as [`kept_agent`] matches it against the rows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GateSetup {
+    pub host: String,
+    pub model_file: String,
+    pub engine: String,
+    /// The adapter's pin (`b11379`); a row records the engine's own
+    /// `<pin>-<commit>` (`b11379-1537a0a8b`).
+    pub build: String,
+    pub backend: String,
+    /// The setup's effective flags, as a row records them.
+    pub flags: Vec<(String, String)>,
+    pub ctx: u64,
+}
+
+/// The agent suite an earlier gate ran that stands for this one's: the
+/// newest eval row of the same host that ran today's suite (every task of
+/// [`crate::agent::TASKS`]) on both APIs, with
+/// the same model file, engine, build and backend and the same flags but
+/// the placement ones ([`PLACEMENT_FLAGS`]), at a context no larger than
+/// this setup's - the suite's turns fit in what it had. The suite asks at
+/// temperature 0 with a fixed token cap, so what it measures is the model,
+/// the build and the flags that change the answer; a split or a context
+/// moves the speed. `None` when there is no such row, or when the newest one
+/// is under `floor`: a suite that failed is run again, not carried.
+pub fn kept_agent<'a>(rows: &'a [crate::results::Row], setup: &GateSetup, floor: f64) -> Option<&'a crate::results::Row> {
+    let answers = |flags: &[(String, String)]| {
+        let mut kept: Vec<(String, String)> =
+            flags.iter().filter(|(k, _)| !PLACEMENT_FLAGS.contains(&k.as_str())).cloned().collect();
+        kept.sort();
+        kept
+    };
+    let wanted = answers(&setup.flags);
+    let build = format!("{}-", setup.build);
+    let newest = rows
+        .iter()
+        .filter(|r| r.kind == crate::results::Kind::Eval)
+        .filter(|r| ["anthropic", "openai"].iter().all(|api| r.agent.iter().any(|s| s.api == *api)))
+        .filter(|r| r.agent.iter().all(|s| s.total as usize == crate::agent::TASKS.len()))
+        .filter(|r| r.host == setup.host && r.model_file == setup.model_file && r.engine == setup.engine)
+        .filter(|r| r.engine_build == setup.build || r.engine_build.starts_with(&build))
+        .filter(|r| r.served_backend() == setup.backend)
+        .filter(|r| answers(&r.flags) == wanted)
+        .filter(|r| r.ctx.is_some_and(|ctx| ctx <= setup.ctx))
+        .max_by(|a, b| a.ts.cmp(&b.ts))?;
+    crate::agent::passes(&newest.agent, floor).then_some(newest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1270,5 +1420,139 @@ mod tests {
         // answer rather than on a guess.
         let fits = vec![(32768, 6758), (240000, 11780)];
         assert_eq!(next_predicted(&fits, 11776, 262144, &Probe::Fits), Rung::Stop);
+    }
+
+    fn kept(key: &str, ts: &str, desktop: f64, vram: f64, wall_only: bool) -> Kept {
+        Kept {
+            key: key.into(),
+            ts: ts.into(),
+            desktop_mib: desktop,
+            decode: if wall_only { 0.0 } else { 62.1 },
+            decode_best: 0.0,
+            prefill: if wall_only { 0.0 } else { 850.0 },
+            vram_mib: vram,
+            wall_only,
+            after_load_mib: Some(vram - 70.0),
+        }
+    }
+
+    #[test]
+    fn a_point_key_is_the_candidate_whatever_the_flag_order() {
+        let a = [("n-cpu-moe".to_string(), "35".to_string()), ("ctx-size".to_string(), "248832".to_string())];
+        let b = [a[1].clone(), a[0].clone()];
+        let key = point_key("m.gguf:21713463040", "llama.cpp", "b11379-cuda", &a, 3, 4096);
+        assert_eq!(key, point_key("m.gguf:21713463040", "llama.cpp", "b11379-cuda", &b, 3, 4096));
+        assert_ne!(key, point_key("m.gguf:21713463040", "llama.cpp", "b11379-vulkan", &a, 3, 4096));
+        assert_ne!(key, point_key("m.gguf:21713463040", "llama.cpp", "b11379-cuda", &a, 5, 4096));
+    }
+
+    #[test]
+    fn a_kept_point_stands_while_the_desktop_holds_still() {
+        let points = vec![kept("k", "2026-10-29T10:00Z", 800.0, 11115.0, false), kept("k", "2026-10-30T10:00Z", 895.0, 11343.0, false)];
+        // The newest, its reading moved by the desktop's 60 MiB.
+        let same = reuse(&points, "k", 955.0, 11264).expect("within the noise");
+        assert_eq!((same.vram_mib, same.ts.as_str(), same.after_load_mib), (11403.0, "2026-10-30T10:00Z", Some(11333.0)));
+        assert!(reuse(&points, "k", 1100.0, 11264).is_none(), "the desktop moved 205 MiB: measured again");
+        assert!(reuse(&points, "other", 895.0, 11264).is_none());
+        // Over the wall stays over the wall while the moved reading is; the
+        // reference box's n31 read 11743 MiB at an 800 MiB desktop and stood
+        // at 466 (11409 MiB).
+        let over = vec![kept("w", "2026-10-30T10:00Z", 600.0, 11400.0, true)];
+        assert!(reuse(&over, "w", 900.0, 11264).is_some_and(|k| k.wall_only && k.vram_mib == 11700.0));
+        assert!(reuse(&over, "w", 300.0, 11264).is_none(), "300 MiB less desktop may fit");
+        let n31 = vec![kept("n31", "2026-11-03T00:50Z", 800.0, 11743.0, true)];
+        assert!(reuse(&n31, "n31", 466.0, 11264).is_some_and(|k| k.vram_mib == 11409.0));
+        let line = same.to_json();
+        assert_eq!(Kept::parse(&line), Some(same));
+        assert_eq!(Kept::parse("{}"), None);
+    }
+
+    /// The reference box's chat gate of 2026-11-03 (`n-cpu-moe 25` at 32768
+    /// tokens), as `results.jsonl` holds it, with `ts`, the split, the
+    /// context and the suite's scores to vary.
+    fn gate_row(ts: &str, n_cpu_moe: u32, ctx: u64, cache: &str, solved: [u32; 2]) -> crate::results::Row {
+        gate_row_of(ts, n_cpu_moe, ctx, cache, solved, crate::agent::TASKS.len())
+    }
+
+    fn gate_row_of(ts: &str, n_cpu_moe: u32, ctx: u64, cache: &str, solved: [u32; 2], total: usize) -> crate::results::Row {
+        let line = format!(
+            r#"{{"ts": "{ts}", "kind": "eval", "host": "rtx-3060_12g_32g_i7-12700kf", "gpu": "NVIDIA GeForce RTX 3060", "engine": "llama.cpp", "engine_build": "b11379-1537a0a8b", "backend": "cuda", "model": "ornith-1.5-35b", "model_file": "Ornith-1.5-35B-Q4_K_M.gguf", "ctx": {ctx}, "flags": {{"jinja": true, "flash-attn": "on", "n-gpu-layers": 99, "cache-type-k": "{cache}", "cache-type-v": "{cache}", "spec-type": "draft-mtp", "ctx-size": {ctx}, "load-mode": "mlock", "n-cpu-moe": {n_cpu_moe}, "batch-size": 2048, "ubatch-size": 2048, "temp": 0.6, "fit": "off"}}, "eval": {{"tools": "PASS", "needle": "PASS"}}, "agent": {{"anthropic": {{"solved": {}, "total": {total}}}, "openai": {{"solved": {}, "total": {total}}}}}}}"#,
+            solved[0], solved[1]
+        );
+        crate::results::Row::parse(&line).expect("a row")
+    }
+
+    fn coder_setup(ctx: u64) -> GateSetup {
+        let flags = [
+            ("jinja", "true"),
+            ("flash-attn", "on"),
+            ("n-gpu-layers", "99"),
+            ("cache-type-k", "q8_0"),
+            ("cache-type-v", "q8_0"),
+            ("spec-type", "draft-mtp"),
+            ("ctx-size", "242688"),
+            ("load-mode", "mlock"),
+            ("n-cpu-moe", "35"),
+            ("batch-size", "2048"),
+            ("ubatch-size", "1024"),
+            ("temp", "0.6"),
+            ("fit", "off"),
+        ];
+        GateSetup {
+            host: "rtx-3060_12g_32g_i7-12700kf".into(),
+            model_file: "Ornith-1.5-35B-Q4_K_M.gguf".into(),
+            engine: "llama.cpp".into(),
+            build: "b11379".into(),
+            backend: "cuda".into(),
+            flags: flags.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            ctx,
+        }
+    }
+
+    #[test]
+    fn a_gate_keeps_the_suite_of_the_same_setup_placed_elsewhere() {
+        let rows = vec![gate_row("2026-11-03T02:19Z", 25, 32768, "q8_0", [12, 12])];
+        // Another split, context and ubatch-size: the same answers.
+        let kept = kept_agent(&rows, &coder_setup(242688), 0.75).expect("kept");
+        assert_eq!(kept.ts, "2026-11-03T02:19Z");
+        // Less context than the suite had is not held to its result.
+        assert!(kept_agent(&rows, &coder_setup(16384), 0.75).is_none());
+        // Another build, backend, host or model file is another setup.
+        let changes: [fn(&mut GateSetup); 4] = [
+            |s| s.build = "b11936".into(),
+            |s| s.backend = "vulkan".into(),
+            |s| s.host = "other".into(),
+            |s| s.model_file = "Ornith-1.5-35B-Q5_K_M.gguf".into(),
+        ];
+        for change in changes {
+            let mut setup = coder_setup(242688);
+            change(&mut setup);
+            assert!(kept_agent(&rows, &setup, 0.75).is_none(), "{setup:?}");
+        }
+        // A flag that changes the answers is another setup.
+        let other_cache = vec![gate_row("2026-11-03T02:19Z", 25, 32768, "q4_0", [12, 12])];
+        assert!(kept_agent(&other_cache, &coder_setup(242688), 0.75).is_none());
+        // A suite of fewer tasks than today's is another suite.
+        let older = vec![gate_row_of("2026-11-03T02:19Z", 25, 32768, "q8_0", [11, 11], 11)];
+        assert!(kept_agent(&older, &coder_setup(242688), 0.75).is_none());
+    }
+
+    #[test]
+    fn a_kept_suite_is_the_newest_and_must_have_passed() {
+        let rows = vec![
+            gate_row("2026-11-03T01:44Z", 35, 32768, "q8_0", [12, 12]),
+            gate_row("2026-11-03T02:19Z", 25, 32768, "q8_0", [12, 8]),
+        ];
+        // The newest scored 8 of 12 on one API, under 75%: run it again.
+        assert!(kept_agent(&rows, &coder_setup(242688), 0.75).is_none());
+        assert_eq!(kept_agent(&rows, &coder_setup(242688), 0.6).map(|r| r.ts.as_str()), Some("2026-11-03T02:19Z"));
+        // A row whose suite ran on one API only does not stand for a gate's.
+        let one = crate::results::Row::parse(
+            r#"{"ts": "t", "kind": "eval", "model": "m", "host": "rtx-3060_12g_32g_i7-12700kf", "model_file": "Ornith-1.5-35B-Q4_K_M.gguf", "engine": "llama.cpp", "engine_build": "b11379", "backend": "cuda", "ctx": 1, "agent": {"anthropic": {"solved": 11, "total": 11}}}"#,
+        )
+        .expect("a row");
+        let mut setup = coder_setup(242688);
+        setup.flags.clear();
+        assert!(kept_agent(&[one], &setup, 0.75).is_none());
     }
 }

@@ -305,7 +305,7 @@ impl Row {
     /// a line of its own.
     pub fn configuration_key(&self) -> String {
         format!(
-            "{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}",
             self.host,
             self.identity(),
             self.engine,
@@ -419,6 +419,25 @@ pub fn read(path: &Path) -> std::io::Result<(Vec<Row>, Vec<(usize, String)>)> {
         }
     }
     Ok((rows, bad))
+}
+
+/// The share of the agent suite a model file solved in its newest run of
+/// the whole suite (every task of [`crate::agent::TASKS`]) on `host` - a
+/// gate's or `eval --agent`'s - on the API it did worse on, or `None` where
+/// it never ran there. A run of one task (`--task`) or of an older, smaller
+/// suite is another measure, and does not count.
+pub fn agent_share(rows: &[Row], host: &str, model_file: &str) -> Option<f64> {
+    let whole = crate::agent::TASKS.len() as u32;
+    let newest = rows
+        .iter()
+        .filter(|r| r.host == host && r.model_file == model_file)
+        .filter(|r| !r.agent.is_empty() && r.agent.iter().all(|s| s.total == whole))
+        .max_by(|a, b| a.ts.cmp(&b.ts))?;
+    newest
+        .agent
+        .iter()
+        .map(|s| s.solved as f64 / s.total as f64)
+        .fold(None, |worst: Option<f64>, share| Some(worst.map_or(share, |w| w.min(share))))
 }
 
 /// One line of the report: the best decode measured for a
@@ -745,6 +764,22 @@ mod tests {
     }
 
     #[test]
+    fn one_build_on_two_backends_is_two_configurations() {
+        let cuda = BENCH.replace(r#""engine_build": "b11379-1537a0a8b""#, r#""engine_build": "b11379-1537a0a8b", "backend": "cuda""#);
+        let vulkan = BENCH
+            .replace(r#""engine_build": "b11379-1537a0a8b""#, r#""engine_build": "b11379-1537a0a8b", "backend": "vulkan""#)
+            .replace(r#""decode_median": 59.3"#, r#""decode_median": 36.4"#);
+        let parse = |l: &str| Row::parse(l).expect("should parse");
+        // A row from before the field ran on its card's own backend.
+        assert_eq!(parse(BENCH).served_backend(), "cuda");
+        assert_eq!(parse(BENCH).configuration_key(), parse(&cuda).configuration_key());
+        let best = best_per_configuration(&[parse(&cuda), parse(&vulkan)]);
+        assert_eq!(best.len(), 2, "Vulkan's number is not a slower CUDA run");
+        let unknown = BENCH.replace(r#""gpu": "NVIDIA GeForce RTX 3060", "#, "");
+        assert_eq!(parse(&unknown).served_backend(), "");
+    }
+
+    #[test]
     fn two_hosts_are_two_configurations() {
         // The same model, engine, build, context and flags on another machine
         // is that machine's number, not a slower repeat of this one.
@@ -760,22 +795,6 @@ mod tests {
         assert_eq!(best[0].row.host, "rtx-3060_12g_32g_i7-12700kf");
         assert_eq!(best[1].row.host, "rtx-4090_24g_64g_i9-13900k");
         assert_eq!(best[1].row.decode_median.as_ref().map(|n| n.value), Some(61.0));
-    }
-
-    #[test]
-    fn one_build_on_two_backends_is_two_configurations() {
-        let cuda = BENCH.replace(r#""engine_build": "b11379-1537a0a8b""#, r#""engine_build": "b11379-1537a0a8b", "backend": "cuda""#);
-        let vulkan = BENCH
-            .replace(r#""engine_build": "b11379-1537a0a8b""#, r#""engine_build": "b11379-1537a0a8b", "backend": "vulkan""#)
-            .replace(r#""decode_median": 59.3"#, r#""decode_median": 36.4"#);
-        let parse = |l: &str| Row::parse(l).expect("should parse");
-        // A row from before the field ran on its card's own backend.
-        assert_eq!(parse(BENCH).served_backend(), "cuda");
-        assert_eq!(parse(BENCH).configuration_key(), parse(&cuda).configuration_key());
-        let best = best_per_configuration(&[parse(&cuda), parse(&vulkan)]);
-        assert_eq!(best.len(), 2, "Vulkan's number is not a slower CUDA run");
-        let unknown = BENCH.replace(r#""gpu": "NVIDIA GeForce RTX 3060", "#, "");
-        assert_eq!(parse(&unknown).served_backend(), "");
     }
 
     #[test]
@@ -827,5 +846,33 @@ mod tests {
         assert_eq!(bad.len(), 1);
         assert_eq!(bad[0].0, 2, "the bad line's number is reported");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_models_agent_share_is_its_newest_run_on_its_worse_api() {
+        let row = |ts: &str, host: &str, file: &str, agent: &str| {
+            Row::parse(&format!(
+                r#"{{"ts": "{ts}", "kind": "eval", "model": "m", "host": "{host}", "model_file": "{file}", "agent": {agent}}}"#
+            ))
+            .expect("a row")
+        };
+        let n = crate::agent::TASKS.len() as u32;
+        let both = |a: u32, o: u32| {
+            format!(r#"{{"anthropic": {{"solved": {a}, "total": {n}}}, "openai": {{"solved": {o}, "total": {n}}}}}"#)
+        };
+        let rows = vec![
+            row("2026-10-29T13:10Z", "box", "9b.gguf", &both(4, 4)),
+            row("2026-10-30T02:54Z", "box", "9b.gguf", &both(n - 1, n)),
+            row("2026-10-31T00:00Z", "box", "9b.gguf", "null"),
+            // One task rerun, and a run of an older, smaller suite: neither counts.
+            row("2026-10-31T01:00Z", "box", "9b.gguf", r#"{"anthropic": {"solved": 1, "total": 1}}"#),
+            row("2026-10-31T00:00Z", "other", "9b.gguf", &both(1, 1)),
+            row("2026-10-30T01:43Z", "box", "35b.gguf", &both(n, n)),
+            row("2026-10-31T01:00Z", "box", "35b.gguf", &format!(r#"{{"openai": {{"solved": 2, "total": {}}}}}"#, n - 1)),
+        ];
+        assert_eq!(agent_share(&rows, "box", "9b.gguf"), Some((n - 1) as f64 / n as f64));
+        assert_eq!(agent_share(&rows, "box", "35b.gguf"), Some(1.0));
+        assert_eq!(agent_share(&rows, "box", "0.5b.gguf"), None);
+        assert_eq!(agent_share(&rows, "nowhere", "35b.gguf"), None);
     }
 }
