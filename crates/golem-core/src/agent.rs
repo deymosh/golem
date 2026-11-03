@@ -827,8 +827,52 @@ fn formats_grade(w: &Workspace, _: &str) -> Result<(), String> {
     }
 }
 
+// A number worked out across files: the client's own loop says how many
+// waits there are and how each grows, the base config gives the numbers,
+// the production file overrides one of them, and a cap cuts the last two.
+// Each misreading is another total - the base's factor 7750, no cap 30250,
+// a wait per attempt 15250 - and staging is a decoy.
+const BACKOFF_CLIENT: &str = "import time\n\n\n\
+def delays(cfg):\n    \"\"\"The wait before each retry, in milliseconds: the first retry waits base_ms.\"\"\"\n    \
+out = []\n    wait = cfg[\"base_ms\"]\n    for _ in range(cfg[\"attempts\"] - 1):\n        \
+out.append(min(wait, cfg[\"max_ms\"]))\n        wait *= cfg[\"factor\"]\n    return out\n\n\n\
+def fetch(send, request, cfg):\n    \"\"\"Send until it succeeds, waiting between attempts; the last failure is raised.\"\"\"\n    \
+for wait in delays(cfg) + [None]:\n        try:\n            return send(request)\n        except IOError:\n            \
+if wait is None:\n                raise\n            time.sleep(wait / 1000)\n";
+const BACKOFF_BASE: &str = "[retry]\nattempts = 6\nbase_ms = 250\nfactor = 2\nmax_ms = 4000\n";
+/// The total the question has, and the totals its misreadings give.
+const BACKOFF_TOTAL: &str = "11250";
+const BACKOFF_WRONG: [&str; 3] = ["7750", "15250", "30250"];
+
+fn backoff_files() -> Workspace {
+    let mut w = Workspace::new(&[(
+        "README.md",
+        "# Fetcher\nThe client reads config/client.toml, then the file for its environment \
+(config/<environment>.toml), whose settings override the first. deploy/ says how each environment runs.\n",
+    )]);
+    w.write("client.py", BACKOFF_CLIENT);
+    w.write("config/client.toml", BACKOFF_BASE);
+    w.write("config/production.toml", "[retry]\nfactor = 3\n");
+    w.write("config/staging.toml", "[retry]\nattempts = 3\nmax_ms = 1000\n");
+    w.write("deploy/production.md", "# Production\nThe fetcher runs with environment = production.\n");
+    w.write("deploy/staging.md", "# Staging\nThe fetcher runs with environment = staging.\n");
+    w
+}
+
+fn backoff_grade(_: &Workspace, answer: &str) -> Result<(), String> {
+    let plain: String = answer.chars().filter(|c| *c != ',' && *c != ' ' && *c != '\u{a0}').collect();
+    if let Some(wrong) = BACKOFF_WRONG.iter().find(|wrong| plain.contains(*wrong)) {
+        return Err(format!("the answer gives {wrong}"));
+    }
+    if plain.contains(BACKOFF_TOTAL) {
+        Ok(())
+    } else {
+        Err(format!("the answer does not give {BACKOFF_TOTAL}"))
+    }
+}
+
 /// The suite, in the order it runs.
-pub const TASKS: [Task; 11] = [
+pub const TASKS: [Task; 12] = [
     Task {
         name: "fix-a-failing-test",
         prompt: "The tests in this project fail. Find out why and fix the code, not the tests. Run the tests to check.",
@@ -905,6 +949,14 @@ pub const TASKS: [Task; 11] = [
         files: formats_files,
         tests: formats_tests,
         grade: formats_grade,
+    },
+    Task {
+        name: "backoff-through-overrides",
+        prompt: "In production, a request this client sends fails every time. How many milliseconds does the \
+client spend waiting between attempts before it gives up? Answer with the number.",
+        files: backoff_files,
+        tests: no_tests,
+        grade: backoff_grade,
     },
 ];
 
@@ -1178,6 +1230,13 @@ impl Summary {
     }
 }
 
+/// Whether an engine's refusal says the request is over the context it
+/// serves: the setup's answer to the task - it cannot hold it - which the
+/// suite grades as missed, where a request with no answer stops the suite.
+pub fn over_context(status: u16, message: &str) -> bool {
+    status == 400 && message.contains("exceeds the available context size")
+}
+
 /// Whether a run clears `floor`, the share of tasks each API must solve: an
 /// API that was not run does not pass, and no run at all is not a pass.
 pub fn passes(summaries: &[Summary], floor: f64) -> bool {
@@ -1188,6 +1247,37 @@ pub fn passes(summaries: &[Summary], floor: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_backoff_total_is_the_clients_loop_over_the_production_config() {
+        // client.py's `delays`, by hand: `attempts - 1` waits, the first
+        // `base`, each the last times `factor`, none over `cap`.
+        let total = |base: u64, factor: u64, cap: u64, waits: u32| -> String {
+            (0..waits).map(|i| (base * factor.pow(i)).min(cap)).sum::<u64>().to_string()
+        };
+        // attempts = 6: five waits.
+        assert_eq!(total(250, 3, 4000, 5), BACKOFF_TOTAL, "production: factor 3 over the base");
+        assert_eq!(total(250, 2, 4000, 5), BACKOFF_WRONG[0], "the base's factor");
+        assert_eq!(total(250, 3, 4000, 6), BACKOFF_WRONG[1], "a wait per attempt");
+        assert_eq!(total(250, 3, u64::MAX, 5), BACKOFF_WRONG[2], "no cap");
+        let w = backoff_files();
+        assert!(w.read("client.py").is_some_and(|c| c.contains("range(cfg[\"attempts\"] - 1)")));
+        assert_eq!(w.read("config/production.toml"), Some("[retry]\nfactor = 3\n"));
+        assert!(backoff_grade(&w, "It waits 11,250 ms in all.").is_ok());
+        assert!(backoff_grade(&w, "11250").is_ok());
+        assert!(backoff_grade(&w, "7750 ms").is_err());
+        assert!(backoff_grade(&w, "Either 7750 or 11250").is_err(), "a hedge is not an answer");
+        assert!(backoff_grade(&w, "about 11 seconds").is_err());
+    }
+
+    #[test]
+    fn a_request_over_the_context_is_a_missed_task() {
+        // b11379's answer to the 35B at 16384 tokens, 2026-11-03.
+        let said = "request (20292 tokens) exceeds the available context size (16384 tokens), try increasing it";
+        assert!(over_context(400, said));
+        assert!(!over_context(500, said), "a server error is not the setup's answer");
+        assert!(!over_context(400, "invalid tool schema"));
+    }
 
     fn call(name: &str, arguments: &str) -> Call {
         Call { id: "c1".into(), name: name.into(), arguments: arguments.into() }

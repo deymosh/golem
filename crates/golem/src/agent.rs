@@ -67,9 +67,11 @@ pub fn reports_dir(home: &Path) -> PathBuf {
 
 /// The suite on each of `apis` - every task, or `only` the one named: a line
 /// per task and a `RESULT` line per API, to `out`, and for each task it
-/// missed a report under `reports` ([`agent::failure_report`]). `Err` when a
-/// request got no answer at all, which is the engine, not the model, and
-/// leaves nothing to grade; the reason is in `out`.
+/// missed a report under `reports` ([`agent::failure_report`]). A task whose
+/// request is over the setup's context is missed, not an error
+/// ([`agent::over_context`]). `Err` when a request got no answer at all,
+/// which is the engine, not the model, and leaves nothing to grade; the
+/// reason is in `out`.
 pub fn suite(
     base: &Base,
     model: &str,
@@ -127,10 +129,15 @@ fn run_task(base: &Base, api: Api, model: &str, task: &Task) -> Result<(Verdict,
     let mut verdict = Verdict { task: task.name, ..Verdict::default() };
     let start = Instant::now();
     let mut last_text = String::new();
+    let mut over: Option<String> = None;
     while verdict.turns < agent::MAX_TURNS {
         let reply = engine::post_json(base, api.path(), &body.to_json(), TURN_TIMEOUT)
             .ok_or_else(|| format!("no answer on {}", api.path()))?;
         if !reply.ok() {
+            if agent::over_context(reply.status, &reply.error_message()) {
+                over = Some(reply.error_message());
+                break;
+            }
             return Err(format!("HTTP {}: {}", reply.status, reply.error_message()));
         }
         let answer = json::parse(&reply.body).map_err(|e| format!("the answer is not JSON: {e}"))?;
@@ -163,9 +170,10 @@ fn run_task(base: &Base, api: Api, model: &str, task: &Task) -> Result<(Verdict,
         trace.extend(results);
     }
     verdict.seconds = start.elapsed().as_secs_f64();
-    match (task.grade)(&workspace, &last_text) {
-        Ok(()) => verdict.solved = true,
-        Err(reason) => verdict.reason = reason,
+    match (&over, (task.grade)(&workspace, &last_text)) {
+        (Some(said), _) => verdict.reason = format!("the setup's context cannot hold it: {said}"),
+        (None, Ok(())) => verdict.solved = true,
+        (None, Err(reason)) => verdict.reason = reason,
     }
     if !verdict.solved && cut {
         verdict.reason = format!("{} (its last turn was cut at {} tokens)", verdict.reason, agent::MAX_TOKENS);
