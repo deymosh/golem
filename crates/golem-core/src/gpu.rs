@@ -33,6 +33,24 @@ pub fn vendor(pci_id: &str) -> Option<Vendor> {
     }
 }
 
+/// The vendor a card's name says, as a results row records it
+/// (`NVIDIA GeForce RTX 3060`, `AMD Radeon RX 7800 XT`, `Apple M3`), or
+/// `None` for a name that says none.
+pub fn vendor_of_name(name: &str) -> Option<Vendor> {
+    let name = name.to_ascii_lowercase();
+    if name.contains("nvidia") || name.contains("geforce") || name.contains("quadro") {
+        Some(Vendor::Nvidia)
+    } else if name.contains("amd") || name.contains("radeon") {
+        Some(Vendor::Amd)
+    } else if name.contains("intel") || name.contains(" arc ") || name.starts_with("arc ") {
+        Some(Vendor::Intel)
+    } else if name.starts_with("apple") {
+        Some(Vendor::Apple)
+    } else {
+        None
+    }
+}
+
 /// The backend the card's vendor can serve: CUDA for NVIDIA, ROCm for AMD,
 /// Vulkan for Intel, Metal for Apple.
 pub fn backend(vendor: Vendor) -> &'static str {
@@ -41,6 +59,17 @@ pub fn backend(vendor: Vendor) -> &'static str {
         Vendor::Amd => "rocm",
         Vendor::Intel => "vulkan",
         Vendor::Apple => "metal",
+    }
+}
+
+/// What `GPU_BACKEND = "auto"` serves a card of `vendor` on: its
+/// [`backend`], except an AMD card once golem could not fetch the ROCm
+/// runtime its build needs (`rocm_unavailable`), which goes to Vulkan - the
+/// backend that needs nothing beyond the driver.
+pub fn auto_backend(vendor: Vendor, rocm_unavailable: bool) -> &'static str {
+    match backend(vendor) {
+        "rocm" if rocm_unavailable => "vulkan",
+        other => other,
     }
 }
 
@@ -230,11 +259,29 @@ mod tests {
     }
 
     #[test]
+    fn a_card_name_names_its_vendor() {
+        assert_eq!(vendor_of_name("NVIDIA GeForce RTX 3060"), Some(Vendor::Nvidia));
+        assert_eq!(vendor_of_name("AMD Radeon RX 7800 XT"), Some(Vendor::Amd));
+        assert_eq!(vendor_of_name("Intel(R) Arc(TM) A770 Graphics"), Some(Vendor::Intel));
+        assert_eq!(vendor_of_name("Apple M3 Max"), Some(Vendor::Apple));
+        assert_eq!(vendor_of_name("unknown"), None);
+    }
+
+    #[test]
     fn each_vendor_serves_its_backend() {
         assert_eq!(backend(Vendor::Nvidia), "cuda");
         assert_eq!(backend(Vendor::Amd), "rocm");
         assert_eq!(backend(Vendor::Intel), "vulkan");
         assert_eq!(backend(Vendor::Apple), "metal");
+    }
+
+    #[test]
+    fn auto_keeps_rocm_until_its_runtime_could_not_be_fetched() {
+        assert_eq!(auto_backend(Vendor::Amd, false), "rocm");
+        assert_eq!(auto_backend(Vendor::Amd, true), "vulkan");
+        // Only ROCm has a runtime golem fetches; nothing else moves.
+        assert_eq!(auto_backend(Vendor::Nvidia, true), "cuda");
+        assert_eq!(auto_backend(Vendor::Intel, true), "vulkan");
     }
 
     #[test]

@@ -177,23 +177,66 @@ pub fn up(home: &Path, overrides: &Overrides, dry_run: bool, out: &mut dyn Write
         ));
     }
 
-    if !plan.program.is_file() {
-        let installed = release::ensure(home, &plan.pinned(), out)?;
-        // The plan resolved a directory from what the configuration asked
-        // for, and `latest` is not a directory name - the tag is. `ensure`
-        // is the only thing that knows it, so the plan is corrected here
-        // rather than the server being started from a path that does not
-        // exist. The banner then names the build that is actually running.
-        plan.build = installed.tag;
-        plan.program = installed.dir.join(&plan.server);
-        plan.bin = installed.dir;
-    }
+    install_engine(home, overrides, &mut plan, out)?;
 
     // After the engine is on disk and before anything is spawned.
     ensure_models(home, &plan, out)?;
     probe_devices(home, &plan, out);
 
     start(home, &plan, &endpoint, out)
+}
+
+/// Put the planned engine on disk: the pinned release when its server is
+/// missing, then the libraries its adapter says the release lacks
+/// ([`runtime`]). When `auto` chose ROCm and its runtime cannot be fetched,
+/// the reason is kept in `paths::rocm_unavailable`, the plan is resolved
+/// again - to Vulkan, which needs nothing beyond the driver - and that build
+/// is installed instead. A backend that was set keeps its build, and the
+/// device probe says what the missing runtime means.
+pub fn install_engine(home: &Path, overrides: &Overrides, plan: &mut Startup, out: &mut dyn Write) -> Result<(), String> {
+    install_release(home, plan, out)?;
+    let Err(why) = runtime(home, plan, out) else { return Ok(()) };
+    let _ = writeln!(out, "[WARN] {why}");
+    if !(plan.backend_auto && plan.backend == "rocm") {
+        return Ok(());
+    }
+    let _ = std::fs::write(paths::rocm_unavailable(home), format!("{why}\n"));
+    *plan = self::plan(home, overrides)?;
+    let _ = writeln!(
+        out,
+        "[ .. ] serving on {} instead, which needs nothing beyond the driver - golem install tries ROCm again",
+        plan.backend
+    );
+    install_release(home, plan, out)
+}
+
+/// The pinned release, installed when the plan's server is not on disk.
+fn install_release(home: &Path, plan: &mut Startup, out: &mut dyn Write) -> Result<(), String> {
+    if plan.program.is_file() {
+        return Ok(());
+    }
+    let installed = release::ensure(home, &plan.pinned(), out)?;
+    plan.installed(installed);
+    Ok(())
+}
+
+/// The libraries the adapter names for the planned backend that are not
+/// beside the server, fetched and placed (`release::fetch_libraries`).
+/// Nothing to do when it names none or they are there - and for ROCm when
+/// hipBLAS and rocBLAS are on PATH, where an installed ROCm SDK puts them.
+fn runtime(home: &Path, plan: &Startup, out: &mut dyn Write) -> Result<(), String> {
+    let text = paths::adapter(home, &plan.engine)
+        .map_err(|e| format!("cannot read {}: {e}", paths::adapter_path(home, &plan.engine).display()))?;
+    let Some(libs) = adapter::libraries(&ini::parse(&text), release::platform(), &plan.backend)? else {
+        return Ok(());
+    };
+    let missing = libs.missing(|file| plan.bin.join(file).exists());
+    if missing.is_empty() || (plan.backend == "rocm" && devices::missing_hip(on_path).is_empty()) {
+        return Ok(());
+    }
+    let _ = writeln!(out, "[ .. ] the {} build lacks {}", plan.backend, missing.join(", "));
+    release::fetch_libraries(home, &libs, &plan.bin, out)
+        .map_err(|e| format!("the {} runtime is not in place: {e}", plan.backend))
 }
 
 /// How long `--list-devices` may take: a driver initialising every backend
@@ -754,6 +797,10 @@ pub struct Startup {
     pub engine: String,
     pub build: String,
     pub backend: String,
+    /// Whether `backend` is `GPU_BACKEND = "auto"`'s answer rather than a
+    /// setting: only then may a ROCm runtime that cannot be fetched move the
+    /// machine to Vulkan.
+    pub backend_auto: bool,
     /// Where that build lives - `.local/engines/<engine>/<build>-<backend>`
     /// - and the executable's name inside it.
     pub bin: PathBuf,
@@ -790,6 +837,17 @@ impl Startup {
         }
     }
 
+    /// Point the plan at the build `release::ensure` installed. The plan
+    /// resolved a directory from what the configuration asked for, and
+    /// `latest` is not a directory name - the tag is, and only `ensure` knows
+    /// it - so the server is started from where the build is and the banner
+    /// names the build that runs.
+    pub fn installed(&mut self, installed: release::Installed) {
+        self.build = installed.tag;
+        self.program = installed.dir.join(&self.server);
+        self.bin = installed.dir;
+    }
+
     /// Where the build would go, for the line a dry run prints before
     /// anything is installed.
     fn install_target(&self) -> String {
@@ -823,7 +881,7 @@ pub fn plan(home: &Path, overrides: &Overrides) -> Result<Startup, String> {
         .map_err(|e| format!("cannot read {}: {e}", paths::adapter_path(home, &engine).display()))?;
     let adapter = ini::parse(&adapter_text);
 
-    let backend = resolve_backend(home, adapter.global("backend").unwrap_or("cuda"));
+    let (backend, backend_auto) = resolve_backend(home, adapter.global("backend").unwrap_or("cuda"));
     let build = engine_build(home, &engine, &adapter)?;
     let bin = home.join(".local").join("engines").join(&engine).join(format!("{build}-{backend}"));
     let server = server_name(&adapter);
@@ -938,6 +996,7 @@ pub fn plan(home: &Path, overrides: &Overrides) -> Result<Startup, String> {
         engine,
         build,
         backend,
+        backend_auto,
         bin,
         server,
         host,
@@ -962,20 +1021,22 @@ fn merge(into: &mut Vec<(String, String)>, extra: Vec<(String, String)>) {
 ///
 /// A backend is a fact about the card, so `auto` reads it: `nvidia-smi` on
 /// PATH for CUDA (one cheap spawn, kept first), else the machine probe's
-/// vendor - CUDA for NVIDIA, ROCm for AMD, Vulkan for Intel. On macOS the
-/// answer is Metal whatever is installed. The adapter's `backend` key is
+/// vendor - CUDA for NVIDIA, ROCm for AMD (Vulkan once golem could not fetch
+/// the ROCm runtime, `paths::rocm_unavailable`), Vulkan for Intel. On macOS
+/// the answer is Metal whatever is installed. The adapter's `backend` key is
 /// the last fallback, for a machine where nothing answers and the adapter
-/// still knows what it wants.
-fn resolve_backend(home: &Path, fallback: &str) -> String {
+/// still knows what it wants. The flag says whether the answer is `auto`'s.
+fn resolve_backend(home: &Path, fallback: &str) -> (String, bool) {
     let configured = config::get(home, "GPU_BACKEND").unwrap_or_else(|| "auto".to_string());
-    match configured.as_str() {
-        "cuda" | "rocm" | "metal" | "vulkan" => configured,
+    let backend = match configured.as_str() {
+        "cuda" | "rocm" | "metal" | "vulkan" => return (configured, false),
         _ if cfg!(target_os = "macos") => "metal".to_string(),
         _ if which("nvidia-smi") => "cuda".to_string(),
         _ => machine::gpu()
-            .map(|card| gpu::backend(card.vendor).to_string())
+            .map(|card| gpu::auto_backend(card.vendor, paths::rocm_unavailable(home).is_file()).to_string())
             .unwrap_or_else(|| fallback.to_string()),
-    }
+    };
+    (backend, true)
 }
 
 /// What the Settings tab may offer on this machine: the backends the engine
@@ -1484,6 +1545,7 @@ mod tests {
             engine: "fake".to_string(),
             build: "b0".to_string(),
             backend: "cuda".to_string(),
+            backend_auto: false,
             bin: dir.join(".local/engines/fake/b0-cuda"),
             server: "fake.exe".to_string(),
             host: "127.0.0.1".to_string(),

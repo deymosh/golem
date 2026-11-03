@@ -128,6 +128,12 @@ pub const BASE_PRESET: &str = "config/models.ini";
 /// `MODELS_PRESET` at it.
 pub const EFFECTIVE_PRESET: &str = "data/tuned/models.effective.ini";
 
+/// What the engine reads in place of the preset when the backend's build
+/// cannot serve one of its values as written (`adapter::served`: b11379's
+/// Vulkan build serves `load-mode = mlock` as `mmap+mlock`). Written at each
+/// start that needs it.
+pub const SERVED_PRESET: &str = "data/tuned/models.served.ini";
+
 /// The engine adapter used when `ENGINE` names none.
 pub const DEFAULT_ENGINE: &str = "llama.cpp";
 
@@ -178,6 +184,32 @@ pub fn load_failure(home: &Path) -> PathBuf {
 /// no such probe.
 pub fn devices(home: &Path) -> PathBuf {
     home.join(".local").join("devices.txt")
+}
+
+/// Where discovery keeps the headers it fetched, each a sparse file of its
+/// model's size, and the engine's log of sizing them (`.local/fit/`).
+pub fn fit_dir(home: &Path) -> PathBuf {
+    home.join(".local").join("fit")
+}
+
+/// Where an archive golem fetched for an engine's libraries is kept
+/// (`data/cache/<name>`): a second engine build, or a reinstall, extracts it
+/// again instead of fetching it again.
+pub fn cached(home: &Path, name: &str) -> PathBuf {
+    home.join("data").join("cache").join(name)
+}
+
+/// Why golem could not fetch the ROCm runtime, written when that fetch fails
+/// on a `GPU_BACKEND = "auto"` machine: while it is there, `auto` serves an
+/// AMD card on Vulkan. `golem install` removes it and tries again.
+pub fn rocm_unavailable(home: &Path) -> PathBuf {
+    home.join(".local").join("rocm-unavailable.txt")
+}
+
+/// Where a page render keeps its browser's throwaway profiles
+/// (`.local/browser/<n>`), each removed when its render ends.
+pub fn browser_profiles(home: &Path) -> PathBuf {
+    home.join(".local").join("browser")
 }
 
 /// What the update check last found, under the home: `data/cache/update.txt`

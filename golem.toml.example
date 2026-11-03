@@ -83,7 +83,8 @@ GATE_TOKENS = 200000
 ENGINE = "llama.cpp"
 
 # GPU backend: cuda | rocm | vulkan | metal. `auto` (the default) reads the
-# card's vendor - NVIDIA to cuda, AMD to rocm, Intel to vulkan, macOS to
+# card's vendor - NVIDIA to cuda, AMD to rocm (vulkan when golem cannot fetch
+# the ROCm runtime on Windows, and it says why), Intel to vulkan, macOS to
 # metal - so most machines need nothing here. Set it when detection cannot
 # work or guesses wrong (a headless box, a remote host, two GPUs).
 GPU_BACKEND = "auto"

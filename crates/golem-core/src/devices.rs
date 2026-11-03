@@ -88,9 +88,9 @@ pub fn cpu_only_advice(backend: &str, os: &str) -> String {
     let head = format!("the engine's {backend} build found no GPU device and would run on the CPU");
     let fix = match (backend, os) {
         ("rocm", "windows") => {
-            "the Windows ROCm build carries the HIP runtime but not hipBLAS and rocBLAS: install the \
-             AMD ROCm/HIP SDK matching the build and put its bin folder on PATH for golem service \
-             (the engine inherits the service's environment), or set GPU_BACKEND = \"vulkan\""
+            "the Windows ROCm build needs hipBLAS and rocBLAS beside it, which golem install fetches \
+             from AMD; with them there, HIP found no card it supports - update the AMD driver, or \
+             set GPU_BACKEND = \"vulkan\""
         }
         ("rocm", _) => "install the ROCm runtime for this card, or set GPU_BACKEND = \"vulkan\"",
         ("cuda", _) => "update the NVIDIA driver (the build needs one that supports its CUDA version)",
@@ -171,12 +171,12 @@ mod tests {
 
     #[test]
     fn a_rocm_build_without_its_libraries_lists_nothing_and_says_so() {
-        // The Windows ROCm archive of b11379 on an RX 7800 XT without the HIP
-        // SDK: HIP never initialises, and the listing is empty.
+        // The Windows ROCm archive of b11379 on an RX 7800 XT without
+        // hipBLAS and rocBLAS: HIP never initialises, and the listing is empty.
         let devices = parse("Available devices:\n");
         assert!(devices.is_empty());
         let Verdict::CpuOnly(advice) = verdict(&devices, "rocm", "windows") else { panic!("not a GPU") };
-        assert!(advice.contains("ROCm/HIP SDK") && advice.contains("PATH") && advice.contains("vulkan"), "{advice}");
+        assert!(advice.contains("golem install") && advice.contains("vulkan"), "{advice}");
         assert_eq!(label(&devices, "rocm", "windows"), "CPU only");
     }
 

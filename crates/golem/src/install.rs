@@ -11,7 +11,9 @@
 //!   different binary, and the gate that adopted the pin does not describe it.
 //!
 //! So there is one acquisition path on every platform: the release named by
-//! the adapter for this platform and this backend. `up` does it itself when
+//! the adapter for this platform and this backend, and where that release
+//! lacks libraries its backend loads (the Windows ROCm build's hipBLAS and
+//! rocBLAS), the pinned archive the adapter names for them. `up` does it itself when
 //! the server is not on disk yet, which leaves two callers for the command:
 //! a container image, which wants the engine baked in rather than downloaded
 //! on first run, and a machine being prepared before the model arrives.
@@ -27,7 +29,11 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
         eprintln!("[ERROR] {message}");
         return 1;
     }
-    let plan = match launch::plan(home, &crate::config::Overrides::from_env()) {
+    // An earlier failure to fetch the ROCm runtime moved `auto` to Vulkan;
+    // an install is the place to try it again.
+    let _ = std::fs::remove_file(crate::paths::rocm_unavailable(home));
+    let overrides = crate::config::Overrides::from_env();
+    let mut plan = match launch::plan(home, &overrides) {
         Ok(plan) => plan,
         Err(message) => {
             eprintln!("[ERROR] {message}");
@@ -35,27 +41,20 @@ pub fn run(home: &Path, args: &[String]) -> i32 {
         }
     };
     let mut out = std::io::stdout();
-    match release::ensure(home, &plan.pinned(), &mut out) {
-        Ok(installed) => {
-            println!(
-                "[ OK ] {} {} ({}) is installed at {}",
-                plan.engine,
-                installed.tag,
-                plan.backend,
-                installed.dir.display()
-            );
-            // Whether the build finds the card: an archive that installs
-            // cleanly can still lack the runtime its backend loads.
-            if let Some(advice) = launch::probe(home, &crate::config::Overrides::from_env(), &mut out) {
-                eprintln!("[WARN] {advice}");
-            }
-            0
-        }
-        Err(message) => {
-            eprintln!("[ERROR] {message}");
-            1
-        }
+    // `ensure` reads the build's marker as well as its executable, so a
+    // half-finished install is redone here even with the server on disk.
+    let installed = release::ensure(home, &plan.pinned(), &mut out)
+        .map(|installed| plan.installed(installed))
+        .and_then(|()| launch::install_engine(home, &overrides, &mut plan, &mut out));
+    if let Err(message) = installed {
+        eprintln!("[ERROR] {message}");
+        return 1;
     }
+    println!("[ OK ] {} {} ({}) is installed at {}", plan.engine, plan.build, plan.backend, plan.bin.display());
+    // Whether the build finds the card: an archive that installs cleanly can
+    // still lack the runtime its backend loads. The probe says so itself.
+    let _ = launch::probe(home, &overrides, &mut out);
+    0
 }
 
 /// `install` takes no arguments; the first one is reported.

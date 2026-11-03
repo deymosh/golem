@@ -24,6 +24,7 @@ use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
+use golem_core::adapter;
 use golem_core::ini;
 use golem_core::json::{self, Value};
 use golem_core::pattern;
@@ -236,6 +237,113 @@ pub fn ensure(home: &Path, pinned: &Pinned, out: &mut dyn Write) -> Result<Insta
         dir.display()
     );
     Ok(installed(tag, &dir))
+}
+
+/// Fetch the libraries `libs` names and place them beside the server in
+/// `dir` (`golem_core::adapter::libraries`: llama.cpp's Windows ROCm zip
+/// lacks hipBLAS and rocBLAS, and AMD publishes them in a wheel). The archive
+/// is kept in `data/cache` and checked against the adapter's SHA-256 whether
+/// it was just fetched or kept from before; only the named members are
+/// extracted, into a staging folder inside `dir`, and moved up beside the
+/// server, so a killed run leaves the staging folder and not half a library.
+/// `Err` says what failed in a line the caller prints.
+pub fn fetch_libraries(home: &Path, libs: &adapter::Libraries, dir: &Path, out: &mut dyn Write) -> Result<(), String> {
+    let archive = crate::paths::cached(home, libs.archive());
+    if archive.is_file() && !matches_pin(&archive, libs, out)? {
+        let _ = writeln!(out, "[WARN] the kept {} does not match its pinned SHA-256 - fetching it again", libs.archive());
+        std::fs::remove_file(&archive).map_err(|e| format!("cannot remove {}: {e}", archive.display()))?;
+    }
+    if !archive.is_file() {
+        let total = remote_size(&libs.url).unwrap_or(0);
+        let mb = (total as f64 / 1_048_576.0).round() as u64;
+        let size = if total > 0 { format!(" ({mb} MB)") } else { String::new() };
+        let _ = writeln!(out, "[ .. ] fetching {}{size} from {}", libs.archive(), host_of(&libs.url));
+        if let Some(parent) = archive.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+        // Fetched under a `.part` name, which `-C -` resumes after a cut, and
+        // named as the archive only once it hashes as pinned.
+        let part = archive.with_file_name(format!("{}.part", libs.archive()));
+        curl_download(&libs.url, &part, &format!("install: {}", libs.archive()), total, out)
+            .map_err(|e| format!("could not fetch {}: {e}", libs.archive()))?;
+        if !matches_pin(&part, libs, out)? {
+            let _ = std::fs::remove_file(&part);
+            return Err(format!(
+                "{} from {} does not match the SHA-256 the adapter pins ({}) - removed, nothing placed",
+                libs.archive(),
+                host_of(&libs.url),
+                libs.sha256
+            ));
+        }
+        std::fs::rename(&part, &archive)
+            .map_err(|e| format!("cannot move {} to {}: {e}", part.display(), archive.display()))?;
+    }
+
+    let staging = dir.join(".libraries");
+    if staging.exists() {
+        remove_any(&staging)?;
+    }
+    std::fs::create_dir_all(&staging).map_err(|e| format!("cannot create {}: {e}", staging.display()))?;
+    let _ = writeln!(out, "[ .. ] extracting {} from {}", libs.files.join(", "), libs.archive());
+    extract_members(&tar_program(), &archive, &staging, &libs.members())?;
+    for file in &libs.files {
+        let from = staging.join(&libs.from).join(file);
+        if !from.exists() {
+            return Err(format!("{} has no {}/{file}", libs.archive(), libs.from));
+        }
+        let to = dir.join(file);
+        if to.exists() {
+            remove_any(&to)?;
+        }
+        std::fs::rename(&from, &to)
+            .map_err(|e| format!("cannot move {} to {}: {e}", from.display(), to.display()))?;
+    }
+    remove_any(&staging)?;
+    let _ = writeln!(out, "[ OK ] placed {} beside the engine in {}", libs.files.join(", "), dir.display());
+    Ok(())
+}
+
+/// Whether `file` hashes to the SHA-256 `libs` pins. Half a gigabyte takes a
+/// few seconds, so the work shows as a bar.
+fn matches_pin(file: &Path, libs: &adapter::Libraries, out: &mut dyn Write) -> Result<bool, String> {
+    let total = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+    let label = format!("sha256: {}", libs.archive());
+    let mut said = std::time::Instant::now();
+    let hash = golem_core::sha256::file(file, &mut |done| {
+        if said.elapsed() >= crate::proc::PROGRESS_EVERY {
+            let _ = writeln!(out, "{}", progress::Progress::bytes(done.min(total), total, &label).line());
+            said = std::time::Instant::now();
+        }
+    })
+    .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+    let _ = writeln!(out, "{}", progress::CLEAR);
+    Ok(golem_core::sha256::hex(&hash) == libs.sha256)
+}
+
+/// The size a HEAD request reports for `url` after its redirects, or `None`
+/// when it cannot be had in a few seconds - the download runs without a
+/// total then.
+fn remote_size(url: &str) -> Option<u64> {
+    let headers = curl_text_with(url, &["-I", "--max-time", "15"]).ok()?;
+    last_length(&headers)
+}
+
+/// The last `Content-Length` in a header dump: a redirect's own headers come
+/// first, and the file's size is the final response's.
+fn last_length(headers: &str) -> Option<u64> {
+    headers
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim().eq_ignore_ascii_case("content-length").then(|| value.trim().parse().ok()).flatten()
+        })
+        .last()
+}
+
+/// `https://host/path` -> `host`, for a line that says where a file came from.
+fn host_of(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split('/').next().unwrap_or(rest)
 }
 
 /// Where a release goes: `root/<tag>-<backend>`.
@@ -502,11 +610,18 @@ fn download_ended(url: &str, status: ExitStatus, said: Option<&str>) -> Result<(
 
 /// `<tar> -xf <zip> -C <dir>`, output captured; a failure carries tar's stderr.
 pub(crate) fn extract(tar: &Path, zip: &Path, dir: &Path) -> Result<(), String> {
+    extract_members(tar, zip, dir, &[])
+}
+
+/// [`extract`] limited to `members` (all of it when empty); a folder member
+/// brings its contents.
+fn extract_members(tar: &Path, zip: &Path, dir: &Path, members: &[String]) -> Result<(), String> {
     let out = Command::new(tar)
         .arg("-xf")
         .arg(zip)
         .arg("-C")
         .arg(dir)
+        .args(members)
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("cannot run {}: {e}", tar.display()))?;
@@ -644,6 +759,63 @@ mod tests {
         let releases = json::parse(RELEASES).expect("fixture");
         let none = first_release_with_asset(&releases, r"^llama-.*bin-win-rocm-").expect("pattern");
         assert!(none.is_none(), "no ROCm asset anywhere in the fixture");
+    }
+
+    #[test]
+    fn a_redirected_head_reports_the_files_own_size() {
+        // repo.radeon.com answers directly; a CDN redirect puts its own
+        // headers first.
+        let direct = "HTTP/1.1 200 OK\r\nServer: nginx/1.18.0 (Ubuntu)\r\nContent-Length: 489964648\r\n\r\n";
+        assert_eq!(last_length(direct), Some(489_964_648));
+        let redirected = "HTTP/1.1 302 Found\r\ncontent-length: 0\r\nLocation: x\r\n\r\nHTTP/2 200\r\ncontent-length: 7\r\n\r\n";
+        assert_eq!(last_length(redirected), Some(7));
+        assert_eq!(last_length("HTTP/1.1 200 OK\r\n\r\n"), None);
+        assert_eq!(host_of("https://repo.radeon.com/rocm/windows/x.whl"), "repo.radeon.com");
+    }
+
+    /// The libraries from a kept archive: only the named members land beside
+    /// the server, and the archive is checked against its pin first. Windows
+    /// only, because the test builds its zip with System32's bsdtar.
+    #[cfg(windows)]
+    #[test]
+    fn kept_libraries_are_checked_and_only_the_named_ones_placed() {
+        let home = home("libraries");
+        let src = home.join("src");
+        let bin = src.join("pkg/bin");
+        std::fs::create_dir_all(bin.join("rocblas/library")).expect("mkdir");
+        std::fs::write(bin.join("hipblas.dll"), "h").expect("write");
+        std::fs::write(bin.join("MIOpen.dll"), "not wanted").expect("write");
+        std::fs::write(bin.join("rocblas/library/TensileLibrary_gfx1101.dat"), "k").expect("write");
+        std::fs::create_dir_all(home.join("data/cache")).expect("cache");
+        let archive = home.join("data/cache/libs.whl");
+        let made = Command::new(tar_program())
+            .arg("-a")
+            .arg("-cf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&src)
+            .arg("pkg")
+            .output()
+            .expect("tar");
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+        let hash = golem_core::sha256::hex(&golem_core::sha256::file(&archive, &mut |_| {}).expect("hash"));
+        let libs = adapter::Libraries {
+            url: "https://example.invalid/rocm/libs.whl".to_string(),
+            sha256: hash,
+            from: "pkg/bin".to_string(),
+            files: vec!["hipblas.dll".to_string(), "rocblas".to_string()],
+        };
+        let engine = home.join("engine");
+        std::fs::create_dir_all(&engine).expect("engine");
+        let mut said = Vec::new();
+        fetch_libraries(&home, &libs, &engine, &mut said).expect("placed from the kept archive");
+        assert!(engine.join("hipblas.dll").is_file());
+        assert!(engine.join("rocblas/library/TensileLibrary_gfx1101.dat").is_file(), "a folder brings its contents");
+        assert!(!engine.join("MIOpen.dll").exists(), "only what the adapter names");
+        assert!(!engine.join(".libraries").exists(), "the staging folder goes");
+        assert!(archive.is_file(), "the archive is kept for the next build");
+        assert!(String::from_utf8_lossy(&said).contains("[ OK ] placed hipblas.dll, rocblas"));
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]

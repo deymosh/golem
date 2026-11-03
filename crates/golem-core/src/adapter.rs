@@ -68,9 +68,168 @@ pub fn translate(flags: &[(String, String)], adapter: &Document) -> CommandLine 
     out
 }
 
+/// The preset as the `backend` build is served it: each `key = value` line
+/// the adapter names a `served.<backend>.<key>.<value>` for takes that
+/// value instead, in every section and in `[*]`. A build can fail one value
+/// of a flag on one backend - llama.cpp b11379 under Vulkan aborts locking
+/// the 35B's split host buffer with `load-mode = mlock`, where `mmap+mlock`
+/// pins the same weights and loads - and this keeps the preset as written
+/// while the engine reads what that build can serve. `None` when no line
+/// changes. Comments, headers and line endings pass through.
+pub fn served(text: &str, adapter: &Document, backend: &str) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut changed = false;
+    for raw in text.split_inclusive('\n') {
+        let line = raw.trim_end_matches(['\r', '\n']);
+        let eol = &raw[line.len()..];
+        let trimmed = line.trim_start();
+        let replacement = (!trimmed.starts_with([';', '#', '[']))
+            .then(|| line.split_once('='))
+            .flatten()
+            .and_then(|(key, value)| {
+                adapter.global(&format!("served.{backend}.{}.{}", key.trim(), value.trim()))
+            });
+        match replacement {
+            Some(value) => {
+                let key = line.split_once('=').map_or(line, |(key, _)| key).trim_end();
+                out.push_str(&format!("{key} = {value}{eol}"));
+                changed = true;
+            }
+            None => out.push_str(raw),
+        }
+    }
+    changed.then_some(out)
+}
+
+/// Libraries a backend's release archive does not carry and its build loads,
+/// with where to fetch them: llama.cpp's Windows ROCm zip has the HIP runtime
+/// but not hipBLAS or rocBLAS, and AMD publishes those in a wheel. The
+/// adapter names them under `<platform>_libraries_<backend>` (the archive's
+/// URL), `..._sha256` (its hash), `..._from` (the folder inside it) and
+/// `..._files` (the files and folders taken from that folder, which land
+/// beside the server).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Libraries {
+    pub url: String,
+    /// Lowercase hex; the download is refused when it hashes otherwise.
+    pub sha256: String,
+    pub from: String,
+    pub files: Vec<String>,
+}
+
+/// The [`Libraries`] the adapter names for `platform` and `backend`, or
+/// `None` when it names none. A URL without a hash, a folder or a file list
+/// is an error: a library golem places beside the engine is code it runs,
+/// and it is taken only as pinned.
+pub fn libraries(adapter: &Document, platform: &str, backend: &str) -> Result<Option<Libraries>, String> {
+    let key = format!("{platform}_libraries_{backend}");
+    let Some(url) = adapter.global(&key).filter(|v| !v.is_empty()) else { return Ok(None) };
+    let part = |suffix: &str| {
+        adapter
+            .global(&format!("{key}_{suffix}"))
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| format!("the adapter names `{key}` without `{key}_{suffix}`"))
+    };
+    let sha256 = part("sha256")?.to_ascii_lowercase();
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("`{key}_sha256` is not a SHA-256: {sha256}"));
+    }
+    let from = part("from")?.trim_end_matches('/').to_string();
+    let files: Vec<String> = part("files")?.split_whitespace().map(str::to_string).collect();
+    Ok(Some(Libraries { url: url.to_string(), sha256, from, files }))
+}
+
+impl Libraries {
+    /// The archive's file name: the URL's last segment, which is also the
+    /// name it is kept under once fetched.
+    pub fn archive(&self) -> &str {
+        self.url.rsplit('/').next().unwrap_or(&self.url)
+    }
+
+    /// The files and folders not yet beside the server, given whether each is
+    /// there.
+    pub fn missing(&self, present: impl Fn(&str) -> bool) -> Vec<&str> {
+        self.files.iter().map(String::as_str).filter(|f| !present(f)).collect()
+    }
+
+    /// The archive members to extract: each of [`Libraries::files`] under
+    /// [`Libraries::from`]. A folder member brings its contents with it.
+    pub fn members(&self) -> Vec<String> {
+        self.files.iter().map(|f| format!("{}/{f}", self.from)).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The adapter's own keys, as `config/engines/llama.cpp.ini` writes them.
+    const ROCM: &str = "windows_libraries_rocm = https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_libraries_custom-7.2.1-py3-none-win_amd64.whl\n\
+        windows_libraries_rocm_sha256 = C7FE0B0731AF8896093FF69E11496830D3CB6A4AED73E895C60B7CBDC200BE92\n\
+        windows_libraries_rocm_from = _rocm_sdk_libraries_custom/bin/\n\
+        windows_libraries_rocm_files = hipblas.dll rocblas.dll rocsolver.dll libhipblaslt.dll rocblas hipblaslt\n";
+
+    #[test]
+    fn the_rocm_libraries_are_read_from_the_adapter() {
+        let libs = libraries(&adapter(ROCM), "windows", "rocm").expect("well formed").expect("named");
+        assert_eq!(libs.archive(), "rocm_sdk_libraries_custom-7.2.1-py3-none-win_amd64.whl");
+        assert_eq!(libs.sha256, "c7fe0b0731af8896093ff69e11496830d3cb6a4aed73e895c60b7cbdc200be92");
+        assert_eq!(libs.from, "_rocm_sdk_libraries_custom/bin", "a trailing slash is dropped");
+        assert_eq!(
+            libs.members()[..2],
+            ["_rocm_sdk_libraries_custom/bin/hipblas.dll", "_rocm_sdk_libraries_custom/bin/rocblas.dll"]
+        );
+        assert_eq!(libs.members().last().map(String::as_str), Some("_rocm_sdk_libraries_custom/bin/hipblaslt"));
+        assert_eq!(libs.missing(|f| f.ends_with(".dll")), vec!["rocblas", "hipblaslt"]);
+        assert!(libs.missing(|_| true).is_empty());
+        // Another backend or platform names none.
+        assert_eq!(libraries(&adapter(ROCM), "windows", "vulkan"), Ok(None));
+        assert_eq!(libraries(&adapter(ROCM), "linux", "rocm"), Ok(None));
+    }
+
+    #[test]
+    fn a_value_the_backends_build_cannot_serve_is_served_as_the_adapter_says() {
+        let adapter = adapter("served.vulkan.load-mode.mlock = mmap+mlock\n");
+        let preset = "[*]\r\nload-mode = mlock\r\n; load-mode = mlock stays a comment\r\n[big]\r\nmodel = big.gguf\r\n\
+                      load-mode=mlock\r\n[small]\r\nload-mode = mmap\r\n";
+        let out = served(preset, &adapter, "vulkan").expect("changed");
+        assert_eq!(
+            out,
+            "[*]\r\nload-mode = mmap+mlock\r\n; load-mode = mlock stays a comment\r\n[big]\r\nmodel = big.gguf\r\n\
+             load-mode = mmap+mlock\r\n[small]\r\nload-mode = mmap\r\n"
+        );
+        let doc = crate::ini::parse(&out);
+        assert_eq!(doc.effective("big", "load-mode"), Some("mmap+mlock"));
+        // Another backend, or a preset with nothing to change, is served as written.
+        assert_eq!(served(preset, &adapter, "cuda"), None);
+        assert_eq!(served("[small]\nload-mode = mmap\n", &adapter, "vulkan"), None);
+        // The shipped adapter carries the Vulkan rule for its pinned build.
+        let shipped = self::adapter(include_str!("../../../config/engines/llama.cpp.ini"));
+        assert!(served("[a]\nload-mode = mlock\n", &shipped, "vulkan").is_some_and(|t| t.contains("mmap+mlock")));
+        assert_eq!(served("[a]\nload-mode = mlock\n", &shipped, "cuda"), None);
+    }
+
+    #[test]
+    fn the_shipped_adapter_names_the_rocm_libraries_ggml_hip_loads() {
+        let shipped = adapter(include_str!("../../../config/engines/llama.cpp.ini"));
+        let libs = libraries(&shipped, "windows", "rocm").expect("well formed").expect("named");
+        assert!(libs.url.starts_with("https://repo.radeon.com/"), "{}", libs.url);
+        // hipblas.dll and rocblas.dll are what `devices::missing_hip` checks.
+        for lib in crate::devices::HIP_LIBRARIES {
+            assert!(libs.files.iter().any(|f| f == lib), "{lib}");
+        }
+        assert_eq!(libraries(&shipped, "windows", "cuda"), Ok(None));
+    }
+
+    #[test]
+    fn libraries_without_their_pin_are_refused() {
+        let unpinned: String = ROCM.lines().filter(|l| !l.contains("_sha256")).map(|l| format!("{l}\n")).collect();
+        let err = libraries(&adapter(&unpinned), "windows", "rocm").expect_err("no hash");
+        assert!(err.contains("windows_libraries_rocm_sha256"), "{err}");
+        let short = ROCM.replace("C7FE0B0731AF", "C7");
+        assert!(libraries(&adapter(&short), "windows", "rocm").is_err(), "not 64 hex digits");
+    }
 
     fn adapter(text: &str) -> Document {
         crate::ini::parse(text)
