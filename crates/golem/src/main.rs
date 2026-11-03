@@ -64,6 +64,8 @@ Front ends and results:
   tui              The full-screen screen in the terminal
   report [--md] [--no-open]
                    Static results page (or results/RESULTS.md)
+  report --card [--model NAME] | --import CARD
+                   One card per setup in results/cards/, or a card's rows read in
   results [--model NAME]
                    List the recorded rows
   update [--check] [--yes]
@@ -395,6 +397,9 @@ fn read_rows(results: &Path) -> Option<Vec<golem_core::results::Row>> {
 fn cmd_report(args: &[String]) -> ExitCode {
     let as_markdown = args.iter().any(|a| a == "--md");
     let home = prepare_home();
+    if let Some(card) = arg_value(args, "--import") {
+        return import_card(&home, Path::new(&card));
+    }
     let Some(results) = results_path(args) else {
         eprintln!(
             "[FAIL] no results yet at {} - run a bench first",
@@ -404,6 +409,10 @@ fn cmd_report(args: &[String]) -> ExitCode {
     };
     let Some(rows) = read_rows(&results) else { return ExitCode::from(1) };
     let dir = results.parent().expect("the results file has a directory");
+
+    if args.iter().any(|a| a == "--card") {
+        return write_cards(&home, &results, dir, arg_value(args, "--model").as_deref());
+    }
 
     if as_markdown {
         let out = dir.join("RESULTS.md");
@@ -438,6 +447,134 @@ fn cmd_report(args: &[String]) -> ExitCode {
         desktop::open(&out);
     }
     ExitCode::SUCCESS
+}
+
+/// `report --card [--model NAME]`: one card per setup in `results/cards/`
+/// (`golem_core::card`), each naming its model file's SHA-256 - the `.sha256`
+/// beside the file, hashed and written there when the file is here without
+/// one.
+fn write_cards(home: &Path, results: &Path, dir: &Path, model: Option<&str>) -> ExitCode {
+    let raw = match std::fs::read_to_string(results) {
+        Ok(raw) => raw,
+        Err(e) => {
+            eprintln!("[FAIL] cannot read {}: {e}", results.display());
+            return ExitCode::from(1);
+        }
+    };
+    let lines: Vec<&str> = raw
+        .lines()
+        .filter(|line| model.map_or(true, |m| golem_core::results::Row::parse(line).is_ok_and(|r| r.model == m)))
+        .collect();
+    let hash_of = |file: &str| model_hash(home, file);
+    let cards = golem_core::card::cards(&lines, &hash_of);
+    let out = dir.join("cards");
+    if let Err(e) = std::fs::create_dir_all(&out) {
+        eprintln!("[FAIL] cannot create {}: {e}", out.display());
+        return ExitCode::from(1);
+    }
+    for card in &cards {
+        let path = out.join(&card.file_name);
+        if let Err(e) = std::fs::write(&path, &card.text) {
+            eprintln!("[FAIL] cannot write {}: {e}", path.display());
+            return ExitCode::from(1);
+        }
+        println!("[ OK ] {}", path.display());
+    }
+    println!("[ OK ] {} cards in {}", cards.len(), out.display());
+    ExitCode::SUCCESS
+}
+
+/// A model file's SHA-256: its `.sha256` in `data/models`, else hashed now
+/// and written there when the file is present; `None` when it is not.
+fn model_hash(home: &Path, file: &str) -> Option<String> {
+    let path = home.join("data/models").join(file);
+    let mut sidecar = path.clone().into_os_string();
+    sidecar.push(".sha256");
+    if let Some(hash) = std::fs::read_to_string(&sidecar).ok().and_then(|t| t.split_whitespace().next().map(str::to_string)) {
+        return Some(hash);
+    }
+    if !path.is_file() {
+        return None;
+    }
+    println!("[ .. ] hashing {file}...");
+    let hash = golem_core::sha256::file(&path, &mut |_| {}).ok()?;
+    let _ = std::fs::write(&sidecar, golem_core::sha256::line(&hash, file));
+    Some(golem_core::sha256::hex(&hash))
+}
+
+/// `report --import <card>`: the card's rows this checkout's results lack,
+/// appended to `results/results.jsonl` (created when there is none yet).
+fn import_card(home: &Path, card: &Path) -> ExitCode {
+    let text = match std::fs::read_to_string(card) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("[FAIL] cannot read {}: {e}", card.display());
+            return ExitCode::from(1);
+        }
+    };
+    let (header, rows) = match golem_core::card::read(&text) {
+        Ok(read) => read,
+        Err(e) => {
+            eprintln!("[FAIL] {} is not a card golem can import: {e}", card.display());
+            return ExitCode::from(1);
+        }
+    };
+    let results = paths::results(home);
+    let existing = std::fs::read_to_string(&results).unwrap_or_default();
+    let new = golem_core::card::new_rows(&existing, &rows);
+    let mut text = existing;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    for row in &new {
+        text.push_str(row);
+        text.push('\n');
+    }
+    if let Err(e) = std::fs::write(&results, text) {
+        eprintln!("[FAIL] cannot write {}: {e}", results.display());
+        return ExitCode::from(1);
+    }
+    println!(
+        "[ OK ] {} of {}'s {} rows added to {} ({}, {} already there)",
+        new.len(),
+        header.host,
+        header.rows,
+        results.display(),
+        header.seal,
+        header.rows - new.len()
+    );
+    ExitCode::SUCCESS
+}
+
+/// `profile [name]`: the profile this machine serves and the others, or a
+/// switch to `name` - the effective preset rewritten, served from the next
+/// restart (`tune::switch_profile`).
+fn cmd_profile(args: &[String]) -> ExitCode {
+    let home = prepare_home();
+    match args {
+        [] => {
+            let active = tune::active_profile(&home);
+            for p in golem_core::profile::PROFILES {
+                println!("{} {:<6} {}", if p.name == active { "*" } else { " " }, p.name, p.about);
+            }
+            ExitCode::SUCCESS
+        }
+        [name] => match tune::switch_profile(&home, name) {
+            Ok(said) => {
+                println!("[ OK ] {said}");
+                println!("       golem restart serves it");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("[FAIL] {e}");
+                ExitCode::from(1)
+            }
+        },
+        _ => {
+            eprintln!("[FAIL] profile takes one name at most");
+            ExitCode::from(2)
+        }
+    }
 }
 
 fn cmd_results(args: &[String]) -> ExitCode {

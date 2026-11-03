@@ -29,6 +29,14 @@ pub mod evalparse;
 /// `results/RESULTS.md`.
 pub mod report;
 
+/// Report cards (`report --card`, `report --import`): one setup's rows in
+/// a file that re-reads into another checkout's results.
+pub mod card;
+
+/// Profiles (`tune --profile`, `PROFILE`): a tuned setup per use of the
+/// machine, and the switch between them.
+pub mod profile;
+
 pub mod tune;
 
 /// The router's `/models` listing: which models failed to load.
