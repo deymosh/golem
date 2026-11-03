@@ -84,6 +84,9 @@ pub struct Row {
     pub quant: String,
     pub engine: String,
     pub engine_build: String,
+    /// The GPU backend the engine was built for (`cuda`, `vulkan`, `rocm`,
+    /// `metal`), as the row recorded it; `None` on rows from before it was.
+    pub backend: Option<String>,
     pub ctx: Option<u64>,
     /// CPU threads the engine ran with: a tuned parameter, so it travels
     /// with the number it produced.
@@ -247,6 +250,7 @@ impl Row {
             quant,
             engine: str_of(value.get("engine")).unwrap_or_default(),
             engine_build: str_of(value.get("engine_build")).unwrap_or_default(),
+            backend: str_of(value.get("backend")).filter(|b| !b.is_empty()),
             ctx: u64_of(value.get("ctx")),
             threads: u32_of(value.get("threads")),
             params_b: num_of(value.get("params_b")),
@@ -306,8 +310,24 @@ impl Row {
             self.identity(),
             self.engine,
             self.engine_build,
+            self.served_backend(),
             self.ctx.map(|c| c.to_string()).unwrap_or_default(),
         )
+    }
+
+    /// The backend the row was served on: its own `backend`, else its
+    /// card's vendor's own one - every row from before the field was served
+    /// on that, the two Vulkan rows of 2026-10-30 aside, which carry theirs.
+    /// Empty when neither says.
+    pub fn served_backend(&self) -> String {
+        match &self.backend {
+            Some(backend) => backend.clone(),
+            None => self
+                .gpu
+                .as_deref()
+                .and_then(crate::gpu::vendor_of_name)
+                .map_or(String::new(), |v| crate::gpu::backend(v).to_string()),
+        }
     }
 
     /// Decode to compare: an eval row carries its own (shorter) measurement.
@@ -517,6 +537,7 @@ pub fn best_per_configuration(rows: &[Row]) -> Vec<Best> {
             .then(ctx_key(a.row.ctx).cmp(&ctx_key(b.row.ctx)))
             .then(a.row.engine.cmp(&b.row.engine))
             .then(a.row.engine_build.cmp(&b.row.engine_build))
+            .then(a.row.served_backend().cmp(&b.row.served_backend()))
     });
     out
 }
@@ -739,6 +760,22 @@ mod tests {
         assert_eq!(best[0].row.host, "rtx-3060_12g_32g_i7-12700kf");
         assert_eq!(best[1].row.host, "rtx-4090_24g_64g_i9-13900k");
         assert_eq!(best[1].row.decode_median.as_ref().map(|n| n.value), Some(61.0));
+    }
+
+    #[test]
+    fn one_build_on_two_backends_is_two_configurations() {
+        let cuda = BENCH.replace(r#""engine_build": "b11379-1537a0a8b""#, r#""engine_build": "b11379-1537a0a8b", "backend": "cuda""#);
+        let vulkan = BENCH
+            .replace(r#""engine_build": "b11379-1537a0a8b""#, r#""engine_build": "b11379-1537a0a8b", "backend": "vulkan""#)
+            .replace(r#""decode_median": 59.3"#, r#""decode_median": 36.4"#);
+        let parse = |l: &str| Row::parse(l).expect("should parse");
+        // A row from before the field ran on its card's own backend.
+        assert_eq!(parse(BENCH).served_backend(), "cuda");
+        assert_eq!(parse(BENCH).configuration_key(), parse(&cuda).configuration_key());
+        let best = best_per_configuration(&[parse(&cuda), parse(&vulkan)]);
+        assert_eq!(best.len(), 2, "Vulkan's number is not a slower CUDA run");
+        let unknown = BENCH.replace(r#""gpu": "NVIDIA GeForce RTX 3060", "#, "");
+        assert_eq!(parse(&unknown).served_backend(), "");
     }
 
     #[test]

@@ -64,6 +64,9 @@ pub struct Facts {
     pub mode: Option<String>,
     pub engine: String,
     pub engine_build: String,
+    /// The GPU backend the engine was built for (`cuda`, `vulkan`, `rocm`,
+    /// `metal`), when golem knows it: one build tag is several archives.
+    pub backend: Option<String>,
     pub model: String,
     pub model_file: String,
     /// The file's quant (`crate::quant::label`): part of what the row
@@ -100,6 +103,7 @@ impl Default for Facts {
             mode: None,
             engine: String::new(),
             engine_build: String::new(),
+            backend: None,
             model: String::new(),
             model_file: String::new(),
             quant: String::new(),
@@ -216,6 +220,9 @@ fn row_with(facts: &Facts, captured: &str, metrics: Metrics) -> Result<String, S
     }
     members.push(format!("\"engine\": {}", json::quote(&facts.engine)));
     members.push(format!("\"engine_build\": {}", json::quote(&facts.engine_build)));
+    if let Some(backend) = &facts.backend {
+        members.push(format!("\"backend\": {}", json::quote(backend)));
+    }
     members.push(format!("\"model\": {}", json::quote(&facts.model)));
     members.push(format!("\"model_file\": {}", json::quote(&facts.model_file)));
     members.push(format!("\"quant\": {}", json::quote(&facts.quant)));
@@ -607,6 +614,7 @@ mod tests {
             mode: Some("native".to_string()),
             engine: "llama.cpp".into(),
             engine_build: "b11379-1537a0a8b".into(),
+            backend: Some("cuda".into()),
             model: "ornith-1.5-35b".into(),
             model_file: "Ornith-1.5-35B-Q4_K_M.gguf".into(),
             quant: "Q4_K_M".into(),
@@ -639,7 +647,7 @@ mod tests {
             "\"host\": \"rtx-3060_12g_32g_i7-12700kf\", ",
             "\"gpu\": \"NVIDIA GeForce RTX 3060\", \"os\": \"windows\", ",
             "\"mode\": \"native\", \"engine\": \"llama.cpp\", ",
-            "\"engine_build\": \"b11379-1537a0a8b\", \"model\": \"ornith-1.5-35b\", ",
+            "\"engine_build\": \"b11379-1537a0a8b\", \"backend\": \"cuda\", \"model\": \"ornith-1.5-35b\", ",
             "\"model_file\": \"Ornith-1.5-35B-Q4_K_M.gguf\", \"quant\": \"Q4_K_M\", \"ctx\": 236544, ",
             "\"threads\": 16, \"params_b\": 35.51, \"params_active_b\": 3.52, ",
             "\"moe\": true, \"experts\": \"256x8\", \"n_layer\": 40, ",
@@ -655,6 +663,7 @@ mod tests {
         assert_eq!(parsed.kind, Kind::Bench);
         assert_eq!(parsed.decode_median.as_ref().map(|n| n.value), Some(59.3));
         assert_eq!(parsed.draft_accept, Some(0.66));
+        assert_eq!(parsed.backend.as_deref(), Some("cuda"));
     }
 
     #[test]

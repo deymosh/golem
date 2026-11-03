@@ -41,6 +41,18 @@ function quantFromName(file) {
 }
 const quantOf = (r) => r?.quant || quantFromName(r?.model_file);
 const idOf = (r) => (quantOf(r) ? `${r.model} ${quantOf(r)}` : r.model);
+// The backend a row was served on: its own, else its card's vendor's - every
+// row from before rows recorded it (golem_core's Row::served_backend).
+const backendOf = (r) => {
+  if (r.backend) return r.backend;
+  const gpu = r.gpu || "";
+  if (/nvidia|geforce|quadro/i.test(gpu)) return "cuda";
+  if (/amd|radeon/i.test(gpu)) return "rocm";
+  if (/intel|(^| )arc /i.test(gpu)) return "vulkan";
+  return /^apple/i.test(gpu) ? "metal" : "";
+};
+// The build as a row names it, with the backend when the row recorded one.
+const buildOf = (r) => (r.backend ? `${r.engine_build} ${r.backend}` : r.engine_build || "");
 const quantTag = (q) => (q ? ` <span class="quant">${esc(q)}</span>` : "");
 const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
 
@@ -188,7 +200,7 @@ function filtered() {
 function renderBoard(rows) {
   const groups = {};
   rows.forEach((r) => {
-    const k = [r.host, r.engine, r.engine_build, idOf(r)].join("|");
+    const k = [r.host, r.engine, r.engine_build, backendOf(r), idOf(r)].join("|");
     const g = (groups[k] = groups[k] || { bench: [], eval: [], agent: [] });
     if (r.kind === "eval") g.eval.push(r); else if (r.kind !== "agent") g.bench.push(r);
     if (agentOf(r)) g.agent.push(r);
@@ -353,11 +365,14 @@ function bestRun(name, quant) {
 
 // What a model's numbers are worth on this machine, from its newest gate
 // (an eval with a needle) and its benches: proven, failed, measured, or
-// nothing at all, on this machine (`topHost`).
+// nothing at all, on this machine (`topHost`). The gate is the newest on the
+// backend the service serves (`SERVED_BACKEND`) when that backend has one,
+// else the newest on any, which the seal names.
 function evidence(name, quant) {
   const mine = ROWS.filter((r) => r.model === name && (!topHost || r.host === topHost) && (!quant || quantOf(r) === quant));
-  const gate = mine.filter((r) => r.kind === "eval" && r.eval?.needle).sort((a, b) => (a.ts < b.ts ? 1 : -1))[0];
-  const build = (r) => (r.engine_build || "").split("-")[0];
+  const gates = mine.filter((r) => r.kind === "eval" && r.eval?.needle).sort((a, b) => (a.ts < b.ts ? 1 : -1));
+  const gate = gates.find((r) => SERVED_BACKEND && backendOf(r) === SERVED_BACKEND) || gates[0];
+  const build = (r) => (r.engine_build || "").split("-")[0] + (r.backend ? ` ${r.backend}` : "");
   const size = (r) => (r.eval?.needle_tokens ? `${Math.round(r.eval.needle_tokens / 1000)}K` : "long-context");
   if (gate?.eval.needle === "PASS")
     return { tier: "proven", text: `<b>Proven</b> on this machine: ${size(gate)} needle passed on ${esc(build(gate))}, ${esc(day(gate.ts))}` };
@@ -417,6 +432,8 @@ let CX = "claude", CX_SHOW = false, CX_STATE = null;
 // The default model's quant, from the Models list: Connect names it, since a
 // client's results belong to that file and not only to the preset's name.
 let SERVED_QUANT = "";
+// The backend the service's last start served (`api/state`'s `backend`).
+let SERVED_BACKEND = "";
 try { CX = localStorage.getItem("golem.connect") || "claude"; } catch (e) { /* no storage */ }
 const WINDOWS = /Windows/.test(navigator.userAgent);
 function connectSetup(chat, state, key) {
@@ -592,6 +609,7 @@ function renderModels(models, state) {
 function renderState(s) {
   if (s.version) $("c-version").textContent = "v" + s.version;
   setThisHost(s.host);
+  SERVED_BACKEND = s.backend || "";
   const busy = s.job_running;
   jobRunning = !!busy;
   $("c-state").className = "state " + (busy ? "busy" : s.up ? "up" : "");

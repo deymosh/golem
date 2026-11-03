@@ -35,14 +35,18 @@ pub fn collect(
     let host_slug =
         machine::host_slug(&gpu, card.as_ref().map_or(0, |g| g.total_mib), machine::ram_total_gb(), &cpu);
 
-    // What the engine says about itself and the file it serves.
+    // What the engine says about itself and the file it serves, and the
+    // install it runs from: `<build>-<backend>` names the backend, which
+    // `/props` does not.
     let props = engine_props(home, model);
+    let cmdline = engine_cmdline(home);
     let engine_build = props
         .as_deref()
         .and_then(|body| props_string(body, "build_info"))
         .filter(|build| !build.is_empty())
-        .or_else(|| build_from_pid_file(home, engine))
+        .or_else(|| build_from_cmdline(&cmdline, engine))
         .unwrap_or_else(|| "unknown".to_string());
+    let backend = backend_from_cmdline(&cmdline, engine);
     let model_file = props
         .as_deref()
         .and_then(|body| props_string(body, "model_path"))
@@ -54,8 +58,10 @@ pub fn collect(
         })
         .unwrap_or_default();
 
-    // The preset the run actually served, when it names a file that is there.
-    let preset_text = preset_text(home, preset_rel);
+    // The preset the run actually served, when it names a file that is there:
+    // as the engine read it, with any value the backend's build cannot serve
+    // replaced (`launch::served_preset`).
+    let preset_text = crate::launch::served_preset(home, engine, preset_rel);
     let ctx: Option<u64> = preset_text.as_deref().and_then(|text| record::ctx_of(text, model));
     let threads: Option<u32> = preset_text
         .as_deref()
@@ -85,6 +91,7 @@ pub fn collect(
         mode: None,
         engine: engine.to_string(),
         engine_build,
+        backend,
         model: model.to_string(),
         quant: golem_core::quant::label(&model_file, model_facts.file_type),
         model_file,
@@ -148,16 +155,34 @@ fn basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
-/// The engine build, taken from the running server's own install path.
+/// The running server's command line, from the launcher's pid file; empty
+/// when nothing runs.
 ///
-/// Some servers (ik_llama.cpp) report no build in `/props`; their command
-/// line names it instead, as `<home>/.local/engines/<engine>/<build>` with
-/// a `-cuda`/`-rocm`/`-vulkan` suffix. The pid comes from the launcher's
-/// pid file.
-fn build_from_pid_file(home: &Path, engine_name: &str) -> Option<String> {
-    let pid = engine::pid(home)?;
-    let cmdline = if cfg!(windows) { windows_cmdline(pid) } else { unix_cmdline(pid) };
-    build_from_cmdline(&cmdline, engine_name)
+/// It names the install the server runs from,
+/// `<home>/.local/engines/<engine>/<build>-<backend>`: the build for a
+/// server that reports none in `/props` (ik_llama.cpp), and the backend
+/// for every one.
+fn engine_cmdline(home: &Path) -> String {
+    match engine::pid(home) {
+        Some(pid) if cfg!(windows) => windows_cmdline(pid),
+        Some(pid) => unix_cmdline(pid),
+        None => String::new(),
+    }
+}
+
+/// The backend a command line's install names for `engine` - the
+/// `-cuda`/`-rocm`/`-vulkan`/`-metal`/`-cpu` suffix of its directory - or
+/// `None`.
+fn backend_from_cmdline(cmdline: &str, engine: &str) -> Option<String> {
+    cmdline.split_whitespace().find_map(|token| {
+        let rest = engines_rest(token)?;
+        let mut segments = rest.split(['/', '\\']);
+        if segments.next()? != engine {
+            return None;
+        }
+        let (_, backend) = segments.next()?.rsplit_once('-')?;
+        ["cuda", "rocm", "vulkan", "metal", "cpu"].contains(&backend).then(|| backend.to_string())
+    })
 }
 
 /// The build a command line names for `engine`, or `None`.
@@ -450,6 +475,13 @@ mod tests {
         assert_eq!(build_from_cmdline(vulkan, "llama.cpp").as_deref(), Some("b11379"));
         // The path must be the named engine's.
         assert_eq!(build_from_cmdline(windows, "ik_llama.cpp"), None);
+        // The directory's suffix is the backend.
+        assert_eq!(backend_from_cmdline(windows, "llama.cpp").as_deref(), Some("cuda"));
+        assert_eq!(backend_from_cmdline(vulkan, "llama.cpp").as_deref(), Some("vulkan"));
+        assert_eq!(backend_from_cmdline(unix, "llama.cpp").as_deref(), Some("rocm"));
+        assert_eq!(backend_from_cmdline(windows, "ik_llama.cpp"), None);
+        let bare = r"C:\golem\.local\engines\ik_llama.cpp\main-b5483\llama-server.exe";
+        assert_eq!(backend_from_cmdline(bare, "ik_llama.cpp"), None, "a tag's own dash is not a backend");
         // No engines path at all: nothing to take.
         assert_eq!(build_from_cmdline("llama-server -m a.gguf", "llama.cpp"), None);
     }

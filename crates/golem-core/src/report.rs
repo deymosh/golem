@@ -202,8 +202,8 @@ pub fn markdown(rows: &[Row]) -> String {
             for row in rejected {
                 let _ = writeln!(
                     out,
-                    "| {} | {} `{}` | {} |",
-                    row.identity(), row.engine, row.engine_build, row.note
+                    "| {} | {} | {} |",
+                    row.identity(), engine_label(row), row.note
                 );
             }
         }
@@ -320,10 +320,19 @@ fn table_row(entry: &Best, distinguishing: &[String]) -> String {
     let day = row.ts.get(..10).unwrap_or(&row.ts);
 
     format!(
-        "| {} | {} `{}` | {} | **{}** | {} | {} | {} | {} | {} | {} | {} |",
-        ctx, row.engine, row.engine_build, setup, decode, prefill, ratio, vram, ram, mtp, needle,
+        "| {} | {} | {} | **{}** | {} | {} | {} | {} | {} | {} | {} |",
+        ctx, engine_label(row), setup, decode, prefill, ratio, vram, ram, mtp, needle,
         day
     )
+}
+
+/// The engine as a row's line names it: the engine, its build, and the
+/// backend when the row recorded one.
+fn engine_label(row: &Row) -> String {
+    match &row.backend {
+        Some(backend) => format!("{} `{}` {backend}", row.engine, row.engine_build),
+        None => format!("{} `{}`", row.engine, row.engine_build),
+    }
 }
 
 #[cfg(test)]
