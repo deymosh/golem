@@ -226,6 +226,15 @@ fn pull_ref(home: &Path, reference: &hub::Ref, name: Option<&str>, log: &mut Log
                 preset.display()
             ));
         }
+        // The same file under another name is the same model: a second
+        // section would be a second tune of it, and its overlay would miss.
+        if let Some(owner) = preset_for_file(&doc, local_name(&quant.files[0].path)) {
+            return Err(format!(
+                "{} is already preset [{owner}] in {} - `golem pull {owner}` fetches its files",
+                local_name(&quant.files[0].path),
+                preset.display()
+            ));
+        }
     }
 
     // Sampling from the base model the GGUF was made from; a repo without
@@ -407,6 +416,11 @@ fn preset_downloads(text: &str) -> Vec<(String, String, String)> {
     out
 }
 
+/// The preset section that already serves `file`, when one does.
+fn preset_for_file(doc: &ini::Document, file: &str) -> Option<String> {
+    doc.preset_names().into_iter().find(|name| doc.value(name, "model").is_some_and(|model| local_name(model) == file))
+}
+
 /// The name a repository path is stored under in `data/models`: its last
 /// part, so a split model's shards land side by side.
 fn local_name(path: &str) -> &str {
@@ -513,7 +527,7 @@ fn floor_of(expected: Option<u64>) -> u64 {
 
 /// The `x-linked-size` of `url`, from `curl -sIL`; when more than one hop of
 /// the redirects reports one, the last wins.
-fn linked_size(url: &str, token: Option<&str>) -> Option<u64> {
+pub(crate) fn linked_size(url: &str, token: Option<&str>) -> Option<u64> {
     let mut command = Command::new("curl");
     // A deadline: the API front asks this while a client waits for its 503.
     command.args(["-sIL", "--max-time", "10"]);
@@ -741,6 +755,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp");
         dir
+    }
+
+    #[test]
+    fn a_file_already_served_names_its_preset() {
+        let doc = ini::parse(
+            "[*]\nn-gpu-layers = 99\n\n[ornith-1.5-35b]\nmodel = Ornith-1.5-35B-Q4_K_M.gguf\n\n[tiny]\nmodel = sub/tiny.gguf\n",
+        );
+        // `golem pull` of the 35B's repository, under the name the Hub gives it.
+        assert_eq!(preset_for_file(&doc, "Ornith-1.5-35B-Q4_K_M.gguf").as_deref(), Some("ornith-1.5-35b"));
+        assert_eq!(preset_for_file(&doc, "tiny.gguf").as_deref(), Some("tiny"));
+        // Another quant is another file, and another preset.
+        assert_eq!(preset_for_file(&doc, "Ornith-1.5-35B-Q5_K_M.gguf"), None);
     }
 
     #[test]
