@@ -131,6 +131,24 @@ pub fn vram_used_mib() -> Option<u64> {
     sysfs_gpu().map(|g| g.used_mib)
 }
 
+/// [`vram_used_mib`], read again only once `max_age` has passed since the
+/// last reading. The console polls the state every few seconds, and on a
+/// card nvidia-smi does not answer every reading is a PowerShell start.
+pub fn vram_used_mib_within(max_age: std::time::Duration) -> Option<u64> {
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static LAST: Mutex<Option<(Instant, Option<u64>)>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((at, reading)) = *last {
+        if at.elapsed() < max_age {
+            return reading;
+        }
+    }
+    let reading = vram_used_mib();
+    *last = Some((Instant::now(), reading));
+    reading
+}
+
 /// The Windows probe for the card: the display class' registry keys name
 /// every adapter with its PCI ID, its description and its VRAM (some
 /// drivers keep the size as a qword, others only as a binary blob), and the

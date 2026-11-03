@@ -202,6 +202,9 @@ pub struct Snapshot {
     /// (`CUDA0 NVIDIA GeForce RTX 3060`, `CPU only`), and the advice when it
     /// is the CPU.
     pub device: Option<(String, Option<String>)>,
+    /// The backend of that start (`cuda`, `vulkan`), for the seal to cite
+    /// the gate this backend passed.
+    pub backend: Option<String>,
     /// This machine's slug (`machine::this_host`).
     pub host: String,
     pub alias: String,
@@ -265,8 +268,11 @@ pub fn snapshot(home: &Path, job: &SharedJob, host: &str) -> Snapshot {
     };
     Snapshot {
         up: status.up,
-        vram_mib: if status.up { machine::vram_used_mib() } else { None },
+        // A reading a few seconds old is as good to a person, and spares a
+        // probe per poll.
+        vram_mib: if status.up { machine::vram_used_mib_within(std::time::Duration::from_secs(10)) } else { None },
         device: crate::launch::device(home),
+        backend: crate::launch::probed_backend(home),
         host: host.to_string(),
         alias: config::get(home, "MODEL_ALIAS").unwrap_or_default(),
         engine: config::get(home, "ENGINE").unwrap_or_else(|| paths::DEFAULT_ENGINE.to_string()),

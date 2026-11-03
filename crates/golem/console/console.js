@@ -231,7 +231,7 @@ function renderBoard(rows) {
       const head = cls !== lastClass ? `<tr class="classrow"><td colspan="14">${esc(cls)}</td></tr>` : "";
       lastClass = cls;
       return head + `<tr><td><span class="swatch" style="background:${colorOf(idOf(r))}"></span>${esc(r.model)}${quantTag(quantOf(r))}</td>
-        <td title="${esc([r.threads != null ? `${r.threads} threads` : "", r.decode_best ? `best run ${fmt(r.decode_best)} t/s` : "", flagStr(r.flags)].filter(Boolean).join(" · "))}">${esc(r.engine)} <span class="flags">${esc(r.engine_build)}</span></td>
+        <td title="${esc([r.threads != null ? `${r.threads} threads` : "", r.decode_best ? `best run ${fmt(r.decode_best)} t/s` : "", flagStr(r.flags)].filter(Boolean).join(" · "))}">${esc(r.engine)} <span class="flags">${esc(buildOf(r))}</span></td>
         <td>${paramsCell(r)}</td>
         <td class="num">${r.ctx ? (r.ctx / 1024).toFixed(0) + "K" : "–"}</td>
         <td class="num ${r.decode_median === bestByClass[cls] ? "best" : ""}">${fmt(r.decode_median)}</td>
@@ -283,7 +283,7 @@ function wireTip(pts) {
       tip.innerHTML =
         `<b>${esc(p.model)}</b>${quantTag(quantOf(p))} <span class="flags">${esc(p.model_file || "")}</span><br>` +
         `${esc(modelLine(p))}<br>` +
-        `${esc(p.engine)} <span class="flags">${esc(p.engine_build)}</span>, ${esc(day(p.ts))}<br>` +
+        `${esc(p.engine)} <span class="flags">${esc(buildOf(p))}</span>, ${esc(day(p.ts))}<br>` +
         `<b>${fmt(p.decode_median)}</b> t/s decode (best ${fmt(p.decode_best)})` +
         (p.draft_accept != null ? `, MTP ${Math.round(p.draft_accept * 100)}%` : "") + `<br>` +
         `${fmt(p.prefill, 0)} t/s prefill, VRAM ${p.vram_mib ? fmt(p.vram_mib / 1024) : "–"} GB` +
@@ -312,7 +312,7 @@ const COLS = [
   ["ts", "Time", (r) => esc((r.ts || "").replace("T", " ").slice(0, 16))],
   ["kind", "Kind", (r) => esc(r.kind)],
   ["model", "Model", (r) => `<span class="swatch" style="background:${colorOf(idOf(r))}"></span>${esc(r.model)}${quantTag(quantOf(r))}`],
-  ["engine_build", "Build", (r) => esc(`${r.engine} ${r.engine_build}`)],
+  ["engine_build", "Build", (r) => esc(`${r.engine} ${buildOf(r)}`)],
   ["model_stats", "Params", (r) => paramsCell(r), false],
   ["ctx", "Ctx", (r) => (r.ctx ? (r.ctx / 1024).toFixed(0) + "K" : "–"), true],
   ["threads", "Threads", (r) => (r.threads != null ? r.threads : "–"), true],

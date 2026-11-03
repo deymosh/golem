@@ -308,6 +308,13 @@ pub fn device(home: &Path) -> Option<(String, Option<String>)> {
     }
 }
 
+/// The backend the last start served (`cuda`, `vulkan`, ...), from the same
+/// probe as [`device`]; `None` when the engine was not probed.
+pub fn probed_backend(home: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(paths::devices(home)).ok()?;
+    devices::from_text(&text).map(|(backend, _)| backend)
+}
+
 /// `<server> --list-devices`, its stdout, or `None` when it fails or hangs.
 fn list_devices(program: &Path) -> Option<String> {
     let mut command = Command::new(program);
@@ -902,6 +909,21 @@ pub fn plan(home: &Path, overrides: &Overrides) -> Result<Startup, String> {
         ));
     }
     let router = adapter.global("router").as_deref() != Some("false");
+    // What the engine reads: the preset with each value this backend's build
+    // cannot serve replaced as the adapter says (`adapter::served`). Every
+    // preset file goes through it, a tune's candidates and its gate too, so
+    // what a tune measures is what is served.
+    let preset_path = match served_text(home, &preset_rel, &adapter, &backend) {
+        Some(text) => {
+            let path = home.join(paths::SERVED_PRESET);
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            path
+        }
+        None => preset_path,
+    };
 
     let mut flags: Vec<(String, String)> = vec![
         ("host".to_string(), "127.0.0.1".to_string()),
@@ -934,7 +956,9 @@ pub fn plan(home: &Path, overrides: &Overrides) -> Result<Startup, String> {
         // only the shared ones above go on the line.
         flags.push(("models-preset".to_string(), preset_path.to_string_lossy().into_owned()));
         flags.push(("models-max".to_string(), "1".to_string()));
-        served = format!("router ({})", preset_path.strip_prefix(home).unwrap_or(&preset_path).display());
+        // The preset the user named, not the served copy a backend's build
+        // reads in its place: that file is golem's, not theirs.
+        served = format!("router ({preset_rel})");
         workdir = home.join("data/models");
     } else {
         let text = std::fs::read_to_string(&preset_path).unwrap_or_default();
@@ -987,6 +1011,25 @@ pub fn plan(home: &Path, overrides: &Overrides) -> Result<Startup, String> {
         router,
         alias,
     })
+}
+
+/// The preset at `preset_rel` as `backend`'s build is served it
+/// (`adapter::served`), when that differs from the file.
+fn served_text(home: &Path, preset_rel: &str, adapter: &ini::Document, backend: &str) -> Option<String> {
+    let text = std::fs::read_to_string(home.join(preset_rel)).ok()?;
+    adapter::served(&text, adapter, backend)
+}
+
+/// The preset text the engine reads for `preset_rel` on this machine's
+/// backend - the file itself, or what [`plan`] serves in its place - for a
+/// row to record the flags the run was served with. `None` when the file is
+/// not there.
+pub fn served_preset(home: &Path, engine: &str, preset_rel: &str) -> Option<String> {
+    let text = std::fs::read_to_string(home.join(preset_rel)).ok()?;
+    let Ok(adapter_text) = paths::adapter(home, engine) else { return Some(text) };
+    let adapter = ini::parse(&adapter_text);
+    let (backend, _) = resolve_backend(home, adapter.global("backend").unwrap_or("cuda"));
+    Some(adapter::served(&text, &adapter, &backend).unwrap_or(text))
 }
 
 /// Merge `extra` into `into` like a map assignment: a key already present
@@ -1177,6 +1220,30 @@ mod tests {
         assert!(plan.args.contains(&"--port".to_string()), "the engine is on the port after golem's: {:?}", plan.args);
         assert!(plan.args.contains(&"8001".to_string()), "{:?}", plan.args);
         assert!(plan.args.contains(&"--api-key".to_string()));
+        assert_eq!(plan.served, "router (config/models.ini)");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_router_on_a_rewritten_preset_names_the_users_preset() {
+        // Under a backend whose build cannot serve one of the preset's values,
+        // the engine reads golem's served copy; what `up` says it serves is
+        // still the preset the configuration names.
+        let dir = engine_home(
+            "plan-router-served",
+            "[*]\njinja = true\nload-mode = mlock\n[model-a]\nmodel = a.gguf\n",
+            "ENGINE = \"llama.cpp\"\nGPU_BACKEND = \"vulkan\"\nMODEL_ALIAS = \"model-a\"\n\
+             MODELS_PRESET = \"config/models.ini\"\n",
+        );
+        std::fs::write(
+            dir.join("config/engines/llama.cpp.ini"),
+            "name = llama.cpp\nbuild = b11379\nserver = llama-server.exe\nrouter = true\n\
+             served.vulkan.load-mode.mlock = mmap+mlock\n",
+        )
+        .expect("adapter");
+        let plan = plan(&dir, &Overrides::default()).expect("plan");
+        let preset = plan.args.iter().skip_while(|a| *a != "--models-preset").nth(1).expect("a preset on the line");
+        assert!(preset.ends_with("models.served.ini"), "the engine reads the served copy: {preset}");
         assert_eq!(plan.served, "router (config/models.ini)");
         std::fs::remove_dir_all(&dir).ok();
     }
