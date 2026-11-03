@@ -42,6 +42,7 @@ use crate::pull;
 use crate::release;
 use crate::machine;
 use crate::paths;
+use crate::proc::kill_tree;
 
 /// How long the card may take to come back.
 const CARD_SETTLE: Duration = Duration::from_secs(20);
@@ -732,24 +733,6 @@ pub fn alive(pid: u32) -> bool {
             .map(|status| status.success())
             .unwrap_or(false)
     }
-}
-
-/// Kill the process and everything it started; `force` is SIGKILL rather
-/// than SIGTERM on Unix (Windows always forces).
-fn kill_tree(pid: u32, force: bool) {
-    if cfg!(windows) {
-        // /T: in router mode each model is a child process, and /F because a
-        // model mid-generation does not answer a polite request.
-        let _ = Command::new("taskkill")
-            .args(["/T", "/F", "/PID", &pid.to_string()])
-            .output();
-        return;
-    }
-    // The children first, because the parent exiting does not take a loaded
-    // model with it, then the parent.
-    let signal = if force { "-KILL" } else { "-TERM" };
-    let _ = Command::new("pkill").args([signal, "-P", &pid.to_string()]).output();
-    let _ = Command::new("kill").args([signal, &pid.to_string()]).output();
 }
 
 /// Remove the home's pid file.

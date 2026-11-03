@@ -61,7 +61,8 @@ fn a_javascript_only_page_says_so_with_its_description() {
     let (page, text) = page("js-only-excalidraw.html");
     assert_eq!(page.title, "Excalidraw Whiteboard");
     assert!(text.contains("Description: Excalidraw is a virtual collaborative whiteboard tool"));
-    assert!(text.contains("builds its content with JavaScript, which Golem's fetch does not run"));
+    assert!(text.contains("builds its content with JavaScript, which Golem could not run for it"));
+    assert!(page.scripted);
 }
 
 #[test]

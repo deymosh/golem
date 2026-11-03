@@ -16,7 +16,8 @@
 //! endpoint and an OpenAI one to its OpenAI endpoint. Search goes to
 //! DuckDuckGo's no-JavaScript page straight from this machine - no key, no
 //! account - and a fetch is a plain GET of the page that never reaches this
-//! machine or the local network.
+//! machine or the local network; a page that needs JavaScript is rendered in
+//! this machine's browser under the same rule (`render`).
 //!
 //! Plain HTTP/1.1 over a socket, a thread per connection, one request per
 //! connection (`Connection: close`), like the rest of golem's HTTP: no
@@ -107,6 +108,8 @@ struct Detail {
     bytes: usize,
     cached: bool,
     tries: u32,
+    /// How a page that needs JavaScript went in the browser, when it went there.
+    render: String,
 }
 
 impl Detail {
@@ -123,6 +126,9 @@ impl Detail {
         }
         if self.tries > 1 {
             out.push_str(&format!(", {} tries", self.tries));
+        }
+        if !self.render.is_empty() {
+            out.push_str(&format!(", {}", self.render));
         }
         out
     }
@@ -1158,7 +1164,7 @@ fn page_of(front: &Front, url: &str, limits: &tools::Limits, detail: &mut Detail
         }
     }
     let started = std::time::Instant::now();
-    let fetched = fetch(url, limits, detail);
+    let fetched = fetch(&front.home, url, limits, detail);
     detail.millis = started.elapsed().as_millis();
     let page = fetched?;
     if let Ok(mut pages) = front.pages.lock() {
@@ -1173,8 +1179,10 @@ fn page_of(front: &Front, url: &str, limits: &tools::Limits, detail: &mut Detail
 /// Fetch a page, following redirects by hand so every hop's address is
 /// checked: a fetch reaches only the public web, never this machine or the
 /// local network, whatever a page or a prompt points it at. The address
-/// curl connects to is the one checked (`--resolve`).
-fn fetch(url: &str, limits: &tools::Limits, detail: &mut Detail) -> Result<tools::Page, String> {
+/// curl connects to is the one checked (`--resolve`). A page that builds
+/// its content with JavaScript is rendered in this machine's browser when
+/// there is one ([`rendered`]).
+fn fetch(home: &Path, url: &str, limits: &tools::Limits, detail: &mut Detail) -> Result<tools::Page, String> {
     let mut url = url.to_string();
     let timeout = limits.timeout_secs.to_string();
     for _ in 0..=FETCH_HOPS {
@@ -1215,7 +1223,10 @@ fn fetch(url: &str, limits: &tools::Limits, detail: &mut Detail) -> Result<tools
         }
         let text = tools::decode_body(&body, content_type);
         return match tools::body_kind(content_type) {
-            tools::BodyKind::Html => Ok(tools::page_from_html(&text, limits.part_chars)),
+            tools::BodyKind::Html => {
+                let page = tools::page_from_html(&text, limits.part_chars);
+                Ok(if page.scripted { rendered(home, &url, limits, detail).unwrap_or(page) } else { page })
+            }
             tools::BodyKind::Text => Ok(tools::page_from_text(&text, limits.part_chars)),
             tools::BodyKind::Unsupported => Err(format!(
                 "the address serves a file ({}), not a page Golem can read",
@@ -1226,9 +1237,34 @@ fn fetch(url: &str, limits: &tools::Limits, detail: &mut Detail) -> Result<tools
     Err(format!("more than {FETCH_HOPS} redirects"))
 }
 
+/// A page that needs JavaScript, rendered in this machine's browser, when
+/// `WEB_BROWSER` allows it, one is installed, and the render holds the page's
+/// own text; otherwise `None`, and the fetch keeps the static page and its
+/// note.
+fn rendered(home: &Path, url: &str, limits: &tools::Limits, detail: &mut Detail) -> Option<tools::Page> {
+    if !crate::render::enabled(home) {
+        return None;
+    }
+    let started = std::time::Instant::now();
+    match crate::render::render(home, url, Duration::from_secs(limits.timeout_secs)) {
+        Ok(done) => {
+            let page = tools::page_from_html(&done.dom, limits.part_chars);
+            let refused = if done.refused > 0 { format!(", {} requests refused", done.refused) } else { String::new() };
+            let kept = if page.scripted { ", no more text" } else { "" };
+            detail.render =
+                format!("rendered by {} in {} ms{refused}{kept}", done.browser, started.elapsed().as_millis());
+            (!page.scripted).then_some(page)
+        }
+        Err(message) => {
+            detail.render = format!("not rendered: {message}");
+            None
+        }
+    }
+}
+
 /// The host's first address, refused when any address it resolves to is
 /// private.
-fn public_address(host: &str, port: u16) -> Result<SocketAddr, String> {
+pub(crate) fn public_address(host: &str, port: u16) -> Result<SocketAddr, String> {
     let addrs: Vec<SocketAddr> = (host, port)
         .to_socket_addrs()
         .map_err(|_| format!("{host} does not resolve"))?
@@ -1257,7 +1293,7 @@ mod tests {
     #[test]
     fn a_private_address_is_never_fetched() {
         for url in ["http://127.0.0.1:8787/", "http://localhost/", "http://[::1]/", "http://192.168.1.1/admin", "http://2130706433/"] {
-            let err = fetch(url, &tools::Limits::default(), &mut Detail::default()).expect_err(url);
+            let err = fetch(Path::new("."), url, &tools::Limits::default(), &mut Detail::default()).expect_err(url);
             assert!(err.contains("local network") || err.contains("resolve"), "{url}: {err}");
         }
     }

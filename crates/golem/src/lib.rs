@@ -29,6 +29,7 @@ pub mod proc;
 pub mod progress;
 pub mod pull;
 pub mod release;
+pub mod render;
 pub mod runner;
 pub mod service;
 pub mod setup;

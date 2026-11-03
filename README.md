@@ -176,7 +176,9 @@ the agent brings, and Claude Code's own **WebSearch** and Codex's hosted `web_se
 unchanged: golem answers them. A search goes to DuckDuckGo from your machine (no key, no
 account) and comes back to the model as a short numbered list; a fetch comes back as the
 page's main text in Markdown, never HTML, and only public pages are fetched - never this
-machine or your network. Each one shows in the answer as `🔎 Golem web search: ...` or
+machine or your network. A page that needs JavaScript is rendered headless in the Chrome,
+Chromium, Brave or Edge already on your machine, under the same rule
+(`WEB_BROWSER = "off"` keeps its static text). Each one shows in the answer as `🔎 Golem web search: ...` or
 `🌐 Golem web fetch: ...`, and is a line in `logs/web.log`. `WEB_SEARCH = "off"` in
 `golem.toml` turns it off. The details are in
 [docs/architecture.md](docs/architecture.md#web-search).

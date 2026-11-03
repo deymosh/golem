@@ -105,6 +105,10 @@ pub mod html;
 /// golem's own calls from the client.
 pub mod webtools;
 
+/// A JavaScript page rendered in the system's browser: where one is
+/// installed, the flags a render runs with, and its proxy's requests.
+pub mod browser;
+
 /// The agent suite: coding tasks run against an in-memory workspace over
 /// either API, graded on what the agent leaves behind.
 pub mod agent;

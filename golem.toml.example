@@ -115,6 +115,12 @@ LOCAL_AI_PORT = "8000"
 # account - and each one is labelled "Golem web search" and logged in
 # logs/web.log. "off" hands requests to the engine without them.
 WEB_SEARCH = "on"
+# A fetched page that builds its content with JavaScript is rendered headless
+# in this machine's Chrome, Chromium, Brave or Edge, on a throwaway profile,
+# every request it makes going through a golem proxy that refuses this
+# machine and the local network. With no browser, or "off", the fetch keeps
+# the page's static text.
+#WEB_BROWSER = "on"
 # Their limits, read on every request: results per search, characters per
 # part of a fetched page (20000 is about 6K tokens), golem tool calls per
 # answer, seconds a search or a fetch hop may take, and how many minutes the

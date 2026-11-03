@@ -113,6 +113,72 @@ where
 /// How long [`run_to_log`] lets the readers drain after the child exits.
 const PIPE_GRACE: Duration = Duration::from_secs(2);
 
+/// Run a prepared command for at most `limit` with its stdout read, up to
+/// `max` bytes: what it printed when it ended in time, `None` when it did
+/// not - then it and everything it started are killed. No window, no stdin,
+/// stderr dropped.
+///
+/// Like [`run_to_log`], the child's exit ends the wait: a helper it leaves
+/// running may hold the pipe, and gets [`PIPE_GRACE`] to let go.
+pub fn output_within(mut command: Command, limit: Duration, max: usize) -> std::io::Result<Option<Vec<u8>>> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let pipe = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        if let Some(pipe) = pipe {
+            let _ = pipe.take(max as u64).read_to_end(&mut out);
+        }
+        out
+    });
+    let deadline = Instant::now() + limit;
+    let ended = loop {
+        if child.try_wait()?.is_some() {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            kill_tree(child.id(), true);
+            let _ = child.kill();
+            let _ = child.wait();
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let grace = Instant::now() + PIPE_GRACE;
+    while !reader.is_finished() && Instant::now() < grace {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let out = if reader.is_finished() { reader.join().unwrap_or_default() } else { Vec::new() };
+    Ok(ended.then_some(out))
+}
+
+/// Kill the process and everything it started; `force` is SIGKILL rather
+/// than SIGTERM on Unix (Windows always forces).
+pub fn kill_tree(pid: u32, force: bool) {
+    if cfg!(windows) {
+        // /T: in router mode each model is a child process, and /F because a
+        // model mid-generation does not answer a polite request.
+        let _ = Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .output();
+        return;
+    }
+    // The children first, because the parent exiting does not take a loaded
+    // model with it, then the parent.
+    let signal = if force { "-KILL" } else { "-TERM" };
+    let _ = Command::new("pkill").args([signal, "-P", &pid.to_string()]).output();
+    let _ = Command::new("kill").args([signal, &pid.to_string()]).output();
+}
+
 /// Every complete line of `pipe`, written to `log` as it arrives.
 fn lines_to<R, W>(pipe: R, log: Arc<Mutex<W>>) -> std::thread::JoinHandle<()>
 where
