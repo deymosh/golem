@@ -15,6 +15,7 @@ pub mod bench;
 pub mod client;
 pub mod config;
 pub mod desktop;
+pub mod discover;
 pub mod engine;
 pub mod eval;
 pub mod facts;

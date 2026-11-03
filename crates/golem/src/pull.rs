@@ -204,6 +204,16 @@ fn pull_ref(home: &Path, reference: &hub::Ref, name: Option<&str>, log: &mut Log
     if let Some(p) = projector {
         log.ok(&format!("vision: {} ({:.1} GB)", p.name(), gb(p.size)));
     }
+    // The fit, from the file's header and the engine's own sizing, before
+    // the weights are fetched; a prediction, so it never stops the pull. A
+    // model split into shards keeps tensors in every shard and is not sized.
+    match quant.files.as_slice() {
+        [file] => match crate::discover::predict(home, repo_id, &file.path, Some(file.size), token.as_deref(), &Default::default()) {
+            Ok(prediction) => log.ok(&format!("fit: {}", prediction.line())),
+            Err(e) => log.info(&format!("fit not predicted: {e}")),
+        },
+        _ => log.info("fit not predicted: the model is split into shards"),
+    }
 
     let name = name.map_or_else(|| hub::preset_name(&repo.id), str::to_string);
     let base = home.join(crate::tune::base_preset(home));

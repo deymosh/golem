@@ -129,6 +129,7 @@ pub fn router(cfg: Config) -> axum::Router {
         .route("/api/addmodel", post(api_addmodel))
         .route("/api/delmodel", post(api_delmodel))
         .route("/api/delpreset", post(api_delpreset))
+        .route("/api/fit", post(api_fit))
         .route("/api/settings", get(api_settings).post(api_set))
         .route("/api/update-check", post(api_update_check))
         .fallback(not_found)
@@ -329,7 +330,7 @@ async fn api_state(State(app): State<Arc<App>>) -> Response {
             "{{\"up\": {}, \"vram\": {}, \"alias\": {}, \"engine\": {}, \"presets\": [{}], \
              \"engines\": [{}], \"job_running\": {}, \"job_action\": {}, \"job_tail\": {}, \
              \"job_progress\": {}, \"update\": {}, \"web\": {}, \"version\": {}, \
-             \"device\": {}, \"cpu_only\": {}, \"host\": {}}}",
+             \"device\": {}, \"cpu_only\": {}, \"backend\": {}, \"host\": {}}}",
             snapshot.up,
             vram,
             json::quote(&snapshot.alias),
@@ -353,6 +354,7 @@ async fn api_state(State(app): State<Arc<App>>) -> Response {
                 .as_ref()
                 .and_then(|(_, advice)| advice.as_ref())
                 .map_or_else(|| "null".to_string(), |advice| json::quote(advice)),
+            snapshot.backend.as_deref().map_or_else(|| "null".to_string(), json::quote),
             // This machine's slug: the host the page shows first.
             json::quote(&snapshot.host),
         ),
@@ -446,6 +448,19 @@ async fn api_delpreset(State(app): State<Arc<App>>, body: Bytes) -> Response {
     edit(app, move |home| models::delete_preset(home, &name)).await
 }
 
+/// `POST /api/fit` with `arg=<preset>`: the predicted fit of a preset's
+/// model that is not downloaded yet (`discover::predict_preset`), as
+/// `Prediction::to_json`, or a 422 saying why there is none.
+async fn api_fit(State(app): State<Arc<App>>, body: Bytes) -> Response {
+    let name = parse_form(&body).get("arg").cloned().unwrap_or_default();
+    let home = app.cfg.home.clone();
+    match tokio::task::spawn_blocking(move || crate::discover::predict_preset(&home, &name)).await {
+        Ok(Ok(prediction)) => json(StatusCode::OK, prediction.to_json()),
+        Ok(Err(e)) => plain(StatusCode::UNPROCESSABLE_ENTITY, &e),
+        Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "fit unavailable"),
+    }
+}
+
 /// `GET /api/settings`: the keys the Settings tab edits
 /// (`golem_core::settings`) with their values in golem.toml.
 async fn api_settings(State(app): State<Arc<App>>) -> Response {
@@ -483,7 +498,13 @@ async fn api_set(State(app): State<Arc<App>>, body: Bytes) -> Response {
         Err(_) => return plain(StatusCode::INTERNAL_SERVER_ERROR, "the setting did not run"),
     };
     let applies = golem_core::settings::find(&key).map_or("now", |s| s.applies.word());
-    match tokio::task::spawn_blocking(move || crate::config::set(&home, &key, &value)).await {
+    // A profile is the effective preset's overlays as well as the key:
+    // the switch rewrites both (`tune::switch_profile`).
+    let save = move || match key.as_str() {
+        "PROFILE" => crate::tune::switch_profile(&home, &value).map(|_| ()).map_err(std::io::Error::other),
+        _ => crate::config::set(&home, &key, &value),
+    };
+    match tokio::task::spawn_blocking(save).await {
         Ok(Ok(())) => json(
             StatusCode::OK,
             format!("{{\"result\": \"saved\", \"applies\": {}}}", json::quote(applies)),

@@ -504,6 +504,24 @@ async function say(response) {
   msg.hidden = !words;
 }
 
+// The predicted fit of a model not downloaded yet, asked of the service once
+// per page (`api/fit`: the header's range request and the engine's sizing,
+// a second or two) and kept by name: the line itself, or why there is none.
+const FITS = {};
+function askFit(el) {
+  const name = el.dataset.fit;
+  if (name in FITS) return;
+  FITS[name] = "Sizing the fit from the header…";
+  el.textContent = FITS[name];
+  post("api/fit", `arg=${encodeURIComponent(name)}`)
+    .then(async (r) => (r.ok ? (await r.json()).line : `Fit not predicted: ${await r.text()}`))
+    .catch(() => "Fit not predicted: the service did not answer")
+    .then((line) => {
+      FITS[name] = line.charAt(0).toUpperCase() + line.slice(1);
+      document.querySelectorAll(`[data-fit="${CSS.escape(name)}"]`).forEach((e) => { e.textContent = FITS[name]; });
+    });
+}
+
 // The list is rebuilt only when what it shows has changed, so a poll does not
 // take the focus from a button or a choice from a menu.
 let modelsShown = "";
@@ -528,6 +546,7 @@ function renderModels(models, state) {
       m.Gb ? `<span>${fmt(m.Gb)} GB</span>` : "",
       m.Ctx ? `<span>${Math.round(m.Ctx / 1024)}K context</span>` : "",
       `<span class="code">${esc(m.Repo || m.File)}</span>`,
+      m.Present ? "" : `<span class="fit" data-fit="${esc(m.Name)}">${esc(FITS[m.Name] || "")}</span>`,
     ].join("");
     const acts = [
       m.Present
@@ -546,6 +565,7 @@ function renderModels(models, state) {
       <div class="acts">${acts}</div></li>`;
   }).join("") : `<li class="empty">No models yet. Pull one above.</li>`;
   $("m-list").querySelectorAll("button").forEach((b) => { b.disabled = running; });
+  $("m-list").querySelectorAll("[data-fit]").forEach(askFit);
 
   // A refused or failed action gives its button back: the list repaints
   // only when what it shows changed, and a refusal changes nothing.

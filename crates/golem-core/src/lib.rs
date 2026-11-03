@@ -14,8 +14,13 @@ pub mod results;
 pub mod ini;
 
 /// GGUF header reader: the layer count, the trained context and the parameter
-/// count the recorder and the tuner size their work from.
+/// count the recorder and the tuner size their work from, the KV cache's
+/// geometry and every tensor's size - from a file or a range request's bytes.
 pub mod gguf;
+
+/// Whether a model fits a card before it is downloaded: the cache per token,
+/// the weights a split keeps on the card, the context the rest holds.
+pub mod fit;
 
 /// Parsers for the RESULT lines of bench and eval output.
 pub mod evalparse;

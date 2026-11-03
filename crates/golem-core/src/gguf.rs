@@ -9,7 +9,9 @@
 //! The metadata can be several megabytes (a 150k-token vocabulary is a
 //! string array), so values are streamed past rather than collected: the
 //! reader seeks over the parts it does not need and holds only the handful
-//! of keys the report uses.
+//! of keys the report and the fit prediction use. The same reader takes the
+//! first bytes of a file fetched by a range request ([`read_bytes`]), which
+//! is how a model is sized before it is downloaded.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -34,8 +36,9 @@ mod vtype {
     pub const FLOAT64: u32 = 12;
 }
 
-/// A metadata value. Arrays are skipped as they are read (the vocabulary is
-/// one, and it is megabytes) so they never appear here.
+/// A metadata value. A short array of integers is kept - a per-layer head
+/// count is one - and every other array is skipped as it is read (the
+/// vocabulary is one, and it is megabytes).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Uint(u64),
@@ -43,11 +46,17 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     Str(String),
+    /// One entry per layer, negatives read as 0.
+    Ints(Vec<u64>),
 }
+
+/// The longest integer array kept: a layer count, with room to spare.
+const INTS_MAX: u64 = 4096;
 
 impl Value {
     /// The number this value holds: a string reads as 0 and a negative as 0,
-    /// so an odd value never panics a reader that only wanted a count.
+    /// so an odd value never panics a reader that only wanted a count. A
+    /// per-layer array reads as its largest entry.
     pub fn as_u64(&self) -> u64 {
         match self {
             Value::Uint(u) => *u,
@@ -55,6 +64,7 @@ impl Value {
             Value::Float(f) => *f as u64,
             Value::Bool(b) => u64::from(*b),
             Value::Str(_) => 0,
+            Value::Ints(items) => items.iter().copied().max().unwrap_or(0),
         }
     }
 
@@ -89,6 +99,23 @@ pub struct ModelFacts {
     /// `general.file_type`: the file's quant as llama.cpp numbers it
     /// (`crate::quant::from_file_type` names it), when the header says.
     pub file_type: Option<u32>,
+    /// The KV cache's geometry: attention heads, the KV heads (the largest
+    /// layer's, when the header gives one per layer) and each head's key and
+    /// value width.
+    pub n_head: u64,
+    pub n_head_kv: u64,
+    pub key_length: u64,
+    pub value_length: u64,
+    /// The layers that keep a KV cache that grows with the context, MTP
+    /// layers left out: every layer, or in a hybrid model only every
+    /// `full_attention_interval`-th - the rest keep a fixed recurrent state.
+    pub n_layer_kv: u64,
+    /// The MTP head's layers (`blk.N.nextn.*`), which keep a cache of their
+    /// own when the engine drafts with them.
+    pub nextn_layers: u64,
+    /// Each tensor's name and size in bytes, from the offsets the tensor
+    /// table gives (the last one from the file's size), in table order.
+    pub tensor_bytes: Vec<(String, u64)>,
 }
 
 impl ModelFacts {
@@ -145,23 +172,50 @@ impl From<io::Error> for GgufError {
     }
 }
 
+/// Where the header's bytes come from: a file, or the first bytes of one a
+/// range request fetched. Both step over what is only in the way without
+/// reading it into memory.
+trait Source: Read {
+    fn skip_bytes(&mut self, n: u64) -> io::Result<()>;
+}
+
+impl Source for BufReader<File> {
+    fn skip_bytes(&mut self, n: u64) -> io::Result<()> {
+        // At most the file's length, which fits an i64 (`Cursor::skip`).
+        self.seek_relative(n as i64)
+    }
+}
+
+impl Source for io::Cursor<&[u8]> {
+    fn skip_bytes(&mut self, n: u64) -> io::Result<()> {
+        // Past the end is allowed here: the next read then fails, and that
+        // is the truncated header it is.
+        self.set_position(self.position().saturating_add(n));
+        Ok(())
+    }
+}
+
 /// A forward-only reader over the header, with seeking for the parts that
 /// are only in the way.
-struct Cursor {
-    reader: BufReader<File>,
+struct Cursor<R: Source> {
+    reader: R,
     /// The file's length: no length field in the header can be larger, so
     /// one that is says the header is broken before anything is allocated
     /// or skipped for it.
     size: u64,
+    /// How far into the file the reader is: where the header ends, once it
+    /// is read, and so where the tensor data starts.
+    pos: u64,
 }
 
-impl Cursor {
+impl<R: Source> Cursor<R> {
     fn take(&mut self, n: usize) -> Result<Vec<u8>, GgufError> {
         if n as u64 > self.size {
             return Err(GgufError::Truncated);
         }
         let mut buf = vec![0u8; n];
         self.reader.read_exact(&mut buf)?;
+        self.pos += n as u64;
         Ok(buf)
     }
 
@@ -223,8 +277,8 @@ impl Cursor {
             return Err(GgufError::Truncated);
         }
         if n > 0 {
-            // `n` is at most the file's length, which fits an i64.
-            self.reader.seek_relative(n as i64)?;
+            self.reader.skip_bytes(n)?;
+            self.pos += n;
         }
         Ok(())
     }
@@ -241,7 +295,8 @@ impl Cursor {
     }
 
     /// Read a value, or step over it when it is one of the kinds we do not
-    /// keep (floats we do keep - they are small - but arrays are not).
+    /// keep (floats we do keep - they are small - and arrays only when they
+    /// are short and of integers).
     fn value(&mut self, t: u32) -> Result<Option<Value>, GgufError> {
         Ok(match t {
             vtype::UINT8 => Some(Value::Uint(self.u8()? as u64)),
@@ -256,21 +311,19 @@ impl Cursor {
             vtype::UINT64 => Some(Value::Uint(self.u64()?)),
             vtype::INT64 => Some(Value::Int(self.i64()?)),
             vtype::FLOAT64 => Some(Value::Float(self.f64()?)),
-            vtype::ARRAY => {
-                self.skip_array()?;
-                None
-            }
+            vtype::ARRAY => self.array()?,
             // An unknown type cannot be sized, so the header cannot be
             // trusted past it: better to say so than to report nonsense.
             _ => return Err(GgufError::Truncated),
         })
     }
 
-    /// An array is an element type, a count, then the elements. Fixed-width
-    /// elements are stepped over in one go; strings are walked one at a time
-    /// (their length varies), which is what makes the tokenizer vocabulary
-    /// cheap: it is read as lengths and skipped, never held.
-    fn skip_array(&mut self) -> Result<(), GgufError> {
+    /// An array is an element type, a count, then the elements. A short one
+    /// of integers is kept ([`Value::Ints`]). Other fixed-width elements are
+    /// stepped over in one go; strings are walked one at a time (their length
+    /// varies), which is what makes the tokenizer vocabulary cheap: it is
+    /// read as lengths and skipped, never held.
+    fn array(&mut self) -> Result<Option<Value>, GgufError> {
         let et = self.u32()?;
         let count = self.u64()?;
         if et == vtype::STRING {
@@ -278,10 +331,19 @@ impl Cursor {
                 let len = self.u64()?;
                 self.skip(len)?;
             }
-            return Ok(());
+            return Ok(None);
+        }
+        let integer = !matches!(et, vtype::FLOAT32 | vtype::FLOAT64 | vtype::BOOL);
+        if integer && count <= INTS_MAX {
+            let mut items = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                let item = self.value(et)?.map_or(0, |v| v.as_u64());
+                items.push(item);
+            }
+            return Ok(Some(Value::Ints(items)));
         }
         match Self::fixed_width(et) {
-            Some(w) => self.skip(w.saturating_mul(count)),
+            Some(w) => self.skip(w.saturating_mul(count)).map(|()| None),
             None => Err(GgufError::Truncated),
         }
     }
@@ -291,8 +353,22 @@ impl Cursor {
 pub fn read(path: &Path) -> Result<ModelFacts, GgufError> {
     let file = File::open(path)?;
     let size = file.metadata()?.len();
-    let mut c = Cursor { reader: BufReader::with_capacity(1 << 16, file), size };
+    facts(Cursor { reader: BufReader::with_capacity(1 << 16, file), size, pos: 0 })
+}
 
+/// Read a model's facts from the first bytes of its file - what a range
+/// request fetched - given the whole file's size (the `Content-Range`
+/// total), which sizes the last tensor. `Truncated` means the header runs
+/// past `bytes`: fetch more and read again.
+pub fn read_bytes(bytes: &[u8], file_size: u64) -> Result<ModelFacts, GgufError> {
+    facts(Cursor { reader: io::Cursor::new(bytes), size: file_size, pos: 0 })
+}
+
+/// Where tensor data starts when the header does not say: GGUF's default
+/// `general.alignment`.
+const ALIGNMENT: u64 = 32;
+
+fn facts<R: Source>(mut c: Cursor<R>) -> Result<ModelFacts, GgufError> {
     let magic = c.take(4)?;
     if magic != *b"GGUF" {
         return Err(GgufError::NotGguf);
@@ -313,6 +389,8 @@ pub fn read(path: &Path) -> Result<ModelFacts, GgufError> {
     let mut params_total: u64 = 0;
     let mut routed: u64 = 0;
     let mut mtp: u64 = 0;
+    let mut nextn_blocks: Vec<u64> = Vec::new();
+    let mut offsets: Vec<(String, u64)> = Vec::with_capacity(n_tensors.min(1 << 16) as usize);
     for _ in 0..n_tensors {
         let name = c.string()?;
         let n_dims = c.u32()?;
@@ -321,7 +399,7 @@ pub fn read(path: &Path) -> Result<ModelFacts, GgufError> {
             count = count.saturating_mul(c.u64()?);
         }
         let _quant = c.u32()?;
-        let _offset = c.u64()?;
+        let offset = c.u64()?;
         params_total = params_total.saturating_add(count);
         // llama.cpp names routed experts blk.N.ffn_{gate,up,down}_exps; a
         // shared expert is "..._shexp" and runs on every token.
@@ -330,8 +408,17 @@ pub fn read(path: &Path) -> Result<ModelFacts, GgufError> {
         }
         if name.contains(".nextn.") {
             mtp = mtp.saturating_add(count);
+            if let Some(block) = block_of(&name) {
+                if !nextn_blocks.contains(&block) {
+                    nextn_blocks.push(block);
+                }
+            }
         }
+        offsets.push((name, offset));
     }
+    let alignment = kv.get("general.alignment").map(Value::as_u64).filter(|&a| a > 0).unwrap_or(ALIGNMENT);
+    let data_start = c.pos.div_ceil(alignment) * alignment;
+    let tensor_bytes = sizes(offsets, c.size.saturating_sub(data_start));
 
     let arch = kv.get("general.architecture").map(Value::as_str).unwrap_or("").to_string();
     // Spelled out rather than behind a closure: the closure would hold a
@@ -357,6 +444,18 @@ pub fn read(path: &Path) -> Result<ModelFacts, GgufError> {
         params_total
     };
 
+    let n_head = kv.get(&format!("{arch}.attention.head_count")).map(Value::as_u64).unwrap_or(0);
+    let head_kv = kv.get(&format!("{arch}.attention.head_count_kv"));
+    let n_head_kv = head_kv.map(Value::as_u64).unwrap_or(n_head);
+    // Without the key the widths are the embedding split over the heads,
+    // which is what llama.cpp assumes too.
+    let head_width = if n_head > 0 { n_embd / n_head } else { 0 };
+    let key_length = kv.get(&format!("{arch}.attention.key_length")).map(Value::as_u64).unwrap_or(head_width);
+    let value_length = kv.get(&format!("{arch}.attention.value_length")).map(Value::as_u64).unwrap_or(head_width);
+    let nextn_layers = nextn_blocks.len() as u64;
+    let interval = kv.get(&format!("{arch}.full_attention_interval")).map(Value::as_u64).unwrap_or(0);
+    let n_layer_kv = layers_with_cache(n_layer.saturating_sub(nextn_layers), interval, head_kv);
+
     Ok(ModelFacts {
         arch,
         name: kv.get("general.name").map(Value::as_str).unwrap_or("").to_string(),
@@ -371,7 +470,53 @@ pub fn read(path: &Path) -> Result<ModelFacts, GgufError> {
         mtp_tensors: u8::from(mtp > 0),
         tensors: n_tensors,
         file_type: kv.get("general.file_type").map(|v| v.as_u64() as u32),
+        n_head,
+        n_head_kv,
+        key_length,
+        value_length,
+        n_layer_kv,
+        nextn_layers,
+        tensor_bytes,
     })
+}
+
+/// `blk.<N>.…` -> N.
+fn block_of(name: &str) -> Option<u64> {
+    name.strip_prefix("blk.")?.split('.').next()?.parse().ok()
+}
+
+/// How many of the `layers` keep a KV cache that grows with the context.
+/// A per-layer KV head count says it layer by layer (a 0 keeps none); a
+/// hybrid model's `full_attention_interval` keeps one in every n-th layer
+/// (llama.cpp's `(il + 1) % n == 0`), the others recurrent; otherwise all.
+fn layers_with_cache(layers: u64, interval: u64, head_kv: Option<&Value>) -> u64 {
+    if let Some(Value::Ints(per_layer)) = head_kv {
+        return per_layer.iter().take(layers as usize).filter(|&&n| n > 0).count() as u64;
+    }
+    if interval > 0 {
+        return layers / interval;
+    }
+    layers
+}
+
+/// Each tensor's size, from the offsets in table order: the distance to the
+/// next tensor's data, and for the last one to the end of `data_len` (the
+/// file's bytes after the header). Padding between tensors counts towards
+/// the one before it, as it does in memory once loaded.
+fn sizes(offsets: Vec<(String, u64)>, data_len: u64) -> Vec<(String, u64)> {
+    let mut by_offset: Vec<u64> = offsets.iter().map(|(_, o)| *o).collect();
+    by_offset.sort_unstable();
+    by_offset.dedup();
+    offsets
+        .into_iter()
+        .map(|(name, offset)| {
+            let next = match by_offset.binary_search(&offset) {
+                Ok(i) => by_offset.get(i + 1).copied().unwrap_or(data_len),
+                Err(_) => data_len,
+            };
+            (name, next.saturating_sub(offset))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -531,6 +676,92 @@ mod tests {
         // 25600 routed - 800 that fire = 24800 saved; the 500 shared expert
         // is not part of that saving.
         assert_eq!(routed_only, 24_800);
+    }
+
+    /// A tensor whose data starts `offset` bytes after the header.
+    fn tensor_at(out: &mut Vec<u8>, name: &str, elements: u64, offset: u64) {
+        s(out, name);
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&elements.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&offset.to_le_bytes());
+    }
+
+    /// The 35B's shape in small: 41 blocks, the last the MTP head, a KV
+    /// cache in every fourth of the other 40 - the keys as its header has
+    /// them - and three tensors whose data is 64, 128 and 64 bytes, after
+    /// the header padded to 32.
+    fn hybrid_fixture() -> Vec<u8> {
+        let mut bytes = write_gguf(
+            7,
+            |b| {
+                kv_str(b, "general.architecture", "qwen35moe");
+                kv_u32(b, "qwen35moe.block_count", 41);
+                kv_u32(b, "qwen35moe.attention.head_count", 16);
+                kv_u32(b, "qwen35moe.attention.head_count_kv", 2);
+                kv_u32(b, "qwen35moe.attention.key_length", 256);
+                kv_u32(b, "qwen35moe.attention.value_length", 256);
+                kv_u32(b, "qwen35moe.full_attention_interval", 4);
+            },
+            3,
+            |b| {
+                tensor_at(b, "blk.0.attn_q.weight", 16, 0);
+                tensor_at(b, "blk.0.ffn_gate_exps.weight", 32, 64);
+                tensor_at(b, "blk.40.nextn.eh_proj.weight", 16, 192);
+            },
+        );
+        bytes.resize(bytes.len().div_ceil(32) * 32 + 256, 0);
+        bytes
+    }
+
+    #[test]
+    fn a_hybrid_models_cache_geometry_and_tensor_sizes_are_read() {
+        let bytes = hybrid_fixture();
+        let facts = read_bytes(&bytes, bytes.len() as u64).expect("reads");
+        assert_eq!((facts.n_head, facts.n_head_kv, facts.key_length, facts.value_length), (16, 2, 256, 256));
+        assert_eq!(facts.nextn_layers, 1, "block 40 is the MTP head");
+        assert_eq!(facts.n_layer_kv, 10, "every fourth of the 40 others");
+        assert_eq!(
+            facts.tensor_bytes,
+            vec![
+                ("blk.0.attn_q.weight".to_string(), 64),
+                ("blk.0.ffn_gate_exps.weight".to_string(), 128),
+                ("blk.40.nextn.eh_proj.weight".to_string(), 64),
+            ]
+        );
+        // The file reader agrees with the byte reader.
+        let path = write_temp("hybrid.gguf", &bytes);
+        assert_eq!(read(&path).expect("reads"), facts);
+    }
+
+    #[test]
+    fn a_per_layer_kv_head_count_says_which_layers_keep_a_cache() {
+        let bytes = write_gguf(
+            3,
+            |b| {
+                kv_str(b, "general.architecture", "hybrid");
+                kv_u32(b, "hybrid.block_count", 4);
+                s(b, "hybrid.attention.head_count_kv");
+                b.extend_from_slice(&vtype::ARRAY.to_le_bytes());
+                b.extend_from_slice(&vtype::UINT32.to_le_bytes());
+                b.extend_from_slice(&4u64.to_le_bytes());
+                for n in [0u32, 8, 0, 4] {
+                    b.extend_from_slice(&n.to_le_bytes());
+                }
+            },
+            1,
+            |b| tensor(b, "token_embd.weight", 10),
+        );
+        let facts = read_bytes(&bytes, bytes.len() as u64).expect("reads");
+        assert_eq!(facts.n_layer_kv, 2);
+        assert_eq!(facts.n_head_kv, 8, "the largest layer's");
+    }
+
+    #[test]
+    fn a_range_short_of_the_header_is_truncated() {
+        let bytes = hybrid_fixture();
+        let err = read_bytes(&bytes[..100], bytes.len() as u64).expect_err("cut inside the header");
+        assert!(matches!(err, GgufError::Truncated), "{err}");
     }
 
     #[test]
