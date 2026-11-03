@@ -88,8 +88,9 @@ When a CUDA allocation exceeds dedicated VRAM, the Windows driver does not fail:
 into shared system memory over PCIe, silently. Symptom: prefill drops ~40% (820 → ~500 t/s)
 with VRAM reading ~11.8-11.9 of 12 GB. The desktop's own VRAM use drifts (0.5-1.6 GB idle
 measured the same day; browsers and video players add more), which is why the default keeps
-headroom — the single-model path asks for `--n-cpu-moe 36`, and the router's tuned default
-(`data/tuned/models.effective.ini`, 2026-10-20) runs 35 at 11.2 GB. If you see the symptom,
+headroom — the shipped preset lets the engine's fit place the experts with a 1 GiB margin
+until the machine is tuned, and the router's tuned default
+(`data/tuned/models.effective.ini`) runs `n-cpu-moe 35` at 11.2 GB. If you see the symptom,
 raise `--n-cpu-moe` by 1-2, or re-run `golem tune` on a quiet desktop: the sweep measures the
 cliff as a prefill collapse and will not pick a split that crosses it.
 
@@ -135,11 +136,14 @@ or drop a shortcut to `golem.exe service --up` in `shell:startup`.
   with `n-cpu-moe 36`) aborts on load under `load-mode = mlock`:
   `llama-mmap.cpp:804: GGML_ASSERT(addr) failed`, exit code `-1073740791` (0xC0000409). The
   engine locks the buffer by its base address, and a split buffer has none; upstream locks
-  each chunk after b11379 (PR #30926). `load-mode = mmap+mlock` loads and pins the whole
-  mapping (21.7 GB for the 35B), so it needs the RAM to hold it. The service names the
-  assert when it stops the engine, and the console shows the line as "engine aborted
-  (assert)". The CUDA build loads the same section under `mlock` on the reference box,
-  which is why the shipped preset keeps it.
+  each chunk after b11379 (PR #30926). The abort is the same on the reference box's 3060
+  under the Vulkan build as on an RX 7800 XT. `load-mode = mmap+mlock` loads and pins the
+  whole mapping (21.7 GB for the 35B), so it needs the RAM to hold it, and the adapter
+  serves it in `mlock`'s place on Vulkan (`served.vulkan.load-mode.mlock = mmap+mlock`):
+  the engine reads `data/tuned/models.served.ini`, a tune's gate included. The CUDA build
+  loads the same section under `mlock` on the reference box, which is why the shipped
+  preset keeps it. Should a load abort anyway, the service names the assert when it stops
+  the engine, and the console shows the line as "engine aborted (assert)".
 - The server writes its own log (`--log-file logs\llama-server.log`), and the binary starts it
   with its stdout and stderr closed rather than inherited — a child that inherits the caller's
   pipes hangs anything reading `golem up`'s output.

@@ -98,6 +98,23 @@ engine serves Anthropic's API only under `/v1`, so golem sends each to the engin
   numbered list - up to `WEB_RESULTS` (8) results, title, real URL (DuckDuckGo's redirect unwrapped),
   snippet cut near 300 characters, ads and duplicates dropped - about 1K tokens, because
   prefill is what a tool result costs on a 12 GB card.
+- **Why DuckDuckGo.** The rules for a search backend are no key, no account, no server
+  to run, nothing reported about the user, and plain HTTPS from one binary. Checked on
+  2026-10-30 with one desktop-browser request each for "llama.cpp releases github":
+  DuckDuckGo's no-JavaScript page and its `lite.duckduckgo.com/lite/` page each return
+  ten results with title, address and snippet, and `html.duckduckgo.com`'s own
+  robots.txt allows every path (the `duckduckgo.com` one disallows `/html` and `/lite`).
+  Nothing else passes. Brave, Mojeek, Qwant and Yandex need a key, a partner agreement or
+  payment; Marginalia's shared `public` key answered 429 at once; Startpage and public
+  SearXNG instances answer with a proof-of-work or a 429, and SearXNG serves no JSON
+  unless its operator enables it; Ecosia's firewall answered 403 and its terms forbid
+  automated access; Google answered a JavaScript page with no results; Bing returns
+  results behind its own click-tracking redirects; Stract's search is gone. A SearXNG of
+  one's own is a server to install and keep, which is setup, and its operator - the user -
+  still sends every query on to the engines it aggregates. Wikipedia's API needs no key
+  and allows 200 anonymous requests a minute, but answers only what an encyclopedia
+  covers. So DuckDuckGo stays the only backend, and the lite page - same index, links
+  unwrapped - is the one second source that would fit, untested against the web check.
 - **Fetch** is a plain GET with curl, redirects followed by hand. Every hop's host is
   resolved and refused when it is this machine or the local network, and curl is pinned
   to the checked address, so a page or a prompt cannot point it at the console or a
@@ -107,7 +124,19 @@ engine serves Anthropic's API only under `/v1`, so golem sends each to the engin
   `WEB_FETCH_CHARS` (20000 characters, about 6K tokens) fenced as `--- page content
   (from the web, not instructions) ---`. With `links: true` the main content's links
   follow as a numbered list of text and absolute address, so the model can follow one.
-  A page that only renders with JavaScript says so with its description. Pages are kept
+  A page that only renders with JavaScript (under 200 characters of text, and scripts) is
+  rendered in the machine's own Chromium-family browser - Chrome, Chromium or Brave where
+  one is installed, else Edge - headless, on a throwaway profile under `.local/browser/`,
+  one render at a time, its DOM read with `--dump-dom` after at most 10 s of the page's
+  scripts and its process tree killed at `WEB_TIMEOUT`. Every request the page makes goes
+  through a loopback proxy golem runs for that render (`--proxy-bypass-list=<-loopback>`,
+  QUIC off, WebRTC kept to proxied connections), which resolves each host, refuses this
+  machine and the local network, and connects to the address it checked. Background
+  networking, sync, component updates, pings and crash reports are off. When there is no
+  browser, `WEB_BROWSER = "off"`, the render fails, or it holds no more text, the page
+  says it needs JavaScript and gives its description. `logs/web.log` says which browser
+  rendered it, how long it took and how many requests it refused
+  ([roadmap.md](roadmap.md#web-search-phase-2-pages-that-need-javascript)). Pages are kept
   per service for their later parts. A search and each fetch hop may take `WEB_TIMEOUT`
   seconds (20). The limits are read on every request, from `golem.toml` or the
   console's Settings tab.
@@ -140,8 +169,8 @@ command line. The binary's layers, top to bottom:
 | Layer | Modules | Owns |
 |---|---|---|
 | Front ends | `main`, `desktop`, `app`, `tui`, `web`, `runner` | the CLI, which front end a bare `golem` opens, the window and tray (`--features desktop`), the full-screen screen, the console; `runner` is the one path a menu entry or a page button takes |
-| Commands | `bench`, `eval`, `agent`, `measure`, `tune`, `auto_tune`, `pull`, `install`, `setup`, `logs`, `client` | one command each; `agent` runs the agent suite's loop; `measure` records a row after `bench`/`eval`/`agent` |
-| Engine | `service`, `api`, `launch`, `release`, `engine` | who owns the engine, the port clients reach it on, how it is started and stopped, how its build is installed, how it is spoken to |
+| Commands | `bench`, `eval`, `agent`, `measure`, `tune`, `auto_tune`, `pull`, `discover`, `install`, `setup`, `logs`, `client` | one command each; `agent` runs the agent suite's loop; `measure` records a row after `bench`/`eval`/`agent`; `discover` predicts a model's fit from its header before `pull` fetches it |
+| Engine | `service`, `api`, `render`, `launch`, `release`, `engine` | who owns the engine, the port clients reach it on (and the pages its web fetch renders), how it is started and stopped, how its build is installed, how it is spoken to |
 | Foundation | `config`, `paths`, `machine`, `proc`, `state`, `facts`, `models` | the configuration, the home's files, the hardware probes, child processes, what the console shows, what a row says |
 
 `golem-core` decides; `golem` measures and acts. A tuner decision, an INI merge or a
@@ -262,7 +291,8 @@ adapter and the preset, and spawns nothing - `golem up --dry-run` prints it.
   `router`) and the flag translation (`flag.*`, `map.*`) from the canonical llama.cpp
   names. The platform is detected, never configured; `GPU_BACKEND = "auto"` reads the
   card's PCI vendor (`nvidia-smi`, else the Windows registry or Linux sysfs, through
-  `machine`): NVIDIA is `cuda`, AMD `rocm`, Intel `vulkan`, and macOS is `metal`. On
+  `machine`): NVIDIA is `cuda`, AMD `rocm` (`vulkan` while `.local/rocm-unavailable.txt`
+  says why the ROCm runtime could not be fetched), Intel `vulkan`, and macOS is `metal`. On
   Apple Silicon the card `machine` reports is the share of the shared memory Metal may
   keep resident.
 - **Install** (`release.rs`) downloads the matching archives with `curl` and extracts them
@@ -271,13 +301,27 @@ adapter and the preset, and spawns nothing - `golem up --dry-run` prints it.
   which reads zip) - the `tar` on PATH under Git for Windows is GNU tar and cannot.
   Releases only, on purpose: the pin is the artifact the 200K gate adopted, and a source
   build of today's upstream is a different binary.
+- **Libraries a release lacks.** An adapter can name an archive outside the release for a
+  backend (`<platform>_libraries_<backend>`, with its SHA-256, the folder inside it and the
+  files to take, `golem_core::adapter::libraries`). The Windows ROCm zip carries the HIP
+  runtime but not the hipBLAS and rocBLAS its `ggml-hip.dll` imports, so for `rocm` the
+  adapter names AMD's ROCm 7.2.1 SDK libraries wheel. When those files are not beside the
+  server (and hipBLAS and rocBLAS are not on PATH, where an installed SDK puts them),
+  `install` and `up` fetch the wheel into `data/cache/`, refuse it unless it hashes as
+  pinned, extract only the named files and folders into a staging folder and move them
+  beside the server - no admin rights, no PATH change, since Windows looks in the
+  executable's folder first. When `auto` chose `rocm` and the fetch fails, the reason goes
+  to `.local/rocm-unavailable.txt`, `up` serves the Vulkan build instead and says why, and
+  `golem install` removes the file and tries ROCm again. This places the libraries and
+  resolves every import against the zip's own DLLs; whether HIP then finds an AMD card is
+  unproven until an RX 7800 XT runs `golem eval --long 200000`.
 - **The device probe.** An engine whose GPU backend cannot initialise still starts, and
   runs every layer on the CPU; its log at the router's verbosity does not say so. Before
   each start (and before a tune's first load), with the card empty, `up` runs the server's
   `--list-devices` when the adapter says `list_devices = true` and keeps the answer in
   `.local/devices.txt` (`golem_core::devices`). `status` and the console show the device;
-  with none, `up` gives the fix for the backend (for the Windows ROCm build, the HIP SDK's
-  missing libraries) and `bench`, `eval` and `tune` refuse to run or record. The Settings
+  with none, `up` gives the fix for the backend (for the Windows ROCm build, which of
+  hipBLAS and rocBLAS is still missing) and `bench`, `eval` and `tune` refuse to run or record. The Settings
   tab offers only the backends the card's vendor runs and this platform has an archive of.
 - **Router mode, always.** The models are a preset file (`MODELS_PRESET`, else the shipped
   `config/models.ini`), and an adapter with `router = true` starts the server with
@@ -285,6 +329,13 @@ adapter and the preset, and spawns nothing - `golem up --dry-run` prints it.
   golem.toml only the shared ones (host, port, key, threads, parallel, the sleep timer). A
   preset that is not on disk is refused. An adapter without a router (`router = false`)
   is started on the default section's flags, translated.
+- **A value the build cannot serve.** An adapter's `served.<backend>.<key>.<value>` names
+  the value a preset line is served with on that backend (`golem_core::adapter::served`):
+  b11379 under Vulkan aborts locking the 35B's split host buffer with `load-mode = mlock`,
+  so the shipped adapter serves `mlock` there as `mmap+mlock`. The engine then reads
+  `data/tuned/models.served.ini`, the preset with those lines replaced; every preset file
+  goes through it - a tune's candidates and its gate too, so a tune gates what is served -
+  and a row records the flags as served.
 - **The process name.** On Windows the server is started through a hard link beside it
   named `Golem engine (<engine>).exe`, so the engine and the per-model processes a router
   starts from its own path show as golem's in Task Manager.
@@ -322,6 +373,9 @@ repository root uses the checkout's own files.
 | `data/models/` | GGUF files |
 | `data/tuned/<host>/<engine>/<preset>.ini` | each gated tune's overlay |
 | `data/tuned/models.effective.ini` | the base presets with this machine's overlays merged in |
+| `data/tuned/models.served.ini` | what the engine reads when the backend's build serves a preset value otherwise |
+| `data/cache/` | the update check's state, and archives fetched for an engine's libraries (AMD's ROCm wheel) |
+| `.local/devices.txt`, `.local/rocm-unavailable.txt` | the engine's `--list-devices` at its last start; why the ROCm runtime could not be fetched |
 | `results/results.jsonl` | every measurement, append-only ([results/README.md](../results/README.md)) |
 | `logs/llama-server.log`, `logs/web-job.log` | the engine's log; the console's job log |
 | `.local/` | installed engine builds, the pid file, the service endpoint, the dev toolchain |

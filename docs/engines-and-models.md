@@ -120,8 +120,21 @@ session:
 
 and its gate: 200K **PASS**, 707 t/s needle prefill (b11379: 671), 35.2 t/s at depth
 (35.9). Prefill gains ~7%, decode loses 4-10% with a weaker MTP acceptance, so b11379 stays.
-The next build to try is run under `mmap+mlock` (the `measure` skill's build trial); only
-the pinned b11379 stays installed.
+
+**b12065** (2026-11-03, measured the same day) holds the same shape. Under `mmap+mlock` on
+the served preset, quiet desktop, alternating b11379, b12065, b12065, b11379:
+
+| | decode median | decode best | prefill (28.6K) | MTP accept |
+|---|---|---|---|---|
+| b11379 | 63.0 / 63.2 | 63.6 / 63.4 | 850 / 876 | 68% |
+| b12065 | 61.0 / 60.9 | 62.5 / 62.6 | 931 / 923 | 63% |
+
+and its gate: 200K **PASS**, 708 t/s needle prefill and 37.8 t/s at depth (b11379's gate
+the same morning: 673 and 35.5), the agent suite **10 of 11** on both APIs - it misses
+the rename past a built name, its last turn cut at the 16384-token cap, where b11379 solves
+eleven. Prefill and decode at depth gain 5-7%, short decode loses 3.5% with the weaker MTP
+acceptance, and the suite loses a task, so b11379 stays. The next build to try is run under
+`mmap+mlock` (the `measure` skill's build trial).
 
 ### Using another server
 

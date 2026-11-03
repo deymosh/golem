@@ -103,9 +103,11 @@ Each fact about a model lives in one place:
 | `data/models/<file>.json` | repo, revision, quant, files, size, base model, licence, date | golem, beside the file |
 | `config/library.ini` | curated models: repo, quant, role, vendor score and its source | shipped with golem |
 
-A model outside the library has no score to read - the Hub publishes none - so `tune
---auto` ranks it after every scored one, by parameters, then the context and the decode
-its cheap sweep reached; a model under the floors is no candidate at all.
+A model outside the library has no score to read - the Hub publishes none - so until this
+machine has run the agent suite on it, `tune --auto` ranks it after every scored one, by
+parameters, then the context and the decode its frontier measured; once the suite has run
+on it, its share ranks it ([tuning.md](tuning.md#--auto)). A model under the floors is no
+candidate at all.
 
 ## Memory math, two regimes
 

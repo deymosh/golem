@@ -10,6 +10,8 @@ golem tune ornith-1.5-35b            # search, gate, write the overlay
 golem tune ornith-1.5-35b --adopt    # ...and point golem.toml at the result
 golem tune --auto --adopt            # pick the best installed model first
 golem tune <preset> --dry-run        # the plan, and what it would spend
+golem tune <preset> --fresh          # measure every point and the agent suite again
+golem tune <preset> --frontier       # the split frontier only: no refine, context or gate
 ```
 
 Every point is a full model load and a restart - for the default coder a 20 GB read on a
@@ -25,6 +27,16 @@ it records no row in `results/results.jsonl`, and `winner.txt` lists it as "over
 once loaded". The splits past the frontier and the context probes that overshoot are most
 of these.
 
+Every point a run measures is kept in `data/tuned/<host>/points.jsonl`, keyed by the model
+file (its name and size), the engine and its build on its backend, the candidate's
+effective flags and the bench's runs and prefill (`golem_core::tune::point_key`), with the
+desktop's share of the card at the start of that run. A later run takes a kept point
+instead of loading it (`tune::reuse`) when the desktop's share has moved no more than a
+reading's noise (128 MiB) since - the reading moved by the difference - or when it was over
+the wall and the moved reading still is; anything else is loaded again. A kept point
+records no new row, and the narration says "kept from <day>, not loaded". `--fresh`
+measures every point again.
+
 ## The floors
 
 A candidate under any floor is excluded from the ranking, however good it looks next to a
@@ -35,7 +47,7 @@ worse one, and the run says which and why.
 | decode (median) | 25 t/s | ~30 t/s felt fine in real sessions, 23 was sluggish, 16.7 (ik_llama.cpp) was rejected as unusable |
 | prefill | 350 t/s | 820 t/s reads Claude Code's ~27K first prompt in ~35 s; 340 t/s took ~80 s - tolerated once, not a tuning result |
 | decode at depth | 15 t/s | a giant context that is unusable at depth is a fake win; the default coder does ~35 at 200K |
-| agent suite | 75% per API | nine of the gate's eleven agent tasks on `/v1/messages` and on `/v1/chat/completions`: a setup an agent cannot work on is not one to serve |
+| agent suite | 75% per API | the gate's twelve agent tasks on `/v1/messages` and on `/v1/chat/completions`: a setup an agent cannot work on is not one to serve |
 
 `TUNE_MIN_DECODE`, `TUNE_MIN_PREFILL`, `TUNE_MIN_DEPTH_DECODE` and `TUNE_MIN_AGENT` in
 `golem.toml` move them; `--min-decode`, `--min-prefill`, `--min-depth-decode` and
@@ -108,6 +120,16 @@ and put back after the run on the configuration as it then stands.
    whose model did not load at all: the next candidate loads the same way, so the run
    stops there and names the load mode as the suspect.
 
+   The agent suite asks at temperature 0 with a fixed token cap, so it measures the model,
+   the build and the flags that change an answer; the split, the context, the batch sizes,
+   the threads and the load mode (`tune::PLACEMENT_FLAGS`) move only the speed. A gate
+   keeps the suite of an earlier gate (`tune::kept_agent`) when the newest eval row of this
+   host with the same model file, engine build, backend and every other flag ran it on
+   both APIs at a context no larger than this candidate's, and cleared the floor: the eval
+   runs with `--no-agent`, its row notes "agent suite kept from <ts>", and the floor reads
+   the kept scores. A suite that failed is run again, never carried; `--fresh` runs it
+   whatever was kept. On the coder's tune the suite was half the run (843 of 1681 s).
+
 Budget for the default coder: about ten loads - three to five for the frontier, one or two
 refine probes, two or three for the context, and the gate - against the seventeen the
 original grid sweep spent.
@@ -144,13 +166,44 @@ screen's Tune is `tune <model> --adopt`: it always gates, so a tune started ther
 its verdict once the gate passes. `data/tuned/<host>/winner.txt` records the verdict and every point, and
 every point is also a row in `results/results.jsonl`.
 
+## Profiles
+
+A profile is a context target and the gate that goes with it (`golem_core::profile`):
+
+| Profile | Context | Gate |
+|---|---|---|
+| `coder` (the default) | the largest the card holds | the 200K needle |
+| `chat` | 32768 | a 29491-token needle |
+
+There is no smaller profile: the gate's agent suite sends requests of 20K tokens and Claude
+Code's first prompt is about 27K, so 32768 is the least an agent works in. A 16384-token
+profile, gated on the 35B on 2026-11-03, placed the same split as 32768 (`n-cpu-moe 25`)
+and failed every candidate's suite on its context.
+
+`golem tune <preset> --profile chat` pins the context and sizes the gate to the profile,
+and on a pass writes its overlay beside the coder's, as `<preset>@chat.ini`. `PROFILE` in
+`golem.toml` (`golem profile <name>`, or the Settings tab) says which overlays the effective
+preset carries: per preset the profile's own, else the coder's. A switch undoes the keys
+the outgoing overlays set - back to the base preset's value, or gone where it has none -
+and merges the incoming ones, leaving every other line of the effective file as it was
+(`profile::switch`); a restart serves it. The ranking is the tuner's for every profile:
+decode, within the floors. The coder profile is the one the 200K gate makes a default.
+
 ## `--auto`
 
-Ranks every preset whose GGUF is already on disk by its `; Quality: N` comment (a vendor
-score - a ranking input, never a reason to adopt) or by size, gives each a cheap search,
-then tunes and gates the best, falling back down the ranking. A model that is not
-downloaded is skipped, never fetched mid-measurement, and it refuses to start while a
-download, a build or a game is loading the machine.
+Gives every preset whose GGUF is already on disk a cheap search - its split frontier and
+nothing after it (`--frontier`) - ranks them, then tunes and gates the best, falling back
+down the ranking. The full tune takes the frontier's points back as kept ones, so the
+refine probes and the context search are spent on the preset it picks alone.
+
+The ranking reads the agent suite where this machine has run it on the model's file (its
+newest run, the worse API's share, `results::agent_share`): a model that solved at least
+`TUNE_MIN_AGENT` comes first, by its share; one that solved less comes last. Between
+them, the models never measured, by the library's vendor score or a `; Quality: N`
+comment (a ranking input, never a reason to adopt); then the size, the context and the
+decode. Each line says which it read (`agent 100%`, `vendor 79`, `unscored`). A model
+that is not downloaded is skipped, never fetched mid-measurement, and it refuses to start
+while a download, a build or a game is loading the machine.
 
 ## Measured
 
