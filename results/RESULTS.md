@@ -66,6 +66,25 @@ NVIDIA GeForce RTX 3060 · windows
 | 248K | llama.cpp `b11379-1537a0a8b` | threads=16 n-cpu-moe=37 spec-type=draft-mtp fit=off cache-type-k=q8_0 cache-type-v=q8_0 load-mode=auto ubatch-size=2048 temp=0.6 top-k=20 min-p=0 | **60.8** | 493 | 17.6 | 11.0 | 24.3 | 75% | PASS | 2026-10-25 |
 | 256K | llama.cpp `b11379-1537a0a8b` | threads=16 n-cpu-moe=37 spec-type=draft-mtp fit=off cache-type-k=q8_0 cache-type-v=q8_0 load-mode=auto ubatch-size=2048 temp=0.6 top-k=20 min-p=0 | **60.6** | 492 | 17.6 | 11.2 | 23.8 | 75% | PASS | 2026-10-25 |
 
+### agents-a1-q4_k_m Q4_K_M — 34.66B total, 3.45B active, 256x8 experts
+
+| ctx | engine | setup | decode t/s | prefill t/s | t/s / active B | VRAM GB | RAM GB | MTP acc. | needle | measured |
+|---:|---|---|---:|---:|---:|---:|---:|---:|---|---|
+| 32K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=23 fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=1024 | **57.4** | 732 | 16.6 | 10.4 | 20.8 | - | PASS | 2026-11-07 |
+| 53K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=23 fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=2048 | **55.3** | 1032 | 16.0 | 11.0 | 21.0 | - | PASS | 2026-11-07 |
+| 54K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=23 fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=2048 | **56.2** | 1049 | 16.3 | 11.0 | 21.0 | - | PASS | 2026-11-07 |
+| 61K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=23 fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=2048 | **55.2** | 980 | 16.0 | 11.1 | 21.0 | - | PASS | 2026-11-07 |
+| 64K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=23 fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=2048 | **57.6** | 1009 | 16.7 | 11.0 | 21.0 | - | PASS | 2026-11-07 |
+| 218K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=29 fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=2048 | **52.3** | 539 | 15.2 | 11.0 | 21.6 | - | PASS | 2026-11-07 |
+| 256K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=30 fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=1024 | **51.9** | 625 | 15.0 | 10.6 | 21.2 | - | PASS | 2026-11-07 |
+
+### sage-a1.5-q4_k_m Q4_K_M — 35.51B total, 3.52B active, 256x8 experts
+
+| ctx | engine | setup | decode t/s | prefill t/s | t/s / active B | VRAM GB | RAM GB | MTP acc. | needle | measured |
+|---:|---|---|---:|---:|---:|---:|---:|---:|---|---|
+| 218K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=34 spec-type=draft-mtp fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=1024 | **56.8** | 564 | 16.1 | 9.9 | 22.3 | 57% | PASS | 2026-11-07 |
+| 256K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=34 spec-type=draft-mtp fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=1024 | **56.3** | 578 | 16.0 | 10.6 | 22.3 | 57% | PASS | 2026-11-07 |
+
 ### flint UD-Q3_K_XL — 39.79B total, 2.82B active, 256x6 experts
 
 | ctx | engine | setup | decode t/s | prefill t/s | t/s / active B | VRAM GB | RAM GB | MTP acc. | needle | measured |
@@ -114,6 +133,14 @@ NVIDIA GeForce RTX 3060 · windows
 | 224K | llama.cpp `b11379-1537a0a8b` | threads=16 n-cpu-moe=0 spec-type=draft-mtp fit=off cache-type-k=q8_0 cache-type-v=q8_0 temp=0.6 top-k=20 min-p=0 top-p=0.95 mmproj=mmproj-Ornith-1.5-9B-BF16.gguf spec-draft-type-k=q4_0 spec-draft-type-v=q4_0 | **75.1** | 1427 | 8.2 | 11.6 | 7.8 | 63% | PASS | 2026-10-28 |
 | 256K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=0 spec-type=draft-mtp fit=off cache-type-k=q8_0 cache-type-v=q8_0 temp=0.6 top-k=20 min-p=0 top-p=0.95 mmproj=mmproj-Ornith-1.5-9B-BF16.gguf spec-draft-type-k=q8_0 spec-draft-type-v=q8_0 | **75.8** | 1103 | 8.2 | 11.6 | 9.1 | 63% | PASS | 2026-11-03 |
 
+### oxcoder-9b Q4_K_M — 8.95B
+
+| ctx | engine | setup | decode t/s | prefill t/s | t/s / active B | VRAM GB | RAM GB | MTP acc. | needle | measured |
+|---:|---|---|---:|---:|---:|---:|---:|---:|---|---|
+| 218K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=0 fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=2048 mmproj=OxCoder-9B.mmproj-bf16.gguf | **54.3** | 1699 | 6.1 | 10.8 | 7.8 | - | PASS | 2026-11-07 |
+| 225K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=0 fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=2048 mmproj=OxCoder-9B.mmproj-bf16.gguf | **54.2** | 1689 | 6.1 | 11.0 | 7.8 | - | PASS | 2026-11-07 |
+| 244K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=0 fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=1024 mmproj=OxCoder-9B.mmproj-bf16.gguf | **51.8** | 1613 | 5.8 | 11.0 | 7.4 | - | PASS | 2026-11-07 |
+
 ### qwen3.5-9b UD-Q4_K_XL — 8.95B
 
 | ctx | engine | setup | decode t/s | prefill t/s | t/s / active B | VRAM GB | RAM GB | MTP acc. | needle | measured |
@@ -121,6 +148,15 @@ NVIDIA GeForce RTX 3060 · windows
 | 64K | llama.cpp `b11379-1537a0a8b` | threads=16 cache-type-k=q8_0 cache-type-v=q8_0 temp=0.7 top-k=20 min-p=0 top-p=0.8 | **52.3** | 1556 | 5.8 | 7.0 | 6.5 | - | PASS | 2026-10-20 |
 | 128K | llama.cpp `b11379-1537a0a8b` | threads=16 n-cpu-moe=0 fit=off cache-type-k=q8_0 cache-type-v=q8_0 temp=0.7 top-k=20 min-p=0 top-p=0.8 | **52.1** | 1655 | 5.8 | 8.3 | 6.6 | - | PASS | 2026-10-25 |
 | 252K | llama.cpp `b11379-1537a0a8b` | threads=16 n-cpu-moe=0 fit=off cache-type-k=q8_0 cache-type-v=q8_0 temp=0.7 top-k=20 min-p=0 top-p=0.8 | **52.1** | 1659 | 5.8 | 11.0 | 6.7 | - | PASS | 2026-10-25 |
+
+### mimo-v2.6-distill-qwen-9b Q4_K_M — 8.95B
+
+| ctx | engine | setup | decode t/s | prefill t/s | t/s / active B | VRAM GB | RAM GB | MTP acc. | needle | measured |
+|---:|---|---|---:|---:|---:|---:|---:|---:|---|---|
+| 32K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=0 fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=1024 temp=0.6 top-k=20 top-p=0.95 mmproj=mmproj-MiMo-V2.6-Distill-Qwen-9B-f16.gguf | **50.8** | 1642 | 5.7 | 6.4 | 7.3 | - | PASS | 2026-11-07 |
+| 64K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=0 fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=2048 temp=0.6 top-k=20 top-p=0.95 mmproj=mmproj-MiMo-V2.6-Distill-Qwen-9B-f16.gguf | **50.7** | 1647 | 5.7 | 7.4 | 7.6 | - | PASS | 2026-11-07 |
+| 210K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=0 fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=2048 temp=0.6 top-k=20 top-p=0.95 mmproj=mmproj-MiMo-V2.6-Distill-Qwen-9B-f16.gguf | **50.6** | 1650 | 5.7 | 11.0 | 8.1 | - | PASS | 2026-11-07 |
+| 234K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=0 fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=1024 temp=0.6 top-k=20 top-p=0.95 mmproj=mmproj-MiMo-V2.6-Distill-Qwen-9B-f16.gguf | **50.7** | 1633 | 5.7 | 11.0 | 7.7 | - | PASS | 2026-11-07 |
 
 ### ornith-1.5-9b Q6_K — 9.20B
 
