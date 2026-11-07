@@ -72,6 +72,16 @@ slower than Ornith at every depth for no better suite. Agents-A1's GGUF carries 
 head, which is most of its gap; Sage-A1.5 drafts, and still decodes 16% under Ornith in the
 same session.
 
+`Apodex-1.1-mini` (`apodex/Apodex-1.1-mini-GGUF`, Apache-2.0, a Qwen3.5-35B-A3B fine-tune,
+one Q4_K_M file of 21.7 GB with its MTP head embedded), measured 2026-11-07/08 the same way:
+`golem tune` found n-cpu-moe 35 at 243712 tokens, and the gate passed - 659 t/s needle
+prefill, 34.1 at depth - with the agent suite at **9 of 12** on both APIs (it misses the
+included settings, the rename past a built name and the backoff). Benched against Ornith's
+served preset in the same session, alternating Ornith, Apodex, Apodex, Ornith: decode median
+46.5 / 46.2 against 60.4 / 60.9 t/s, prefill 724 / 699 against 833 / 838, its draft head
+accepted 52% of tokens against Ornith's 68% - and the tune measured it drafting no faster
+than not (47.9 against 48.8 t/s). A quarter slower and three tasks short, it is not adopted.
+
 ### Every preset, re-tuned 2026-10-25
 
 `golem tune <preset>` for each, one at a time, on llama.cpp b11379, quiet desktop, wall
