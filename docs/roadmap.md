@@ -410,8 +410,11 @@ and holding the 200K gate. What is still open, from
   b11755 loads but decodes slower at depth. b12065 (2026-11-03) passes the 200K gate with
   5-7% more prefill and decode at depth, 3.5% less short decode and ten of eleven agent
   tasks against b11379's eleven (engines-and-models.md), so it is not adopted either.
-  Each new release gets the `measure` skill's build trial under `mmap+mlock`, and the
-  adapter's `build` moves when one wins.
+  b12189 (2026-11-07) ties b11379 on short decode, gains 10% on prefill, and passes the
+  gate at 11 of 12, but still loads only under `mmap+mlock`, which pins the whole file and
+  leaves the desktop about 3 GB less RAM; it is not adopted. Each new release gets the
+  `measure` skill's build trial, and the adapter's `build` moves when one wins - most
+  likely the first to load under `mlock` again.
 - **Strata.** Through 0.2.12 no release claims enough on 12 GB + 32 GB to close the gap
   that kept 0.2.6 at half llama.cpp's decode ([engines-and-models.md](engines-and-models.md));
   it is measured when one does.

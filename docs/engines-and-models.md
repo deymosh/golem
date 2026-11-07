@@ -138,8 +138,24 @@ and its gate: 200K **PASS**, 708 t/s needle prefill and 37.8 t/s at depth (b1137
 the same morning: 673 and 35.5), the agent suite **10 of 11** on both APIs - it misses
 the rename past a built name, its last turn cut at the 16384-token cap, where b11379 solves
 eleven. Prefill and decode at depth gain 5-7%, short decode loses 3.5% with the weaker MTP
-acceptance, and the suite loses a task, so b11379 stays. The next build to try is run under
-`mmap+mlock` (the `measure` skill's build trial).
+acceptance, and the suite loses a task, so b11379 stays.
+
+**b12189** (measured 2026-11-07) is the first to lose nothing on short decode. Under
+`mmap+mlock` on the served preset, quiet desktop, alternating b11379, b12189, b12189, b11379:
+
+| | decode median | decode best | prefill (28.6K) | MTP accept |
+|---|---|---|---|---|
+| b11379 | 61.1 / 62.3 | 62.1 / 62.8 | 874 / 859 | 68% |
+| b12189 | 61.4 / 61.6 | 62.0 / 63.0 | 950 / 965 | 68% |
+
+and its gate: 200K **PASS**, 735 t/s needle prefill and 37.4 t/s at depth, the agent suite
+**11 of 12** on both APIs (it misses the rename past a built name, stopped at the turn
+limit; b11379's served setup misses the backoff task instead). It still fails `load-mode =
+mlock`, and `mmap+mlock` pins the whole 21.7 GB file where `mlock` pins what the split
+leaves in RAM: the benches left 0.2-0.5 GB of RAM free under `mmap+mlock` against 2.7-3.6
+GB under the served `mlock` the same week. A tie on decode and 10% more prefill do not buy
+3 GB of the desktop's memory, so b11379 stays; the build that loads under `mlock` again is
+the one to try next, under the `measure` skill's build trial.
 
 ### Using another server
 
