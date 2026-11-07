@@ -326,6 +326,16 @@ pub fn preset_name(repo: &str) -> String {
         .collect()
 }
 
+/// The section a pulled quant is written under: `name` while no preset has
+/// it, else `name-<quant>` (`qwen3.5-9b-q5_k_m`) - another quant of one
+/// repository is another file, so another section. `None` when both are
+/// taken.
+pub fn section_name(name: &str, quant: &str, taken: &[String]) -> Option<String> {
+    let free = |candidate: &String| !taken.iter().any(|t| t == candidate);
+    let by_quant = format!("{name}-{}", preset_name(quant));
+    [name.to_string(), by_quant].into_iter().find(free)
+}
+
 /// Sampling defaults from a model's `generation_config.json`, as preset
 /// keys, in a fixed order. Only what the file sets.
 pub fn sampling(text: &str) -> Vec<(&'static str, String)> {
@@ -520,6 +530,16 @@ mod tests {
         assert_eq!(preset_name("bartowski/Qwen_Qwen3.6-35B-A3B-GGUF"), "qwen3.6-35b-a3b");
         assert_eq!(preset_name("ornith-ai/Ornith-1.5-35B-A3B-GGUF"), "ornith-1.5-35b-a3b");
         assert_eq!(preset_name("someone/Plain Model"), "plain-model");
+    }
+
+    #[test]
+    fn a_second_quant_of_a_repo_is_named_by_its_quant() {
+        let taken = vec!["qwen3.5-9b".to_string()];
+        assert_eq!(section_name("qwen3.5-9b", "Q4_K_M", &[]).as_deref(), Some("qwen3.5-9b"));
+        assert_eq!(section_name("qwen3.5-9b", "Q5_K_M", &taken).as_deref(), Some("qwen3.5-9b-q5_k_m"));
+        assert_eq!(section_name("qwen3.5-9b", "UD-Q6_K_XL", &taken).as_deref(), Some("qwen3.5-9b-ud-q6_k_xl"));
+        let both = vec!["qwen3.5-9b".to_string(), "qwen3.5-9b-q5_k_m".to_string()];
+        assert_eq!(section_name("qwen3.5-9b", "Q5_K_M", &both), None);
     }
 
     #[test]

@@ -107,7 +107,8 @@ section is one model with its own flags. A request's `model` field picks the sec
 
 1. `golem pull owner/repo[:quant]` (or a name from `config/library.ini`): golem asks the
    Hub, picks the quant this machine can hold, switches on the MTP head when the file has
-   one, and writes the preset section.
+   one, and writes the preset section, named after the repository (`qwen3.5-9b`); a second
+   quant of a repository already there is named by its quant (`qwen3.5-9b-q5_k_m`).
 2. `golem tune <preset> --adopt`: the split, the context and the gate, written as this
    machine's overlay.
 3. `MODEL_ALIAS = "<preset>"` in `golem.toml` to make it the default; clients that name a

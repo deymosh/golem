@@ -142,9 +142,11 @@ fn run_inner(home: &Path, preset: Option<&str>, log: &mut Log) -> Result<(), Str
 /// The section goes to the base preset (`MODELS_PRESET`, or the repository's
 /// own when that is the tuner's effective file) and, when the served preset
 /// is the effective one, there too: the effective file is the base with this
-/// machine's overlays merged in, and a new model has none yet. A preset that
-/// already has the name is refused - pulling must not retune a model that is
-/// already there - and nothing is downloaded before that is known.
+/// machine's overlays merged in, and a new model has none yet. A file a
+/// preset already serves is refused - pulling must not retune a model that
+/// is already there - and another quant of a repository whose name is taken
+/// is named by its quant ([`hub::section_name`]); nothing is downloaded
+/// before that is known.
 fn pull_ref(home: &Path, reference: &hub::Ref, name: Option<&str>, log: &mut Log) -> Result<(), String> {
     log.section("MODEL FROM HUGGING FACE");
     if !have_tool("curl") {
@@ -215,17 +217,12 @@ fn pull_ref(home: &Path, reference: &hub::Ref, name: Option<&str>, log: &mut Log
         _ => log.info("fit not predicted: the model is split into shards"),
     }
 
-    let name = name.map_or_else(|| hub::preset_name(&repo.id), str::to_string);
+    let wanted = name.map_or_else(|| hub::preset_name(&repo.id), str::to_string);
     let base = home.join(crate::tune::base_preset(home));
     let served = state::preset_path(home);
+    let mut taken = Vec::new();
     for preset in [&base, &served] {
         let doc = ini::Document::read(preset).map_err(|e| format!("cannot read {}: {e}", preset.display()))?;
-        if doc.preset_names().iter().any(|n| n == &name) {
-            return Err(format!(
-                "a preset [{name}] is already in {} - `golem pull {name}` fetches its files",
-                preset.display()
-            ));
-        }
         // The same file under another name is the same model: a second
         // section would be a second tune of it, and its overlay would miss.
         if let Some(owner) = preset_for_file(&doc, local_name(&quant.files[0].path)) {
@@ -235,6 +232,16 @@ fn pull_ref(home: &Path, reference: &hub::Ref, name: Option<&str>, log: &mut Log
                 preset.display()
             ));
         }
+        taken.extend(doc.preset_names());
+    }
+    let Some(name) = hub::section_name(&wanted, &quant.label, &taken) else {
+        return Err(format!(
+            "presets [{wanted}] and [{wanted}-{}] are already there - `golem pull {wanted}` fetches its files",
+            hub::preset_name(&quant.label)
+        ));
+    };
+    if name != wanted {
+        log.info(&format!("[{wanted}] serves another file: this quant is preset [{name}]"));
     }
 
     // Sampling from the base model the GGUF was made from; a repo without
