@@ -49,6 +49,7 @@ NVIDIA GeForce RTX 3060 · windows
 | 243K | llama.cpp `b11379-1537a0a8b` vulkan | threads=16 n-cpu-moe=35 spec-type=draft-mtp fit=off cache-type-k=q8_0 cache-type-v=q8_0 load-mode=mmap+mlock ubatch-size=2048 temp=0.6 top-k=20 min-p=0 mmproj=mmproj-Ornith-1.5-35B-BF16.gguf | **42.2** | 425 | 12.0 | 10.2 | 18.3 | 63% | PASS | 2026-10-30 |
 | 243K | llama.cpp `b11936-27b7a8a00` | threads=16 n-cpu-moe=35 spec-type=draft-mtp fit=off cache-type-k=q8_0 cache-type-v=q8_0 load-mode=mmap+mlock ubatch-size=2048 temp=0.6 top-k=20 min-p=0 | **58.5** | 925 | 16.6 | 11.4 | 23.4 | 63% | PASS | 2026-10-27 |
 | 243K | llama.cpp `b12065-ee17f293b` cuda | threads=16 n-cpu-moe=35 spec-type=draft-mtp fit=off cache-type-k=q8_0 cache-type-v=q8_0 load-mode=mmap+mlock ubatch-size=2048 temp=0.6 top-k=20 min-p=0 mmproj=mmproj-Ornith-1.5-35B-BF16.gguf | **61.0** | 931 | 17.3 | 10.9 | 23.5 | 63% | PASS | 2026-11-03 |
+| 243K | llama.cpp `b12189-80d2c0c2c` cuda | threads=16 n-cpu-moe=35 spec-type=draft-mtp fit=off cache-type-k=q8_0 cache-type-v=q8_0 load-mode=mmap+mlock ubatch-size=2048 temp=0.6 top-k=20 min-p=0 mmproj=mmproj-Ornith-1.5-35B-BF16.gguf | **61.6** | 965 | 17.5 | 11.0 | 22.2 | 68% | PASS | 2026-11-07 |
 | 244K | llama.cpp `b11379-1537a0a8b` | threads=16 n-cpu-moe=35 spec-type=draft-mtp cache-type-k=q8_0 cache-type-v=q8_0 load-mode=mlock ubatch-size=2048 temp=0.6 top-k=20 min-p=0 | **62.1** | 870 | 17.6 | 11.0 | 19.9 | 68% | PASS | 2026-10-20 |
 | 244K | llama.cpp `b11379-1537a0a8b` | threads=16 n-cpu-moe=35 spec-type=draft-mtp fit=off cache-type-k=q8_0 cache-type-v=q8_0 load-mode=auto ubatch-size=2048 temp=0.6 top-k=20 min-p=0 mmproj=mmproj-Ornith-1.5-35B-BF16.gguf | **53.7** | 750 | 15.3 | 11.0 | 21.3 | 60% | PASS | 2026-10-29 |
 | 244K | llama.cpp `b11879-c49edf096` | threads=16 n-cpu-moe=35 spec-type=draft-mtp fit=off cache-type-k=q8_0 cache-type-v=q8_0 load-mode=auto ubatch-size=2048 temp=0.6 top-k=20 min-p=0 | **56.0** | 893 | 15.9 | 11.0 | 23.7 | 63% | PASS | 2026-10-25 |
@@ -100,6 +101,13 @@ NVIDIA GeForce RTX 3060 · windows
 | 132K | llama.cpp `b11936-27b7a8a00` | threads=16 n-cpu-moe=30 fit=off cache-type-k=q8_0 cache-type-v=q8_0 load-mode=auto ubatch-size=2048 temp=1.0 top-k=20 top-p=0.95 | **49.2** | 1149 | 17.4 | 11.0 | 18.5 | - | FAIL | 2026-10-28 |
 | 133K | llama.cpp `b11936-27b7a8a00` | threads=16 n-cpu-moe=30 fit=off cache-type-k=q8_0 cache-type-v=q8_0 load-mode=auto ubatch-size=2048 temp=1.0 top-k=20 top-p=0.95 | **49.3** | 1152 | 17.5 | 11.0 | 18.5 | - | FAIL | 2026-10-28 |
 | 140K | llama.cpp `b11936-27b7a8a00` | threads=16 n-cpu-moe=30 fit=off cache-type-k=q8_0 cache-type-v=q8_0 load-mode=auto ubatch-size=2048 temp=1.0 top-k=20 top-p=0.95 | **48.5** | 1110 | 17.2 | 11.1 | 18.5 | - | FAIL | 2026-10-28 |
+
+### apodex-1.1-mini Q4_K_M — 35.51B total, 3.52B active, 256x8 experts
+
+| ctx | engine | setup | decode t/s | prefill t/s | t/s / active B | VRAM GB | RAM GB | MTP acc. | needle | measured |
+|---:|---|---|---:|---:|---:|---:|---:|---:|---|---|
+| 218K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=34 spec-type=draft-mtp fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=2048 temp=1.0 top-k=20 top-p=0.95 mmproj=mmproj-apodex1.1-35b-F16.gguf | **49.3** | 502 | 14.0 | 11.0 | 22.9 | 57% | PASS | 2026-11-07 |
+| 238K | llama.cpp `b11379-1537a0a8b` cuda | threads=16 n-cpu-moe=35 spec-type=draft-mtp fit=off cache-type-k=q8_0 cache-type-v=q8_0 ubatch-size=2048 temp=1.0 top-k=20 top-p=0.95 mmproj=mmproj-apodex1.1-35b-F16.gguf | **48.2** | 511 | 13.7 | 11.0 | 23.4 | 52% | PASS | 2026-11-07 |
 
 ### nemotron-3.5-lightning-30b UD-Q4_K_M — 32.91B total, 3.70B active, 128x6 experts
 
