@@ -892,6 +892,15 @@ pub fn slope_key(engine: &str, ubatch: u32, overrides: &[crate::ini::Entry]) -> 
     format!("{engine}|ub{ubatch}|{spec}")
 }
 
+/// A candidate's overrides at another context: any `ctx-size` it carries -
+/// the frontier pins the gate's - gives way to `ctx`, so the file and the
+/// point's key hold one.
+pub fn with_ctx(overrides: &[crate::ini::Entry], ctx: u64) -> Vec<crate::ini::Entry> {
+    let mut out: Vec<crate::ini::Entry> = overrides.iter().filter(|e| e.key != "ctx-size").cloned().collect();
+    out.push(crate::ini::Entry::new("ctx-size", ctx.to_string()));
+    out
+}
+
 /// The bench's own RESULT line, out of everything the run printed.
 pub fn bench_result(text: &str) -> Option<crate::evalparse::Bench> {
     text.lines()
@@ -903,6 +912,16 @@ pub fn bench_result(text: &str) -> Option<crate::evalparse::Bench> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_context_rung_replaces_the_pinned_context() {
+        let pinned = vec![crate::ini::Entry::new("ctx-size", "223232"), crate::ini::Entry::new("n-cpu-moe", "35")];
+        let rung = with_ctx(&pinned, 243712);
+        let ctx: Vec<&str> = rung.iter().filter(|e| e.key == "ctx-size").map(|e| e.value.as_str()).collect();
+        assert_eq!(ctx, vec!["243712"]);
+        assert!(rung.iter().any(|e| e.key == "n-cpu-moe" && e.value == "35"));
+        assert_eq!(with_ctx(&[], 4096).len(), 1);
+    }
 
     #[test]
     fn a_bench_says_its_two_readings() {

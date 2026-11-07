@@ -1801,8 +1801,7 @@ impl<'a> Tuner<'a> {
         let overrides = self.points[candidate].overrides.clone();
 
         if let CtxPolicy::Pinned(pin) = self.opts.ctx {
-            let mut with_ctx: Vec<Entry> = overrides.iter().filter(|e| e.key != "ctx-size").cloned().collect();
-            with_ctx.push(Entry::new("ctx-size", pin.to_string()));
+            let with_ctx = tune::with_ctx(&overrides, pin);
             let label = format!("{engine}-ctx{pin}");
             if self.measure(&engine, &label, &with_ctx).is_some() {
                 return self.points.len() - 1;
@@ -1836,8 +1835,7 @@ impl<'a> Tuner<'a> {
         }
         let mut best = candidate;
         while let Rung::Grow(next) = search.next() {
-            let mut with_ctx = overrides.clone();
-            with_ctx.push(Entry::new("ctx-size", next.to_string()));
+            let with_ctx = tune::with_ctx(&overrides, next);
             let label = format!("{engine}-ctx{next}");
             if self.measure(&engine, &label, &with_ctx).is_none() {
                 break;
@@ -1896,8 +1894,7 @@ impl<'a> Tuner<'a> {
                 Rung::Stop => break,
                 Rung::Grow(next) => next,
             };
-            let mut with_ctx = overrides.to_vec();
-            with_ctx.push(Entry::new("ctx-size", next.to_string()));
+            let with_ctx = tune::with_ctx(&overrides, next);
             let label = format!("{engine}-ctx{next}");
             if self.measure(engine, &label, &with_ctx).is_none() {
                 break;
@@ -1910,8 +1907,7 @@ impl<'a> Tuner<'a> {
                 // then stop: finer steps are noise at this point.
                 last = RungOutcome::Failed { attempt: next };
                 if let Rung::Grow(mid) = tune::next_context(current, ceiling, last.clone()) {
-                    let mut with_mid = overrides.to_vec();
-                    with_mid.push(Entry::new("ctx-size", mid.to_string()));
+                    let with_mid = tune::with_ctx(&overrides, mid);
                     let mid_label = format!("{engine}-ctx{mid}");
                     if self.measure(engine, &mid_label, &with_mid).is_some() {
                         let at = self.points.len() - 1;
