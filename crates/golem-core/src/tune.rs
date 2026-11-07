@@ -733,22 +733,13 @@ pub fn reuse(kept: &[Kept], key: &str, desktop_now_mib: f64, wall_mib: u64) -> O
     (newest.wall_only && moved.vram_mib > wall_mib as f64).then_some(moved)
 }
 
-/// The flags that place a model on the machine: how much of it sits on the
-/// card, how much context it holds, how it is batched, threaded and loaded.
-/// They move its speed and its memory, not what it answers.
-pub const PLACEMENT_FLAGS: &[&str] = &[
-    "ctx-size",
-    "n-cpu-moe",
-    "n-gpu-layers",
-    "batch-size",
-    "ubatch-size",
-    "threads",
-    "threads-batch",
-    "load-mode",
-    "fit",
-    "fit-target",
-    "fit-ctx",
-];
+/// The flags that move a setup's speed and memory but not what it answers:
+/// how much context it holds, how many threads it runs and how its weights
+/// are loaded. The split, the layers on the card and the batch sizes are not
+/// among them - each changes which kernels sum a token's numbers and in what
+/// order, and a greedy answer turns on that (docs/tuning.md); `fit` picks the
+/// split, so it is not either.
+pub const SPEED_ONLY_FLAGS: &[&str] = &["ctx-size", "threads", "threads-batch", "load-mode"];
 
 /// A gate's setup, as [`kept_agent`] matches it against the rows.
 #[derive(Debug, Clone, PartialEq)]
@@ -769,16 +760,15 @@ pub struct GateSetup {
 /// newest eval row of the same host that ran today's suite (every task of
 /// [`crate::agent::TASKS`]) on both APIs, with
 /// the same model file, engine, build and backend and the same flags but
-/// the placement ones ([`PLACEMENT_FLAGS`]), at a context no larger than
-/// this setup's - the suite's turns fit in what it had. The suite asks at
-/// temperature 0 with a fixed token cap, so what it measures is the model,
-/// the build and the flags that change the answer; a split or a context
-/// moves the speed. `None` when there is no such row, or when the newest one
-/// is under `floor`: a suite that failed is run again, not carried.
+/// the ones that move only the speed ([`SPEED_ONLY_FLAGS`]), at a context no
+/// larger than this setup's - the suite's turns fit in what it had. The suite
+/// asks at temperature 0 with a fixed token cap, so one setup answers it the
+/// same way every run. `None` when there is no such row, or when the newest
+/// one is under `floor`: a suite that failed is run again, not carried.
 pub fn kept_agent<'a>(rows: &'a [crate::results::Row], setup: &GateSetup, floor: f64) -> Option<&'a crate::results::Row> {
     let answers = |flags: &[(String, String)]| {
         let mut kept: Vec<(String, String)> =
-            flags.iter().filter(|(k, _)| !PLACEMENT_FLAGS.contains(&k.as_str())).cloned().collect();
+            flags.iter().filter(|(k, _)| !SPEED_ONLY_FLAGS.contains(&k.as_str())).cloned().collect();
         kept.sort();
         kept
     };
@@ -1713,10 +1703,11 @@ mod tests {
             ("cache-type-v", "q8_0"),
             ("spec-type", "draft-mtp"),
             ("ctx-size", "242688"),
-            ("load-mode", "mlock"),
+            ("load-mode", "mmap+mlock"),
+            ("threads", "16"),
             ("n-cpu-moe", "35"),
             ("batch-size", "2048"),
-            ("ubatch-size", "1024"),
+            ("ubatch-size", "2048"),
             ("temp", "0.6"),
             ("fit", "off"),
         ];
@@ -1732,11 +1723,19 @@ mod tests {
     }
 
     #[test]
-    fn a_gate_keeps_the_suite_of_the_same_setup_placed_elsewhere() {
-        let rows = vec![gate_row("2026-11-03T02:19Z", 25, 32768, "q8_0", [12, 12])];
-        // Another split, context and ubatch-size: the same answers.
+    fn a_gate_keeps_the_suite_of_the_same_setup_at_another_context() {
+        let rows = vec![gate_row("2026-11-03T02:19Z", 35, 32768, "q8_0", [12, 12])];
+        // Another context, thread count and load mode: the same answers.
         let kept = kept_agent(&rows, &coder_setup(242688), 0.75).expect("kept");
         assert_eq!(kept.ts, "2026-11-03T02:19Z");
+        // Another split or prompt batch sums the numbers in another order,
+        // and a greedy answer turns on it: MiMo-9B solved 12 of 12 at
+        // ubatch-size 1024 and 11 at 2048, each the same on every run.
+        let other_split = vec![gate_row("2026-11-03T02:19Z", 25, 32768, "q8_0", [12, 12])];
+        assert!(kept_agent(&other_split, &coder_setup(242688), 0.75).is_none());
+        let mut other_batch = coder_setup(242688);
+        other_batch.flags.iter_mut().filter(|(k, _)| k == "ubatch-size").for_each(|(_, v)| *v = "1024".into());
+        assert!(kept_agent(&rows, &other_batch, 0.75).is_none());
         // Less context than the suite had is not held to its result.
         assert!(kept_agent(&rows, &coder_setup(16384), 0.75).is_none());
         // Another build, backend, host or model file is another setup.
@@ -1751,11 +1750,11 @@ mod tests {
             change(&mut setup);
             assert!(kept_agent(&rows, &setup, 0.75).is_none(), "{setup:?}");
         }
-        // A flag that changes the answers is another setup.
-        let other_cache = vec![gate_row("2026-11-03T02:19Z", 25, 32768, "q4_0", [12, 12])];
+        // A cache type is another setup too.
+        let other_cache = vec![gate_row("2026-11-03T02:19Z", 35, 32768, "q4_0", [12, 12])];
         assert!(kept_agent(&other_cache, &coder_setup(242688), 0.75).is_none());
         // A suite of fewer tasks than today's is another suite.
-        let older = vec![gate_row_of("2026-11-03T02:19Z", 25, 32768, "q8_0", [11, 11], 11)];
+        let older = vec![gate_row_of("2026-11-03T02:19Z", 35, 32768, "q8_0", [11, 11], 11)];
         assert!(kept_agent(&older, &coder_setup(242688), 0.75).is_none());
     }
 
@@ -1763,7 +1762,7 @@ mod tests {
     fn a_kept_suite_is_the_newest_and_must_have_passed() {
         let rows = vec![
             gate_row("2026-11-03T01:44Z", 35, 32768, "q8_0", [12, 12]),
-            gate_row("2026-11-03T02:19Z", 25, 32768, "q8_0", [12, 8]),
+            gate_row("2026-11-03T02:19Z", 35, 32768, "q8_0", [12, 8]),
         ];
         // The newest scored 8 of 12 on one API, under 75%: run it again.
         assert!(kept_agent(&rows, &coder_setup(242688), 0.75).is_none());

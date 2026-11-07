@@ -52,8 +52,9 @@ inside each; the levers are fewer loads and less bench per load.
   200010 tokens either way). `tune --auto`'s cheap pass measures each preset's frontier
   and nothing after it (`tune --frontier`). And a gate keeps the agent suite of an
   earlier gate on the same model file, build, backend and answering flags at no more
-  context (`tune::kept_agent`): the suite asks at temperature 0, so the split and the
-  context move its speed, not its answers.
+  context (`tune::kept_agent`): the suite asks at temperature 0, so the context, the
+  threads and the load mode move its speed, not its answers; the split and the batch
+  sizes move both (docs/tuning.md).
 - **Measured** on the reference box, 2026-10-29, same session: the previous build's tune
   took 22 min 51 s and 9 loads to n35 at 249856 tokens; this one 19 min 08 s and 10 loads
   to the same split at 247808, then 18 min 06 s and 8 loads to `ub1024` at 262144. Every
@@ -339,10 +340,12 @@ describes. No profile goes below 32K: that is the smallest context an agent work
   than 32768 - Claude Code's first prompt alone is about 27K - so "the smallest the
   model is useful at" is the chat profile's context, and `max` is dropped: on this card
   it bought no split, and a profile no setup can pass is not one to offer.
-- **Decided, the table's rankings.** The agent suite asks at temperature 0, so every
-  placement of one model answers it alike - which is what lets a gate keep it (section
-  1) - and ranking a model's splits by it ranks nothing: it ranks models, which is
-  `tune --auto`'s ranking (section 3). A chat prompt's first token waits on its prefill,
+- **Decided, the table's rankings.** The agent suite asks at temperature 0, so a setup
+  answers it the same way every run; another split or batch size takes another greedy
+  path, and the score can move a task either way on it - an accident of the summation
+  order, not a property of the split. Ranking a model's splits by it ranks that accident;
+  the suite ranks models, which is `tune --auto`'s ranking (section 3), and the gate
+  holds the chosen setup's own run to the floor. A chat prompt's first token waits on its prefill,
   and the tuner's decode tie already goes to the faster prefill, so the chat profile's
   "decode, then first-token time" is the ranking it has. Decode at depth is measured
   once, by the gate; ranking a coder's splits by it would spend a 200K needle (about
@@ -417,13 +420,15 @@ and holding the 200K gate. What is still open, from
   ([models.md](models.md#coder-candidates-measured-2026-11-07)). A 35B-A3B GGUF without an
   MTP head (Agents-A1, Logics-SWE-Qwen3.6's) decodes ~52 t/s here against Ornith's ~63, so
   such a file has to win on the agent suite by a clear margin to be worth the load.
-- **The suite under another prompt batch.** A gate keeps an earlier gate's agent suite
-  across placements, on the reading that the split, the context and the batch sizes move
-  only speed (`tune::PLACEMENT_FLAGS`). OxCoder-9B's tune on 2026-11-07 gated the same file
-  twice at temperature 0: 7/12 at `ubatch-size 2048`, 9/12 at 1024, on both APIs. A
-  different batch changes the kernels' summation order, and a greedy answer can turn on
-  it. Open: whether `ubatch-size` leaves `PLACEMENT_FLAGS`, which costs a suite per batch
-  probe, or a model's share is read across batch sizes as the noise it is.
+- **Decided, the suite under another prompt batch.** OxCoder-9B's tune on 2026-11-07
+  gated the same file twice at temperature 0: 7/12 at `ubatch-size 2048`, 9/12 at 1024,
+  on both APIs. The question was whether that was run-to-run noise or the batch. Measured
+  the same evening, MiMo-V2.6-9B at 131072 tokens, alternating 1024, 2048, 2048, 1024:
+  12/12 and 11/12, each pair the same to the token (182201 prompt and 11464 generated
+  against 141886 and 25037), so a setup has no run-to-run noise and the batch alone moved
+  a task. The 35B's rows of 2026-11-03 show the split doing the same. A gate keeps an
+  earlier gate's suite only across the context, the threads and the load mode
+  (`tune::SPEED_ONLY_FLAGS`); a gate on another split or batch runs its own.
 - **`load-mode = none` for the coder.** With experts on the CPU the engine says a load
   without mmap may run faster; the served preset pins with `mlock`. Measured 2026-10-30 on
   the served split, `mlock` / `none` / `none` / `mlock`: decode best 60.8 and 60.9 against

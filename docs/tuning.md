@@ -126,9 +126,16 @@ and put back after the run on the configuration as it then stands.
    whose model did not load at all: the next candidate loads the same way, so the run
    stops there and names the load mode as the suspect.
 
-   The agent suite asks at temperature 0 with a fixed token cap, so it measures the model,
-   the build and the flags that change an answer; the split, the context, the batch sizes,
-   the threads and the load mode (`tune::PLACEMENT_FLAGS`) move only the speed. A gate
+   The agent suite asks at temperature 0 with a fixed token cap, so one setup answers it
+   the same way on every run, token for token. Only the context, the threads and the load
+   mode (`tune::SPEED_ONLY_FLAGS`) move nothing but the speed. The split and the batch
+   sizes change which kernels sum a token's numbers and in what order, and a greedy
+   answer turns on that: on the reference box, 2026-11-07, MiMo-V2.6-9B solved 12 of 12
+   on both APIs at `ubatch-size 1024` (182201 prompt tokens, 11464 generated) and 11 of 12
+   at 2048 (141886 and 25037, `fix-in-a-long-file` cut at the token cap), each twice,
+   alternating, with the same counts every time; the 35B at `n-cpu-moe 25` took another
+   path through the suite than at 35 (205677 prompt tokens against 221354) where three
+   contexts at 35 took the same one. A gate
    keeps the suite of an earlier gate (`tune::kept_agent`) when the newest eval row of this
    host with the same model file, engine build, backend and every other flag ran it on
    both APIs at a context no larger than this candidate's, and cleared the floor: the eval
