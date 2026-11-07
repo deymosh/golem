@@ -47,7 +47,7 @@ machine. Measured numbers: [docs/models.md](docs/models.md).
 | RAM | 32 GB recommended for MoE offload (16 GB is enough for dense models) |
 | OS | Linux, or Windows natively (no Docker, no WSL, no Git Bash). macOS on Apple Silicon is experimental: it builds, passes the tests and serves on Metal, and reads the share of memory Metal may use as the card, but has not been run on a real Mac |
 | Docker | optional: Engine or Desktop + Compose v2 + GPU passthrough, for the container |
-| Disk | ~17 GB for the default model (less for smaller models) |
+| Disk | ~22.6 GB for the default coder and its vision projector (less for smaller models) |
 
 ## Quickstart
 
@@ -130,7 +130,7 @@ commands.
 | `logs` | follow the inference log |
 | `bench [--runs N] [--prefill TOKENS]` | speed: decode best/median + MTP acceptance, prefill on a ~30K prompt |
 | `eval [--long TOKENS]` | quality gate: arithmetic, tool calls, a picture when the model has vision, throughput; with `--long` the needle, decode at depth and the agent suite on both APIs |
-| `eval --agent [anthropic\|openai] [--task NAME]` | the agent suite alone: eleven small coding tasks an agent finishes with tools, graded on the result, recorded as an `agent` row; a missed task leaves what it did in `logs/agent/` |
+| `eval --agent [anthropic\|openai] [--task NAME]` | the agent suite alone: twelve small coding tasks an agent finishes with tools, graded on the result, recorded as an `agent` row; a missed task leaves what it did in `logs/agent/` |
 | `report [--no-open] [--md]` | build `results/report.html` (self-contained) from the recorded runs; `--md` writes `results/RESULTS.md` for GitHub instead |
 | `app` | the Golem window and tray, showing the console (a build with `--features desktop`; the release for Windows and macOS has it, and `golem-linux-x86_64-desktop` on Linux, which needs WebKitGTK). On Windows `golemw.exe` beside `golem.exe` starts it without a console window - point shortcuts at it |
 | `tui` | the full-screen screen in the terminal (what a bare `golem` opens there): the actions, the model list (Tab; Enter makes the default or downloads, `t` tunes, `x` deletes the file, Del removes the preset), `p` pull, `e` engine, `w` console |

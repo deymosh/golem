@@ -11,10 +11,10 @@ tokens-per-second figure is one input, not the answer.
 
 ## Where it stands
 
-Checked against the code and `results/results.jsonl` (278 rows on the reference box):
+Checked against the code and `results/results.jsonl`:
 
 - **What holds up.** One binary owns the engine (`service.rs`); every decision is a pure,
-  tested function in `golem-core` (642 tests in the workspace); a row records host,
+  tested function in `golem-core`; a row records host,
   build, backend, flags and model file, so a number is always traceable; nothing is
   adopted without the 200K gate.
 - **The gate measures work.** Beside the needle and decode at depth, `golem eval --long`
@@ -81,8 +81,7 @@ inside each; the levers are fewer loads and less bench per load.
   248832, and the served setup solves eleven of eleven. The desktop held 895 MiB of the
   card at the start and RAM free fell to 0.4 GB of 22.2 by the gate: `n-cpu-moe 35`
   measured 53.6 t/s there and 11343 MiB, over the run's 11264 MiB wall, where on 2026-10-29
-  the same split fitted at 11115 MiB. Backed out - the preset, the overlays and the winner
-  are restored from `.local/backup/2026-10-30-tune/`. The "done when" is not met: ten loads
+  the same split fitted at 11115 MiB, so the result was not kept. The "done when" is not met: ten loads
   is over seven, and the split it ranked was set by this desktop's memory, not by the card.
 - **In, kept points.** Every measured point is kept in `data/tuned/<host>/points.jsonl`
   under the model file, the engine build and backend, the candidate's flags and the
@@ -308,14 +307,9 @@ file with search, recover from a tool error, two independent calls in one turn.
 ## 4. Profiles
 
 A profile is a set of floors and a target, over measurements the tuner already takes:
-
-| Profile | Context target | Ranks by |
-|---|---|---|
-| Coding agent | the 200K gate | agent suite, then decode at depth |
-| Local chat | 32K | decode, then first-token time |
-
-A third, maximum performance at the smallest context a model is useful at, was built and
-measured, and is dropped: 32K is that context (below).
+`coder` (the 200K gate) and `chat` (32768 tokens), as [tuning.md](tuning.md#profiles)
+describes. No profile goes below 32K: that is the smallest context an agent works in
+(below).
 
 - **Done when:** `golem tune --profile chat` and the console's profile choice produce a
   gated setup per profile, and switching profiles is a restart, not a new tune.
@@ -415,12 +409,9 @@ and holding the 200K gate. What is still open, from
   tasks against b11379's eleven (engines-and-models.md), so it is not adopted either.
   Each new release gets the `measure` skill's build trial under `mmap+mlock`, and the
   adapter's `build` moves when one wins.
-- **Strata 0.2.7.** A routing prior for cards of 13 GiB or less (+15-37% decode on a 3060
-  by its own notes) may close the gap that kept 0.2.6 at half llama.cpp's decode. Not
-  measured: its best claim, +37% on 0.2.6's 34.9 t/s, is about 48 t/s against
-  llama.cpp's 61-63 on the same box, so it cannot win on decode, and the trial costs the
-  Coder pack again (~64.5 GB). It is measured when a release claims enough to close that
-  gap.
+- **Strata.** Through 0.2.12 no release claims enough on 12 GB + 32 GB to close the gap
+  that kept 0.2.6 at half llama.cpp's decode ([engines-and-models.md](engines-and-models.md));
+  it is measured when one does.
 - **`load-mode = none` for the coder.** With experts on the CPU the engine says a load
   without mmap may run faster; the served preset pins with `mlock`. Measured 2026-10-30 on
   the served split, `mlock` / `none` / `none` / `mlock`: decode best 60.8 and 60.9 against

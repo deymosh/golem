@@ -214,8 +214,8 @@ around 26200 for any wry or Tauri host; no WebView2 option changes it
 Why a long-lived owner rather than an `up` that spawns and exits:
 
 - **A killed command must not orphan the engine.** The engine is the service's child, so
-  it goes when the service goes; a model left resident with nothing pointing at it once
-  cost a session's testing (11.7 GB of VRAM that `down` could not see).
+  it goes when the service goes; an orphaned engine holds the card's VRAM where `down`
+  cannot see it.
 - **A container needs a PID 1** that owns the engine and stays up. `golem service --up`
   is that process; `up` returns as soon as the engine is healthy and would end the
   container with it.
@@ -406,8 +406,7 @@ the container is the slow path - WSL2's paravirtualized GPU costs about a third 
   a connect waits its whole timeout (2.07s measured). Every loopback client uses a 500ms
   connect timeout.
 - **`bash` on Windows resolves to the WSL launcher** in `System32`, not Git Bash - and the
-  environment does not cross into WSL. That is how a 0.5B candidate was once "gated" with
-  the 35B's numbers. Nothing in golem runs a shell.
+  environment does not cross into WSL. Nothing in golem runs a shell.
 - **PowerShell prints numbers in the machine's locale** (`19,2`), and MSYS's
   `/proc/meminfo` exists on Windows with no `MemAvailable`. `machine.rs` handles both once.
 - **`mlock` on a 20 GB model leaves a 32 GB box ~400 MB.** Reloading it per candidate ran

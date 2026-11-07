@@ -58,9 +58,8 @@ and costs a third of decode. The tuner then moved the split from the hand-set
 `golem tune <preset>` for each, one at a time, on llama.cpp b11379, quiet desktop, wall
 11264 MiB. Decode and prefill are the tuner's (median of three, 8K prompt); the gate is
 the needle at 90% of the tuned context, capped at 200000 tokens. The rows are in
-`results/results.jsonl`, tagged with the round. All but the two presets above (and the
-0.5B smoke-test model) have since left `config/models.ini`; `golem pull <name>` brings
-back one the library lists.
+`results/results.jsonl`, tagged with the round. `golem pull <name>` fetches any of them
+the library lists.
 
 | Preset | Split | Context | Decode | Prefill | VRAM | Gate | Needle prefill | At depth |
 |---|---|---|---|---|---|---|---|---|
@@ -195,8 +194,7 @@ Reading:
   and decode sits ~10% under Q4_K_M. The first pass after an `auto` load also
   page-faults at 13.8 t/s until the experts fault in. The Q4→Q5 "decode is
   step-overhead-bound, quality is free" logic holds only while the weights
-  stay resident — RAM capacity breaks that assumption before VRAM does. The
-  file stays on disk ready for a RAM upgrade.
+  stay resident — RAM capacity breaks that assumption before VRAM does.
 - **Q4_K_XL is dominated**: −6% decode, −7% prefill vs Q4_K_M for +0.23 GB of
   importance-matrix polish on tensors that are mostly GPU-side anyway.
 - **draft-max 2 vs 3 is a wash** (confirmed paired, as the first sweep hinted):
@@ -209,7 +207,7 @@ Reading:
   starves RAM (mlock + file cache) and costs 5-10 t/s of decode — never adopt
   or reject a config from a bench taken while one runs.
 
-### Current default, end to end
+### The Qwen3.6 default, end to end (2026-09-24 to 2026-10-03)
 
 | Test | Result |
 |---|---|
@@ -282,8 +280,8 @@ All candidates at ctx 262144, `--cpu-moe`, no MTP. Measured 2026-09-19.
 
 | Model | VRAM | decode empty / full | prefill | needle | notes |
 |---|---|---|---|---|---|
-| **Qwen3.6-35B-A3B UD-Q3_K_M** | 7.7 GB | 18 / 11.7 t/s @200K | 517 t/s | PASS 189K | **default** (now + MTP, see above); best all-round |
-| Gemma 4 26B-A4B UD-IQ4_NL | 8.9 GB | 14 / 9.8 t/s @200K | 508 t/s | PASS 189K | better quant (Q4); deleted, re-downloadable |
+| **Qwen3.6-35B-A3B UD-Q3_K_M** | 7.7 GB | 18 / 11.7 t/s @200K | 517 t/s | PASS 189K | **the default then** (+ MTP, see above); best all-round |
+| Gemma 4 26B-A4B UD-IQ4_NL | 8.9 GB | 14 / 9.8 t/s @200K | 508 t/s | PASS 189K | better quant (Q4) |
 | Gemma 4 12B IQ4_NL (dense) | 11.5 GB ⚠ | 37 / 25 t/s @131K | 644 t/s | PASS 131K | fast/OpenCode tier; ctx ≤196K recommended (0.8 GB headroom at 262K) |
 
 Prompt-cache reuse (Qwen3.6): 189K tokens replayed from cache in 0.4 s

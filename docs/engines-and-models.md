@@ -19,7 +19,7 @@ eliminates most of the field:
 |---|---|---|---|
 | **llama.cpp** b11379 | yes | yes | **the default**: router mode, MTP, CPU expert offload |
 | ik_llama.cpp main-b5483 | no | yes | **rejected, measured**: 16.7 t/s against 58.1 on the same model and flags; its adapter stays for paired measurements and the tuner never adopts it |
-| Strata 0.2.6 | yes | its own packs | **passes the 200K gate, measured** with the Qwen3.8-Flash-Next Coder (below); not adopted: half llama.cpp's decode, and golem does not install or start it (v0.1.45 refused 200K; 0.2.7 not yet measured) |
+| Strata 0.2.6 | yes | its own packs | **passes the 200K gate, measured** with the Qwen3.8-Flash-Next Coder (below); not adopted: half llama.cpp's decode, and golem does not install or start it (v0.1.45 refused 200K; through 0.2.12 nothing claims more for this card) |
 | vLLM, SGLang, TensorRT-LLM, LMDeploy, TGI | no | partial | datacenter engines, Linux-first, no single-GPU expert offload |
 | Ollama, LM Studio, TabbyAPI, llamafile | no | yes | wrappers or front-ends; OpenAI clients only |
 
@@ -65,13 +65,18 @@ depth and clears every floor. What it costs is decode - about half llama.cpp's o
 turns - for a pruned 125B-class model at 1.6 bits whose quality is the vendor's claim (91%
 of the full model's SWE-bench Verified), not a measurement here. Two further limits: the
 haystack was sized by the characters-per-token estimate (the engine has no `/tokenize`),
-so the needle was ~201.5K tokens; and it leaves ~90 GB on disk with its packed expert
-file. The packs were removed after the run; the installed terminal and engine stay.
+so the needle was ~201.5K tokens; and it takes ~90 GB of disk with its packed expert
+file.
 
-**Strata 0.2.7** (2026-10-27, engine 0.1.52) adds a routing prior for cards of 13 GiB or
-less - its notes claim +15% decode on a story prompt and +37% on code for a 3060 - and a fixed API
-port. Not measured here: it needs the Coder pack again (~64.5 GB), so it waits for the
-disk and a free desktop, and is measured the same way as 0.2.6.
+**Strata 0.2.7 to 0.2.12** (2026-10-27 to 2026-11-07, from its release notes and issues)
+leave the Coder's decode on this card where 0.2.6 measured it. 0.2.7's routing prior for
+cards of 13 GiB or less (+15% decode on prose, +37% on code for a 3060) is off again by
+default since 0.2.8, tied to repeated text in long sessions; 0.2.12's 3060 gains are for a
+93.7 GB IQ4_XS pack that 32 GB of RAM cannot hold; the vendor's own 3060 figure for the
+Coder IQ1_M is 31-37 t/s; and the Coder crashes on load on Windows with engines 0.1.56 to
+0.1.58 (12 GB card, issue 5354, open). The 60 t/s-class 3060 reports run IQ3 packs on 62 GB
+of RAM or more. None of these is measured here: on 12 GB + 32 GB, no Strata release claims
+enough to close the gap to llama.cpp's ~63 t/s.
 
 **ik_llama.cpp** loses on every axis here: its `--fit` fills the card to 12.0 GB (the
 sysmem cliff), `-rtr` repacking crashes at start-up, `mlock` of its 17.7 GB buffer fails,
@@ -86,7 +91,7 @@ answered the 200K needle wrong twice while every other test passed. **b11755** (
 decode at depth is what a long session pays on every token, so b11379 stays. A bump is `ENGINE_BUILD = "b<new>"`, `golem restart`, the
 eval, and only then the adapter's `build`.
 
-**b11879** (2026-10-25, the latest) is not adopted, on two counts measured the same night
+**b11879** (2026-10-25) is not adopted, on two counts measured the same night
 against b11379 with Ornith-1.5-35B:
 
 | | b11879 | b11379 |
@@ -159,8 +164,7 @@ base URL is refused: the client has no TLS.
 
 Measured here (numbers in [models.md](models.md); the tuned values are from the
 2026-10-25 re-tune on b11379). Only the coder ships as a preset in `config/models.ini`;
-`qwen3.6-35b-a3b` is a `golem pull` away through the library, and the rest were deleted
-from disk once measured:
+`qwen3.6-35b-a3b` is a `golem pull` away through the library. The measured candidates:
 
 - **`ornith-1.5-35b`** - the default since 2026-10-19 (vendor SWE-V 79); tuned to
   n-cpu-moe 35 at 248832 tokens, 63.5 t/s decode; re-gated with its vision projector on
@@ -211,6 +215,4 @@ gated on b11379 on a quiet desktop, one at a time:
   Whether its quality earns half the decode speed is a judgement golem's gate cannot make;
   a side-by-side on real coding tasks is the measurement that would.
 
-Embeddings and a reranker were tried and removed (the reranker misordered a mixed
-Spanish/English corpus); image generation (sd-server + Z-Image-Turbo, 22 s per 1024²) was
-measured but is not part of golem.
+Golem serves one chat model; embeddings, reranking and image generation are out of scope.
