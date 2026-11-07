@@ -13,6 +13,11 @@ license = "MIT"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
+# The checkout runs a debug build, and golem-core holds the byte-crunching
+# (SHA-256 of a 20 GB model, GGUF headers): unoptimised it hashes at ~15 MB/s.
+[profile.dev.package.golem-core]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 strip = true
