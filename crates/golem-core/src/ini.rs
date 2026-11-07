@@ -488,9 +488,8 @@ n-cpu-moe = 0
 ";
 
     #[test]
-    fn entries_hold_what_they_say() {
+    fn an_entry_renders_as_a_preset_line() {
         let e = Entry { key: "ctx-size".into(), value: "236544".into() };
-        assert_eq!(e.key, "ctx-size");
         assert_eq!(e.line(), "ctx-size = 236544");
     }
 
@@ -518,6 +517,19 @@ n-cpu-moe = 0
         assert_eq!(tiny.downloads[0].file, "tiny.gguf");
         // The preamble has none.
         assert!(doc.get("*").expect("*").downloads.is_empty());
+    }
+
+    #[test]
+    fn a_download_line_needs_a_repo_an_arrow_and_a_file() {
+        let files = |text: &str| -> Vec<String> {
+            parse(text).sections.iter().flat_map(|s| s.downloads.iter().map(|d| d.file.clone())).collect()
+        };
+        // Before the first header it waits for that header.
+        let first = parse("; Download: org/first-GGUF -> first.gguf\n[first]\nmodel = first.gguf\n");
+        assert_eq!(first.get("first").expect("first").downloads[0].repo, "org/first-GGUF");
+        assert!(files("; Download: someone/model\n[a]\nmodel = a.gguf\n").is_empty(), "no arrow");
+        assert!(files("; Download: someone/model -> \n[a]\nmodel = a.gguf\n").is_empty(), "nothing after the arrow");
+        assert!(files("").is_empty());
     }
 
     #[test]

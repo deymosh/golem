@@ -609,6 +609,20 @@ mod tests {
     }
 
     #[test]
+    fn a_flag_of_any_scalar_reads_as_its_written_text() {
+        let line = EVAL.replace(
+            r#""ctx": 236544,"#,
+            r#""ctx": 236544, "flags": {"jinja": true, "mmproj": null, "temp": 0.60, "spec-type": "draft-mtp"},"#,
+        );
+        let row = Row::parse(&line).expect("parse");
+        let flag = |k: &str| row.flags.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+        assert_eq!(flag("jinja"), Some("true"));
+        assert_eq!(flag("mmproj"), Some(""), "a null flag is an empty value, not \"null\"");
+        assert_eq!(flag("temp"), Some("0.60"), "the number as written");
+        assert_eq!(flag("spec-type"), Some("draft-mtp"));
+    }
+
+    #[test]
     fn the_quant_is_the_rows_own_or_read_from_its_file() {
         // A row from before quants were recorded: read from model_file.
         let old = Row::parse(BENCH).expect("parse");

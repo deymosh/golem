@@ -545,14 +545,21 @@ mod tests {
 
     #[test]
     fn unicode_escapes_and_surrogate_pairs() {
-        let v = obj(r#"{"s": "é 中 😀"}"#);
+        let v = obj(r#"{"s": "é 中 😀", "raw": "café — 😀"}"#);
         assert_eq!(v.get("s").and_then(Value::as_str), Some("é 中 😀"));
+        assert_eq!(v.get("raw").and_then(Value::as_str), Some("café — 😀"));
+        // Half a pair is not a character.
+        for bad in [r#""\ud83d""#, r#""\ud83dA""#, r#""\ude00""#] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
-    fn raw_utf8_passes_through() {
-        let v = obj(r#"{"note": "café — ok"}"#);
-        assert_eq!(v.get("note").and_then(Value::as_str), Some("café — ok"));
+    fn nesting_is_capped_rather_than_left_to_the_stack() {
+        let nested = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
+        assert!(parse(&nested(128)).is_ok());
+        let err = parse(&nested(129)).expect_err("one level too deep");
+        assert!(err.message.contains("nested too deeply"), "{}", err.message);
     }
 
     #[test]

@@ -2476,6 +2476,49 @@ mod tests {
     }
 
     #[test]
+    fn an_allowed_list_admits_its_domains_and_their_subdomains_only() {
+        let hit = |title: &str, url: &str| SearchResult { title: title.into(), url: url.into(), snippet: String::new() };
+        let results = || {
+            vec![
+                hit("root", "https://rust-lang.org/learn"),
+                hit("sub", "https://doc.rust-lang.org:443/std"),
+                hit("lookalike", "https://notrust-lang.org/"),
+                hit("other", "https://example.com/"),
+                hit("blocked", "https://blog.rust-lang.org/"),
+            ]
+        };
+        let titles = |kept: Vec<SearchResult>| kept.into_iter().map(|r| r.title).collect::<Vec<_>>();
+        let allowed = ServerSearch { allowed_domains: vec!["*.Rust-Lang.org".into()], ..ServerSearch::default() };
+        assert_eq!(titles(allowed.filter(results())), ["root", "sub", "blocked"], "a suffix is not a subdomain");
+        // A domain on both lists is blocked.
+        let both = ServerSearch { blocked_domains: vec!["blog.rust-lang.org".into()], ..allowed };
+        assert_eq!(titles(both.filter(results())), ["root", "sub"]);
+    }
+
+    #[test]
+    fn only_golems_calls_leave_an_answer_the_client_finishes() {
+        let anthropic = json::parse(&format!(
+            r#"{{"content":[{{"type":"text","text":"x"}},{{"type":"tool_use","name":"{SEARCH_TOOL}","input":{{}}}},
+                {{"type":"tool_use","name":"Read","input":{{}}}}]}}"#
+        ))
+        .unwrap();
+        let kept = without_golem_calls(ChatApi::Anthropic, anthropic);
+        let kinds: Vec<&str> = kept.get("content").unwrap().as_array().unwrap().iter()
+            .map(|b| b.get("name").or(b.get("type")).and_then(Value::as_str).unwrap()).collect();
+        assert_eq!(kinds, ["text", "Read"]);
+
+        let openai = json::parse(&format!(
+            r#"{{"choices":[{{"message":{{"tool_calls":[{{"function":{{"name":"{FETCH_TOOL}"}}}},{{"function":{{"name":"bash"}}}}]}}}}]}}"#
+        ))
+        .unwrap();
+        let kept = without_golem_calls(ChatApi::OpenAi, openai);
+        let calls = kept.get("choices").unwrap().as_array().unwrap()[0].get("message").unwrap().get("tool_calls").unwrap();
+        let names: Vec<&str> = calls.as_array().unwrap().iter()
+            .map(|c| c.get("function").unwrap().get("name").unwrap().as_str().unwrap()).collect();
+        assert_eq!(names, ["bash"]);
+    }
+
+    #[test]
     fn a_forced_or_withheld_tool_choice_is_respected() {
         let forced = json::parse(r#"{"messages":[],"tools":[{"type":"web_search_20250305","name":"web_search"}],
             "tool_choice":{"type":"tool","name":"web_search"}}"#).unwrap();
@@ -2800,12 +2843,7 @@ mod tests {
         assert!(status_error(403).contains("refused"));
         assert!(status_error(429).contains("limiting"));
         assert!(status_error(503).contains("failed to answer"));
-        // The certificate errors Windows' TLS library words in the machine's
-        // language (exit 60 for an untrusted root, 35 for an expired one,
-        // which a reset connection shares).
-        assert!(curl_error(35, "schannel: SEC_E_CERT_EXPIRED").is_some_and(|w| w.contains("certificate")));
-        assert!(curl_error(35, "Recv failure: Connection was reset").is_some_and(|w| !w.contains("certificate")));
-        assert!(curl_error(60, "schannel: SEC_E_UNTRUSTED_ROOT").is_some_and(|w| w.contains("certificate")));
+        // The TLS codes are a_tls_failure_names_only_what_curl_named's.
         assert_eq!(curl_error(3, ""), Some("the address is not a valid URL"));
         assert_eq!(curl_error(1234, ""), None);
         // What a model writes, made into what curl takes.

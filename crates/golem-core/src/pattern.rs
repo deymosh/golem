@@ -384,15 +384,10 @@ mod tests {
             ("[^]", "empty character class"),
             ("^+a", "anchor"),
         ] {
-            let err = matches(pattern, "x").expect_err(pattern);
+            // Matched against its own text: `(x)` must not read as a literal
+            // and match the text `(x)`.
+            let err = matches(pattern, pattern).expect_err(pattern);
             assert!(err.contains(needle), "{pattern}: {err}");
         }
-    }
-
-    #[test]
-    fn a_rejected_construct_never_reads_as_a_literal() {
-        // The whole point: `(x)` must not match the text `(x)`.
-        assert!(matches("(x)", "(x)").is_err());
-        assert!(matches("a|b", "a").is_err());
     }
 }

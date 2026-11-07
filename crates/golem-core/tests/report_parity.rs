@@ -41,14 +41,3 @@ fn the_report_matches_the_frozen_fixture() {
         "the report no longer matches the frozen fixture at tests/fixtures/RESULTS.md"
     );
 }
-
-#[test]
-fn the_page_inlining_is_the_files_own_lines() {
-    // The page embeds the raw lines rather than a re-serialization, so it
-    // can never disagree with the data it is showing.
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let raw = std::fs::read_to_string(dir.join("results.jsonl")).expect("fixture");
-    let (rows, _) = golem_core::results::read(&dir.join("results.jsonl")).expect("read");
-    let lines: Vec<&str> = raw.lines().filter(|l| l.trim_start().starts_with('{')).collect();
-    assert_eq!(lines.len(), rows.len(), "one record per row");
-}

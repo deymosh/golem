@@ -586,13 +586,15 @@ mod tests {
         // The split and the speculation are what a reader compares rows for,
         // so they are shown even when every row agrees on them - unlike the
         // preset's other flags, which earn their place by differing.
-        let other_ctx = BENCH.replace(r#""ctx": 236544"#, r#""ctx": 32768"#);
-        let md = markdown(&rows(&[BENCH, &other_ctx]));
+        let drafting = BENCH.replace(r#""n-cpu-moe": 36"#, r#""n-cpu-moe": 36, "spec-type": "draft-mtp""#);
+        let other_ctx = drafting.replace(r#""ctx": 236544"#, r#""ctx": 32768"#);
+        let md = markdown(&rows(&[&drafting, &other_ctx]));
         assert_eq!(
             md.matches("n-cpu-moe=36").count(),
             2,
             "both rows name the split:\n{md}"
         );
+        assert_eq!(md.matches("spec-type=draft-mtp").count(), 2, "and the speculation:\n{md}");
         assert!(!md.contains("jinja="), "a flag nothing differs on stays out:\n{md}");
     }
 

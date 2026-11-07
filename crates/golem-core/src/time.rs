@@ -10,24 +10,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// UTC `YYYY-MM-DD`.
 pub fn today() -> String {
-    let (year, month, day) = civil_from_days(days_since_epoch());
-    format!("{year:04}-{month:02}-{day:02}")
+    local_date(secs_since_epoch(), 0)
 }
 
 /// UTC `YYYY-MM-DDTHH:MMZ`, the stamp the tuner puts on an overlay.
 pub fn now_iso() -> String {
-    let secs = secs_since_epoch();
-    let (year, month, day) = civil_from_days((secs / 86_400) as i64);
+    iso(secs_since_epoch())
+}
+
+/// The `YYYY-MM-DDTHH:MMZ` stamp for seconds since the epoch.
+fn iso(secs: u64) -> String {
     let rem = secs % 86_400;
-    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}Z", rem / 3600, (rem % 3600) / 60)
+    format!("{}T{:02}:{:02}Z", local_date(secs, 0), rem / 3600, (rem % 3600) / 60)
 }
 
 fn secs_since_epoch() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
-
-fn days_since_epoch() -> i64 {
-    (secs_since_epoch() / 86_400) as i64
 }
 
 /// The local `HH:MM:SS` for seconds since the epoch, `offset_min` minutes
@@ -97,14 +95,11 @@ mod tests {
     }
 
     #[test]
-    fn the_stamps_are_the_shapes_the_files_want() {
-        let today = today();
-        assert_eq!(today.len(), 10, "{today}");
-        assert_eq!(today.matches('-').count(), 2, "{today}");
-        assert!(today.starts_with("20"), "{today}");
-        let iso = now_iso();
-        assert!(iso.ends_with('Z'), "{iso}");
-        assert_eq!(&iso[..10], today, "the two agree about the date: {iso}");
+    fn the_overlay_stamp_is_the_utc_minute() {
+        // 2026-10-28 23:30:59 UTC: the seconds are dropped, not rounded.
+        let secs = 20_754 * 86_400 + 23 * 3_600 + 1_859;
+        assert_eq!(iso(secs), "2026-10-28T23:30Z");
+        assert_eq!(iso(0), "1970-01-01T00:00Z");
     }
 
     #[test]

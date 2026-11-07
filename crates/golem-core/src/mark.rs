@@ -233,9 +233,10 @@ mod tests {
     }
 
     #[test]
-    fn every_icon_size_fits_its_square() {
+    fn every_icon_size_is_its_square_and_draws_the_mark() {
         for size in [16, 20, 24, 32, 48, 64, 256] {
             let px = rgba(size, Spark::Lit);
+            assert_eq!(px.len(), (size * size * 4) as usize, "{size}: one RGBA pixel per cell of the square");
             let lit = px.chunks(4).filter(|p| p[3] == 0xff).count();
             assert!(lit > 0, "{size}: something is drawn");
         }

@@ -186,6 +186,21 @@ mod tests {
         assert_eq!(devices.len(), 2);
         let Verdict::Gpu(d) = verdict(&devices, "rocm", "windows") else { panic!() };
         assert_eq!(d.name, "ROCm0");
+        // Without one of its own, another backend's device is still a GPU.
+        let Verdict::Gpu(d) = verdict(&devices[..1], "cuda", "linux") else { panic!("a Vulkan device is a GPU") };
+        assert_eq!(d.name, "Vulkan0");
+    }
+
+    #[test]
+    fn the_advice_names_the_driver_of_the_backend_that_found_nothing() {
+        let advice = |backend: &str| match verdict(&[], backend, "linux") {
+            Verdict::CpuOnly(text) => text,
+            Verdict::Gpu(_) => panic!("no device is no GPU"),
+        };
+        assert!(advice("cuda").contains("NVIDIA driver"), "{}", advice("cuda"));
+        assert!(advice("vulkan").contains("Vulkan driver"), "{}", advice("vulkan"));
+        assert!(advice("rocm").contains("ROCm runtime"), "{}", advice("rocm"));
+        assert!(advice("metal").ends_with("check the graphics driver"), "{}", advice("metal"));
     }
 
     #[test]

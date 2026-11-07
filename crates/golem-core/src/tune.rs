@@ -1004,6 +1004,16 @@ mod tests {
             exclusion(&both, 830.0, &floor, WALL),
             Some(Exclusion::Spilling { prefill: 480.0, engine_best: 830.0 })
         );
+
+        // The spill line is strict too: three quarters of the engine's best
+        // is kept, a hair under it is a spill.
+        let at_line = point("llama.cpp", "n4", 40.0, 600.0, 4096);
+        assert_eq!(exclusion(&at_line, 800.0, &floor, WALL), None);
+        let under_line = point("llama.cpp", "n5", 40.0, 599.9, 4096);
+        assert_eq!(
+            exclusion(&under_line, 800.0, &floor, WALL),
+            Some(Exclusion::Spilling { prefill: 599.9, engine_best: 800.0 })
+        );
     }
 
     #[test]
@@ -1129,23 +1139,26 @@ mod tests {
     }
 
     #[test]
-    fn a_frontier_search_from_the_seed_alone_is_four_probes_at_most() {
-        // The worst case the tuner can hit: the whole range is open. Four
-        // probes narrow 0..=41 to one layer, which is what the sweep's nine
-        // candidates were spending loads to do.
-        let mut fits = 41u32;
-        let mut spills = 0u32;
-        let mut count = 0;
-        while let Some(next) = between(fits, spills) {
-            count += 1;
-            if next >= 20 {
-                fits = next
-            } else {
-                spills = next
+    fn a_frontier_search_from_the_seed_alone_is_six_probes_at_most() {
+        // The worst case the tuner can hit: the whole range is open. Wherever
+        // the true frontier sits, six probes (log2 of 41, rounded up) narrow
+        // 0..=41 to one layer, which is what the sweep's nine candidates were
+        // spending loads to do.
+        for frontier in 1..=41u32 {
+            let mut fits = 41u32;
+            let mut spills = 0u32;
+            let mut count = 0;
+            while let Some(next) = between(fits, spills) {
+                count += 1;
+                if next >= frontier {
+                    fits = next
+                } else {
+                    spills = next
+                }
             }
+            assert!(count <= 6, "{count} probes to find {frontier} in 0..=41");
+            assert_eq!((fits, spills), (frontier, frontier - 1));
         }
-        assert!(count <= 6, "{count} probes to narrow 0..=41");
-        assert_eq!(fits - spills, 1);
     }
 
     // ---- the context prediction -----------------------------------------

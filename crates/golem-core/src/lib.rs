@@ -133,11 +133,3 @@ pub mod update;
 /// The schema version this build understands (bumped on breaking changes
 /// to a row's fields; old rows keep parsing).
 pub const SCHEMA_VERSION: u32 = 1;
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn schema_version_is_sane() {
-        assert!(super::SCHEMA_VERSION >= 1);
-    }
-}

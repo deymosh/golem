@@ -743,6 +743,50 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_row_carries_each_apis_verdict_and_no_speed() {
+        let mut facts = bench_facts();
+        facts.kind = Kind::Agent;
+        let captured = concat!(
+            "RESULT agent_anthropic=11/12 agent_turns=74 agent_calls=97 agent_bad_calls=0 agent_seconds=1071 ",
+            "agent_prompt_tokens=240659 agent_output_tokens=41798 agent_failed=backoff-through-overrides\n",
+            "RESULT agent_openai=12/12 agent_turns=70 agent_calls=90 agent_bad_calls=1 agent_seconds=1058 ",
+            "agent_prompt_tokens=230000 agent_output_tokens=40000 agent_failed=-\n",
+        );
+        let line = row(&facts, captured).expect("should record");
+        let v = json::parse(&line).expect("a row is JSON");
+        assert_eq!(v.get("kind").and_then(json::Value::as_str), Some("agent"));
+        let api = |name: &str| v.get("agent").and_then(|a| a.get(name)).expect(name).clone();
+        let anthropic = api("anthropic");
+        assert_eq!(anthropic.get("solved").and_then(json::Value::as_f64), Some(11.0));
+        assert_eq!(anthropic.get("seconds").and_then(json::Value::as_f64), Some(1071.0));
+        let failed = anthropic.get("failed").and_then(json::Value::as_array).expect("failed");
+        assert_eq!(failed.iter().filter_map(json::Value::as_str).collect::<Vec<_>>(), ["backoff-through-overrides"]);
+        let openai = api("openai");
+        assert_eq!(openai.get("bad_calls").and_then(json::Value::as_f64), Some(1.0));
+        assert_eq!(openai.get("failed").and_then(json::Value::as_array).map(Vec::len), Some(0));
+        // The suite measures answers, not speed: no bench or eval metrics.
+        assert!(v.get("decode_best").is_none() && v.get("eval").is_none(), "{line}");
+    }
+
+    #[test]
+    fn a_rejection_is_recorded_with_or_without_numbers() {
+        let mut facts = bench_facts();
+        facts.kind = Kind::Reject;
+        facts.note = "refused 200K".into();
+        // An engine that never started printed nothing: still a row, the note
+        // being the point of it.
+        let bare = reject_row(&facts, "");
+        let v = json::parse(&bare).expect("a row is JSON");
+        assert_eq!(v.get("kind").and_then(json::Value::as_str), Some("reject"));
+        assert_eq!(v.get("note").and_then(json::Value::as_str), Some("refused 200K"));
+        assert_eq!(v.get("decode_best"), Some(&json::Value::Null));
+        // A candidate that was measured and lost keeps its numbers.
+        let measured = reject_row(&facts, "RESULT decode_best=16.7 prefill=479\n");
+        let v = json::parse(&measured).expect("a row is JSON");
+        assert_eq!(v.get("decode_best").and_then(json::Value::as_f64), Some(16.7));
+    }
+
+    #[test]
     fn flags_of_merges_the_shared_section_then_the_alias() {
         let preset = "\
 ; a comment

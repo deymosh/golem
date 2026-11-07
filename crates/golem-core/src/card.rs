@@ -189,6 +189,17 @@ mod tests {
     }
 
     #[test]
+    fn the_newest_gate_decides_the_seal() {
+        let row = |line: &str| Row::parse(line).expect("row");
+        let failed = GATE.replace("2026-10-30T01:52Z", "2026-10-31T09:00Z").replace("\"PASS\"", "\"FAIL\"");
+        let (bench, pass, fail) = (row(BENCH), row(GATE), row(&failed));
+        assert_eq!(seal(&[&bench, &pass, &fail]), "failed", "a later gate that failed outweighs an earlier pass");
+        assert_eq!(seal(&[&fail, &pass, &bench]), "failed", "by time, not by order in the file");
+        assert_eq!(seal(&[&bench, &pass]), "proven");
+        assert_eq!(seal(&[&bench]), "measured");
+    }
+
+    #[test]
     fn a_card_reads_back_and_imports_once() {
         let card = &cards(&[BENCH, GATE], &|_| None)[0];
         let (header, rows) = read(&card.text).expect("a card");

@@ -1299,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_call_is_answered_and_counted() {
+    fn a_bad_call_is_answered_and_marked_invalid() {
         let mut w = fix_files();
         assert!(!run(&mut w, &call("rm", "{}"), fix_tests).valid);
         assert!(!run(&mut w, &call("read_file", "{path"), fix_tests).valid);
@@ -1318,7 +1318,7 @@ mod tests {
     }
 
     #[test]
-    fn each_task_fails_untouched_and_passes_done() {
+    fn the_first_tasks_fail_untouched_and_pass_done() {
         let mut fix = fix_files();
         assert!(fix_grade(&fix, "").is_err());
         fix.write("calc.py", &CALC.replace("a - b", "b + a"));

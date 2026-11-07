@@ -109,7 +109,7 @@ fn a_search_that_finds_nothing_says_so_and_is_told_from_an_unreadable_page() {
 }
 
 #[test]
-fn no_fixture_parses_to_markup() {
+fn no_content_page_parses_to_markup() {
     for name in ["docs-python-json.html", "news-wikinews.html", "forum-rust-users.html", "js-only-excalidraw.html"] {
         let markdown = Document::parse(&fixture(name)).markdown();
         assert!(!markdown.contains("</") && !markdown.contains("<div"), "{name} left markup in");
