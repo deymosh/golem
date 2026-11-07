@@ -798,9 +798,199 @@ pub fn kept_agent<'a>(rows: &'a [crate::results::Row], setup: &GateSetup, floor:
     crate::agent::passes(&newest.agent, floor).then_some(newest)
 }
 
+/// How close to the decode floor a split has to be before the thread probe is
+/// worth a model load.
+///
+/// Threads move decode by a few percent (16 of 20 threads beat all 20 by ~8%
+/// on the reference box), so a setup already well clear of the floor is not
+/// one a thread count rescues - and the probe is a whole load, which is what
+/// this tuner is spending its budget on. Within a quarter of the floor, the
+/// knob can still be the difference between passing and failing.
+pub const THREAD_PROBE_MARGIN: f64 = 1.25;
+
+/// Whether the thread probe is worth a load at this decode.
+///
+/// Pure, and separate from the probe itself, because the answer is the whole
+/// reason the knob is not swept: see [`THREAD_PROBE_MARGIN`].
+pub fn thread_probe_worth_it(decode: f64, floor: f64) -> bool {
+    decode <= floor * THREAD_PROBE_MARGIN
+}
+
+/// The thread counts worth probing on this CPU.
+///
+/// A hybrid P/E part has fewer logical threads than twice its physical
+/// cores (the i7-12700KF: 8 P with hyperthreads + 4 E = 20 logical, 12
+/// physical), so the P-cores-plus-HT count is `logical - physical`; a
+/// plain SMT box wants its physical count and all-but-two.
+pub fn thread_candidates(cores: u32, phys: u32) -> Vec<u32> {
+    // A CPU without SMT (logical = physical) has no P-core count to read
+    // off, and falls through to the plain list.
+    let p = cores.saturating_sub(phys);
+    if phys > 0 && phys * 2 > cores && p > 0 {
+        vec![p, p * 2, cores]
+    } else {
+        vec![if phys > 0 { phys } else { cores / 2 }, cores.saturating_sub(2), cores]
+    }
+}
+
+/// What a sweep candidate's file is written with: the caller's overrides,
+/// plus `load-mode = auto` when the preset locks its weights.
+///
+/// The caller's list is what the winner's overlay is built from, so this is
+/// deliberately a *copy* plus one entry: the sweep measures in mmap, and the
+/// adopted setup keeps the mode the preset serves with. See
+/// the binary's `Tuner::measure` for why that is the difference between a sweep and a
+/// crashed desktop.
+pub fn candidate_overrides(locks: bool, overrides: &[crate::ini::Entry]) -> Vec<crate::ini::Entry> {
+    let mut out = overrides.to_vec();
+    if locks {
+        out.push(crate::ini::Entry::new("load-mode", "auto"));
+    }
+    out
+}
+
+/// The distinct layer names in a `-ot` placement pattern.
+///
+/// The tool prints its pattern with the dots escaped for its own regex -
+/// `blk\.3\.ffn_.*_exps.=CPU` - so a layer is `blk`, a backslash, a dot and
+/// digits, and the answer is the count of unique ones. Splitting the pattern on non-alphanumeric characters instead finds no
+/// `blk.` token at all, because the backslash is one of them; the seed then
+/// silently falls back to the preset's own split, and the sweep starts from
+/// the wrong place. That is the bug this function exists to not have.
+pub fn layer_names(pattern: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut rest = pattern;
+    while let Some(at) = rest.find("blk") {
+        let candidate = &rest[at..];
+        // `blk` + an optional escaping backslash + `.` + the layer number.
+        let after_blk = candidate.strip_prefix("blk").unwrap_or(candidate);
+        let after_slash = after_blk.strip_prefix('\\').unwrap_or(after_blk);
+        if let Some(digits) = after_slash.strip_prefix('.') {
+            let number: String = digits.chars().take_while(char::is_ascii_digit).collect();
+            if !number.is_empty() {
+                out.insert(format!("blk.{number}"));
+            }
+        }
+        rest = &candidate[3..];
+    }
+    out
+}
+
+/// The VRAM reading of a bench that stopped over the wall (`OVER_WALL
+/// vram=11500MiB`).
+pub fn over_wall_reading(text: &str) -> Option<f64> {
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("OVER_WALL vram="))
+        .and_then(|v| v.trim_end_matches("MiB").parse().ok())
+}
+
+/// The bench's reading right after the load (`vram after the load: 10956
+/// MiB (wall ...)`).
+pub fn after_load_reading(text: &str) -> Option<f64> {
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("vram after the load: "))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|v| v.parse().ok())
+}
+
+/// What makes two context searches share a slope: the engine, the
+/// `ubatch-size` (the compute buffers) and the drafting (an MTP head keeps a
+/// KV cache of its own). The split does not enter: the KV cache is on the
+/// card whatever the split.
+pub fn slope_key(engine: &str, ubatch: u32, overrides: &[crate::ini::Entry]) -> String {
+    let spec = overrides.iter().rev().find(|e| e.key == "spec-type").map_or("preset", |e| e.value.as_str());
+    format!("{engine}|ub{ubatch}|{spec}")
+}
+
+/// The bench's own RESULT line, out of everything the run printed.
+pub fn bench_result(text: &str) -> Option<crate::evalparse::Bench> {
+    text.lines()
+        .filter(|line| line.trim_start().starts_with("RESULT"))
+        .map(crate::evalparse::Bench::parse)
+        .find(|b| b.decode_median.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bench_says_its_two_readings() {
+        let over = "vram after the load: 11442 MiB (wall 11264 MiB)\nOVER_WALL vram=11442MiB\n";
+        assert_eq!(over_wall_reading(over), Some(11442.0));
+        assert_eq!(after_load_reading(over), Some(11442.0));
+        let full = "vram after the load: 10956 MiB (wall 11264 MiB)\n\nRESULT decode_best=57.3 vram=11028MiB\n";
+        assert_eq!(over_wall_reading(full), None);
+        assert_eq!(after_load_reading(full), Some(10956.0));
+        assert_eq!(after_load_reading("RESULT decode_best=1"), None);
+    }
+
+    #[test]
+    fn a_sweep_candidate_uses_mmap_and_the_overlay_does_not() {
+        let measured = vec![crate::ini::Entry::new("n-cpu-moe", "35"), crate::ini::Entry::new("ctx-size", "249344")];
+        // The preset locks its weights: the candidate file gets mmap...
+        let for_file = candidate_overrides(true, &measured);
+        assert_eq!(for_file.len(), measured.len() + 1);
+        assert!(for_file.iter().any(|e| e.key == "load-mode" && e.value == "auto"));
+        // ...and the list the overlay is built from is untouched, so the
+        // adopted setup keeps the preset's `mlock`.
+        assert_eq!(measured.len(), 2, "the caller's list is not modified");
+        assert!(!measured.iter().any(|e| e.key == "load-mode"));
+
+        // A preset that does not lock is measured exactly as it serves.
+        assert_eq!(candidate_overrides(false, &measured), measured);
+    }
+
+    #[test]
+    fn layer_names_reads_the_escaped_placement_pattern() {
+        // What llama-fit-params actually prints, escaping the dots for its own
+        // regex: the unique `blk\.N` are the layers.
+        let pattern = "blk\\.3\\.ffn_.*_exps.=CPU";
+        assert_eq!(layer_names(pattern).len(), 1, "{:?}", layer_names(pattern));
+        assert!(layer_names(pattern).contains("blk.3"));
+
+        let many = "blk\\.0\\.ffn_.*_exps.=CPU,blk\\.1\\.ffn_.*_exps.=CPU,blk\\.2\\.ffn_.*_exps.=CPU";
+        assert_eq!(layer_names(many).len(), 3);
+        // A repeated layer counts once, as `sort -u | wc -l` does.
+        let repeated = "blk\\.4\\.ffn_.*_exps.=CPU,blk\\.4\\.ffn_.*_exps.=CPU";
+        assert_eq!(layer_names(repeated).len(), 1);
+        // The unescaped spelling is read too, and a pattern with no layer at
+        // all yields nothing - which is what makes the caller fall back.
+        assert_eq!(layer_names("blk.7.ffn_.*_exps.=CPU").len(), 1);
+        assert!(layer_names("nothing here").is_empty());
+    }
+
+    #[test]
+    fn a_hybrid_cpu_probes_the_p_core_counts() {
+        assert_eq!(thread_candidates(20, 12), vec![8, 16, 20]);
+        // A plain SMT box: physical, all-but-two, all.
+        assert_eq!(thread_candidates(16, 8), vec![8, 14, 16]);
+        // No physical count to be had: half, all-but-two, all.
+        assert_eq!(thread_candidates(8, 0), vec![4, 6, 8]);
+    }
+
+    #[test]
+    fn the_thread_probe_is_spent_only_near_the_floor() {
+        // The knob is worth a model load when decode is close enough to the
+        // floor that a few percent decides it, and not otherwise: the
+        // reference box's 62 t/s against a 25 t/s floor is 2.5x clear.
+        assert!(!thread_probe_worth_it(62.0, 25.0), "62 t/s is not near a 25 t/s floor");
+        assert!(thread_probe_worth_it(30.0, 25.0), "30 t/s is");
+        assert!(thread_probe_worth_it(25.0, 25.0), "and so is exactly the floor");
+        assert!(thread_probe_worth_it(31.0, 25.0), "31 is inside the margin");
+        assert!(!thread_probe_worth_it(31.5, 25.0), "31.5 is outside it");
+    }
+
+    #[test]
+    fn the_bench_line_is_found_among_the_noise() {
+        let text = "warmup...\nrun 1: prompt=115 tok\nRESULT decode_best=312.5 decode_median=310.2 prefill=18681 vram=1515\n";
+        let bench = bench_result(text).expect("a bench line");
+        assert_eq!(bench.decode_median, Some(310.2));
+        assert_eq!(bench.prefill, Some(18681.0));
+        assert_eq!(bench.vram_mib, Some(1515.0));
+        // An eval run has RESULT lines but no decode: not a bench.
+        assert!(bench_result("RESULT gen_tok_s_best=330.2\nRESULT long_ctx_100=PASS\n").is_none());
+    }
 
     #[test]
     fn a_winner_holds_the_gate_at_ninety_percent() {

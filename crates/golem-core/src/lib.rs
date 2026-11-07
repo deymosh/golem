@@ -39,6 +39,9 @@ pub mod profile;
 
 pub mod tune;
 
+/// `tune --auto`'s ranking of the installed models.
+pub mod rank;
+
 /// The router's `/models` listing: which models failed to load.
 pub mod router;
 
