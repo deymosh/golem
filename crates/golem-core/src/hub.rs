@@ -176,7 +176,13 @@ pub fn quant_label(stem: &str) -> Option<String> {
 /// are not one.
 fn is_companion(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower.starts_with("mmproj") || lower.starts_with("mtp-") || lower.contains("-draft")
+    is_projector(name) || lower.starts_with("mtp-") || lower.contains("-draft")
+}
+
+/// A vision projector: `mmproj-F16.gguf` as most repositories name it, or
+/// `Sage-A1.5-mmproj.gguf` as InternScience does.
+fn is_projector(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("mmproj")
 }
 
 /// The quants of the repository, smallest first, split files grouped.
@@ -215,8 +221,7 @@ pub fn quants(repo: &Repo) -> Vec<Quant> {
 /// The vision projector to fetch with the model: F16, else BF16, else the
 /// smallest there is. `None` for a text-only repository.
 pub fn projector(repo: &Repo) -> Option<&File> {
-    let projectors: Vec<&File> =
-        repo.files.iter().filter(|f| f.name().to_ascii_lowercase().starts_with("mmproj")).collect();
+    let projectors: Vec<&File> = repo.files.iter().filter(|f| is_projector(f.name())).collect();
     for want in ["F16", "BF16"] {
         if let Some(f) = projectors.iter().find(|f| {
             f.name().strip_suffix(".gguf").and_then(quant_label).is_some_and(|l| l.eq_ignore_ascii_case(want))
@@ -343,6 +348,8 @@ pub const START_CTX: u64 = 32768;
 /// the pull settled beyond the file and the context: speculative decoding
 /// when the file carries an MTP head, then the sampling defaults.
 ///
+/// A projector runs on the CPU (`no-mmproj-offload`), as in the shipped
+/// presets: it costs RAM, not the VRAM the tuner sizes the context from.
 /// The prompt batch is the tuner's 2048, the one `fit` predicts with: at the
 /// engine's own 512 a 35B-A3B prefills under the 350 t/s floor at every split
 /// (Agents-A1, 2026-11-07: 254-296 t/s), and the split search reads that as
@@ -356,7 +363,7 @@ pub fn section(name: &str, repo: &Repo, quant: &Quant, projector: Option<&File>,
     out.push_str(&format!("[{name}]\n"));
     out.push_str(&format!("model = {}\n", quant.files[0].name()));
     if let Some(p) = projector {
-        out.push_str(&format!("mmproj = {}\n", p.name()));
+        out.push_str(&format!("mmproj = {}\nno-mmproj-offload = true\n", p.name()));
     }
     let ctx = repo.ctx_train.map_or(START_CTX, |c| c.min(START_CTX));
     out.push_str(&format!("ctx-size = {ctx}\n"));
@@ -476,6 +483,16 @@ mod tests {
         assert_eq!(projector(&repo).map(File::name), Some("mmproj-F16.gguf"));
         let moe = parse_repo(MOE).expect("parse");
         assert_eq!(projector(&moe).map(File::name), Some("mmproj-Ornith-1.5-35B-BF16.gguf"));
+        // InternScience puts the model's name first.
+        let sage = parse_repo(
+            r#"{"id": "InternScience/Sage-A1.5-Q4_K_M-GGUF", "siblings": [
+              {"rfilename": "Sage-A1.5-Q4_K_M.gguf", "size": 21713463040},
+              {"rfilename": "Sage-A1.5-mmproj.gguf", "size": 902822240}]}"#,
+        )
+        .expect("parse");
+        assert_eq!(projector(&sage).map(File::name), Some("Sage-A1.5-mmproj.gguf"));
+        let labels: Vec<String> = quants(&sage).into_iter().map(|q| q.label).collect();
+        assert_eq!(labels, ["Q4_K_M"]);
     }
 
     #[test]
@@ -529,6 +546,7 @@ mod tests {
              [qwen3.5-9b]\n\
              model = Qwen3.5-9B-UD-Q4_K_XL.gguf\n\
              mmproj = mmproj-F16.gguf\n\
+             no-mmproj-offload = true\n\
              ctx-size = 32768\n\
              batch-size = 2048\n\
              ubatch-size = 2048\n\
