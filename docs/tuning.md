@@ -74,7 +74,13 @@ and put back after the run on the configuration as it then stands.
 
 1. **Seed.** `llama-fit-params` places the model for the target context without loading
    it; the number of layers it keeps on the CPU is the seed split. Without the tool, the
-   preset's own `n-cpu-moe`, else arithmetic from the model's size and the card.
+   preset's own `n-cpu-moe`, else arithmetic from the model's size and the card. The
+   target is the preset's `ctx-size` raised to what the gate needs (223232 tokens for
+   200000, `tune::frontier_ctx`), and every split point is measured there: a fresh pull
+   starts at 32768, and the split that frontier finds fills the card long before 200K
+   (Agents-A1, 2026-11-07: `n-cpu-moe 23`, full at 54272). When no split holds the
+   gate's context, the search runs again at the preset's own and the context step grows
+   from there.
 2. **The split frontier, by bisection.** A lower `n-cpu-moe` puts more experts on the
    card, so the splits that fit are a contiguous range: measure the seed, step up by two
    while it spills, then halve the gap between what fits and what spilled. Three to five

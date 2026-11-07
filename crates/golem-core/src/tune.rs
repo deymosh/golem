@@ -639,6 +639,15 @@ pub fn required_ctx(gate_tokens: u64, ctx_train: u64) -> u64 {
     }
 }
 
+/// The context the split frontier is searched at when the tuner grows the
+/// context itself: the preset's, raised to what the gate needs. A split is
+/// only as good as the context it leaves room for - Agents-A1, pulled at
+/// 32768, found its frontier at `n-cpu-moe 23` (2026-11-07) and that split
+/// filled the card at 54272 tokens, a quarter of the 223232 the gate needs.
+pub fn frontier_ctx(preset_ctx: u64, gate_tokens: u64, ctx_train: u64) -> u64 {
+    preset_ctx.max(required_ctx(gate_tokens, ctx_train))
+}
+
 /// A measured point kept for later runs (`data/tuned/<host>/points.jsonl`):
 /// what one candidate measured, under the key that says when it is the same
 /// candidate ([`point_key`]), with the desktop's share of the card at the
@@ -802,6 +811,16 @@ mod tests {
         // A model trained on less is held to what it was trained on.
         assert_eq!(required_ctx(200_000, 32_768), 32_768);
         assert_eq!(required_ctx(200_000, 0), 223_232);
+    }
+
+    #[test]
+    fn the_frontier_is_searched_at_the_context_the_gate_needs() {
+        // A fresh pull's 32768 is raised to the gate's need.
+        assert_eq!(frontier_ctx(32_768, 200_000, 262_144), 223_232);
+        // A preset that already asks for more keeps it.
+        assert_eq!(frontier_ctx(248_832, 200_000, 262_144), 248_832);
+        // A model trained on less is searched at the preset's own.
+        assert_eq!(frontier_ctx(32_768, 200_000, 32_768), 32_768);
     }
 
     /// The reference box's wall: 12288 MiB less the default 1024 of headroom.

@@ -669,10 +669,14 @@ impl<'a> Tuner<'a> {
         let port = engine::Endpoint::from_home(home).port;
         // A pinned context is the one every point is measured at: a split
         // found at the coder's 236544 tokens is not the one 32768 leaves room
-        // for.
+        // for. For the same reason a grown context starts the frontier at
+        // what the gate needs (`tune::frontier_ctx`), not at a fresh pull's
+        // 32768.
+        let preset_ctx = doc.value(&opts.target, "ctx-size").and_then(|v| v.parse().ok()).unwrap_or(4096);
         let ctx_seed = match opts.ctx {
             CtxPolicy::Pinned(pin) => pin,
-            _ => doc.value(&opts.target, "ctx-size").and_then(|v| v.parse().ok()).unwrap_or(4096),
+            CtxPolicy::Max => tune::frontier_ctx(preset_ctx, opts.gate_tokens_max, facts.n_ctx_train),
+            _ => preset_ctx,
         };
         let ubatch = doc.value(&opts.target, "ubatch-size").unwrap_or_default().to_string();
         let model_id = format!("{model_file}:{}", std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0));
@@ -987,6 +991,19 @@ impl<'a> Tuner<'a> {
             n += 2;
         }
         let Some(mut best) = fits else {
+            // No split holds the gate's context: a model this machine cannot
+            // serve at that size still gets the most it can hold, searched
+            // from the preset's context the way the gate's second pass gates
+            // the candidates that fell short.
+            if let Some(preset_ctx) = self.preset_ctx().filter(|&c| c < self.ctx_seed && self.opts.ctx == CtxPolicy::Max) {
+                self.emit(format_args!(
+                    "  no split from {seed} to {} holds {} tokens - searching again at the preset's {preset_ctx}",
+                    seed + SEED_STEPS_UP,
+                    self.ctx_seed
+                ));
+                self.ctx_seed = preset_ctx;
+                return self.sweep_engine(engine);
+            }
             self.emit(format_args!(
                 "  no split from {seed} to {} fit on this card - skipping {engine}",
                 seed + SEED_STEPS_UP
@@ -1223,6 +1240,19 @@ impl<'a> Tuner<'a> {
         (!layers.is_empty()).then(|| layers.len() as u32)
     }
 
+    /// The context a point carries when the preset's own is not the one
+    /// measured: the pinned one, or the frontier's raised one.
+    fn point_ctx(&self) -> Option<u64> {
+        match self.opts.ctx {
+            CtxPolicy::Pinned(pin) => Some(pin),
+            _ => (Some(self.ctx_seed) != self.preset_ctx()).then_some(self.ctx_seed),
+        }
+    }
+
+    fn preset_ctx(&self) -> Option<u64> {
+        self.preset_value("ctx-size").and_then(|v| v.parse().ok())
+    }
+
     fn ubatch_or_2048(&self) -> String {
         if self.ubatch.is_empty() { "2048".to_string() } else { self.ubatch.clone() }
     }
@@ -1241,11 +1271,12 @@ impl<'a> Tuner<'a> {
     /// continues either way, but a point that produced no number is not a
     /// point.
     fn measure(&mut self, engine: &str, label: &str, overrides: &[Entry]) -> Option<()> {
-        // Under a pinned context every point carries it, the frontier's too.
+        // Under a pinned context every point carries it, the frontier's too,
+        // and so does a point measured at a context raised past the preset's.
         let pinned: Vec<Entry>;
-        let overrides = match self.opts.ctx {
-            CtxPolicy::Pinned(pin) if !overrides.iter().any(|e| e.key == "ctx-size") => {
-                pinned = std::iter::once(Entry::new("ctx-size", pin.to_string())).chain(overrides.iter().cloned()).collect();
+        let overrides = match self.point_ctx() {
+            Some(ctx) if !overrides.iter().any(|e| e.key == "ctx-size") => {
+                pinned = std::iter::once(Entry::new("ctx-size", ctx.to_string())).chain(overrides.iter().cloned()).collect();
                 &pinned[..]
             }
             _ => overrides,
