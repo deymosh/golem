@@ -174,8 +174,8 @@ mod tests {
     #[test]
     fn a_real_host_is_kept_as_it_is() {
         let dir = home("real-host");
-        std::fs::write(dir.join("golem.toml"), "LOCAL_AI_HOST=\"192.168.1.5\"\n").expect("write");
-        assert!(exports(&dir).contains("http://192.168.1.5:8000"), "{}", exports(&dir));
+        std::fs::write(dir.join("golem.toml"), "LOCAL_AI_HOST=\"203.0.113.5\"\n").expect("write");
+        assert!(exports(&dir).contains("http://203.0.113.5:8000"), "{}", exports(&dir));
         std::fs::remove_dir_all(&dir).ok();
     }
 

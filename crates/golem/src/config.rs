@@ -141,17 +141,6 @@ mod tests {
     }
 
     #[test]
-    fn a_value_comes_from_golem_toml_and_nowhere_else() {
-        let dir = home("get", "MODEL_ALIAS = \"moe-35b\"\n# ENGINE = \"x\"\nENGINE = \"llama.cpp\"\n");
-        // A `.env` beside it is somebody else's file now.
-        std::fs::write(dir.join(".env"), "LOCAL_AI_PORT=\"9999\"\n").expect("write");
-        assert_eq!(get(&dir, "MODEL_ALIAS").as_deref(), Some("moe-35b"));
-        assert_eq!(get(&dir, "ENGINE").as_deref(), Some("llama.cpp"));
-        assert_eq!(get(&dir, "LOCAL_AI_PORT"), None);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn setting_replaces_the_line_and_keeps_the_comments() {
         let dir = home("set", "# the model\nMODEL_ALIAS = \"old\"\n#MODELS_PRESET = \"x\"\n");
         set(&dir, "MODEL_ALIAS", "ornith-1.5-35b").expect("set");

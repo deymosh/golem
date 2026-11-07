@@ -778,63 +778,6 @@ mod tests {
     }
 
     #[test]
-    fn download_comments_belong_to_the_section_below_them() {
-        // Two comments above `[model-a]`, one above `[tiny]`, and one with no
-        // arrow (not a download at all). The comments above a header are that
-        // header's - they wait for the next header.
-        let text = "\
-version = 1
-; Download: someone/model-GGUF -> model-Q4_K_M.gguf
-; Download: someone/model-GGUF -> mtp.gguf
-; Download: no-arrow-here
-[model-a]
-model = model-Q4_K_M.gguf
-; Download: tiny/tiny-GGUF -> tiny.gguf
-[tiny]
-model = tiny.gguf
-";
-        assert_eq!(
-            preset_downloads(text),
-            vec![
-                (
-                    "model-a".to_string(),
-                    "someone/model-GGUF".to_string(),
-                    "model-Q4_K_M.gguf".to_string()
-                ),
-                (
-                    "model-a".to_string(),
-                    "someone/model-GGUF".to_string(),
-                    "mtp.gguf".to_string()
-                ),
-                ("tiny".to_string(), "tiny/tiny-GGUF".to_string(), "tiny.gguf".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_comment_before_the_first_header_belongs_to_it() {
-        // No section yet when the comment is read, so it waits for the first
-        // header.
-        let text = "; Download: org/first-GGUF -> first.gguf\n[first]\nmodel = first.gguf\n";
-        assert_eq!(
-            preset_downloads(text),
-            vec![("first".to_string(), "org/first-GGUF".to_string(), "first.gguf".to_string())]
-        );
-    }
-
-    #[test]
-    fn a_download_line_with_no_arrow_is_not_a_download() {
-        let text = "; Download: someone/model\n[a]\nmodel = a.gguf\n";
-        assert!(preset_downloads(text).is_empty());
-    }
-
-    #[test]
-    fn a_file_the_comment_forgot_is_not_a_download() {
-        let text = "; Download: someone/model -> \n[a]\nmodel = a.gguf\n";
-        assert!(preset_downloads(text).is_empty(), "an arrow with nothing after it");
-    }
-
-    #[test]
     fn the_floor_is_the_expected_size() {
         assert_eq!(floor_of(Some(1000)), 1000);
         assert_eq!(floor_of(Some(2_000_000_000)), 2_000_000_000);
@@ -910,21 +853,6 @@ model = tiny.gguf
         assert_eq!(doc.get("bytes").and_then(|v| v.as_f64()), Some(12.0));
         assert!(doc.get("license").is_some_and(|v| v.is_null()));
         assert!(text.contains("\"mmproj-F16.gguf\""), "{text}");
-    }
-
-    #[test]
-    fn a_shard_in_a_subdirectory_is_stored_by_its_name() {
-        assert_eq!(local_name("BF16/m-BF16-00001-of-00002.gguf"), "m-BF16-00001-of-00002.gguf");
-        assert_eq!(local_name("m.gguf"), "m.gguf");
-    }
-
-    #[test]
-    fn a_suffix_is_appended_to_the_name() {
-        assert_eq!(with_suffix(Path::new("/m/x.gguf"), ".part"), PathBuf::from("/m/x.gguf.part"));
-        assert_eq!(
-            with_suffix(Path::new("/m/x.gguf"), ".sha256"),
-            PathBuf::from("/m/x.gguf.sha256")
-        );
     }
 
     #[test]

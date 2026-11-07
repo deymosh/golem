@@ -31,12 +31,8 @@ fn a_line_cut_short_is_left_out_rather_than_breaking_the_array() {
 }
 
 #[test]
-fn an_empty_file_inlines_as_an_empty_array() {
-    assert_eq!(inline_records(""), "[]");
-}
-
-#[test]
 fn a_file_with_no_record_lines_inlines_as_an_empty_array() {
+    assert_eq!(inline_records(""), "[]");
     assert_eq!(inline_records("\n   \n# comment\n"), "[]");
 }
 
@@ -57,13 +53,6 @@ fn the_page_draws_the_same_mark_as_the_icon_and_the_screen() {
     let cells: Vec<String> = golem_core::mark::GRID.iter().map(|row| format!("\"{row}\"")).collect();
     let line = format!("const GRID = [{}];", cells.join(", "));
     assert!(template.contains(&line), "the page's GRID is not golem_core::mark::GRID ({line})");
-}
-
-#[test]
-fn the_page_keeps_the_data_marker_the_generator_replaces() {
-    let template = golem::paths::page();
-    assert_eq!(template.matches("/*GOLEM_DATA*/").count(), 1);
-    assert!(template.contains(r#"<script id="golem-data" type="application/json">"#));
 }
 
 // ---- end to end over a real socket -------------------------------------

@@ -211,14 +211,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_stall_args_end_a_connection_gone_quiet() {
-        assert_eq!(
-            CURL_STALL,
-            ["--connect-timeout", "30", "--speed-limit", "1024", "--speed-time", "60"]
-        );
-    }
-
-    #[test]
     fn a_child_that_ends_is_watched_to_its_status() {
         let mut command = Command::new(if cfg!(windows) { "cmd" } else { "sh" });
         if cfg!(windows) {

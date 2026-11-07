@@ -50,7 +50,7 @@ pub fn collect(
     let model_file = props
         .as_deref()
         .and_then(|body| props_string(body, "model_path"))
-        .map(|path| basename(&path).to_string())
+        .map(|path| golem_core::hub::stored_name(&path).to_string())
         .filter(|file| !file.is_empty())
         .or_else(|| {
             preset_text(home, preset_rel)
@@ -148,11 +148,6 @@ fn naive_props_string(body: &str, key: &str) -> Option<String> {
         rest = &rest[at + needle.len()..];
     }
     None
-}
-
-/// The basename of a path with either separator.
-fn basename(path: &str) -> &str {
-    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// The running server's command line, from the launcher's pid file; empty
@@ -410,30 +405,6 @@ mod tests {
     }
 
     #[test]
-    fn the_host_slug_is_gpu_vram_ram_cpu() {
-        assert_eq!(
-            machine::host_slug(
-                "NVIDIA GeForce RTX 3060",
-                12288,
-                32,
-                "12th Gen Intel(R) Core(TM) i7-12700KF"
-            ),
-            "rtx-3060_12g_32g_i7-12700kf"
-        );
-        // No NVIDIA card: the GPU is `unknown` and the total is 0, and the
-        // slug is still a slug.
-        assert_eq!(
-            machine::host_slug("unknown", 0, 32, "12th Gen Intel(R) Core(TM) i7-12700KF"),
-            "unknown_0g_32g_i7-12700kf"
-        );
-        // The VRAM total is whole GiB, rounded down.
-        assert_eq!(
-            machine::host_slug("NVIDIA GeForce RTX 4090", 24564, 64, "AMD Ryzen 9 5950X"),
-            "rtx-4090_23g_64g_ryzen-9-5950x"
-        );
-    }
-
-    #[test]
     fn a_props_body_gives_up_its_build_and_model_path() {
         let body = r#"{"build_info":"b11379-1537a0a8b","model_path":"C:\\data\\models\\Ornith-1.5-35B-Q4_K_M.gguf","total_slots":1}"#;
         assert_eq!(props_string(body, "build_info").as_deref(), Some("b11379-1537a0a8b"));
@@ -456,13 +427,6 @@ mod tests {
         assert_eq!(naive_props_string(body, "absent"), None);
     }
 
-    #[test]
-    fn the_model_file_is_the_basename_of_the_served_path() {
-        assert_eq!(basename(r"C:\data\models\a.gguf"), "a.gguf");
-        assert_eq!(basename("/data/models/b.gguf"), "b.gguf");
-        assert_eq!(basename("c.gguf"), "c.gguf");
-        assert_eq!(basename(""), "");
-    }
 
     #[test]
     fn the_build_comes_out_of_the_engines_install_path() {

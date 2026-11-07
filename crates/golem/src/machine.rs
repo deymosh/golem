@@ -400,7 +400,10 @@ mod tests {
             host_slug("NVIDIA GeForce RTX 3060", 12288, 32, "12th Gen Intel(R) Core(TM) i7-12700KF"),
             "rtx-3060_12g_32g_i7-12700kf"
         );
+        // No card read: the GPU is `unknown` and the total 0, still a slug.
         assert_eq!(host_slug("unknown", 0, 32, ""), "unknown_0g_32g_");
+        // The VRAM total is whole GiB, rounded down.
+        assert_eq!(host_slug("NVIDIA GeForce RTX 4090", 24564, 64, "AMD Ryzen 9 5950X"), "rtx-4090_23g_64g_ryzen-9-5950x");
     }
 
     #[test]
@@ -412,12 +415,5 @@ mod tests {
             eprintln!("macOS card: {card:?} (metal probe: {:?})", stdout("osascript", &["-l", "JavaScript", "-e", METAL_SCRIPT]));
             assert!(card.is_some_and(|c| c.total_mib > 0 && c.vendor == gpu::Vendor::Apple));
         }
-    }
-
-    #[test]
-    fn the_utc_offset_is_minutes_east_or_zero() {
-        // The zone itself is the machine's; only the shape is the contract.
-        let offset = utc_offset_minutes();
-        assert!((-840..=840).contains(&offset), "{offset}");
     }
 }

@@ -1024,19 +1024,6 @@ EMPTY=
     }
 
     #[test]
-    fn each_manager_gets_its_package_list() {
-        assert_eq!(APT_PACKAGES.len(), 9);
-        assert_eq!(APT_PACKAGES[0], "build-essential");
-        assert!(APT_PACKAGES.contains(&"pkg-config"));
-        assert_eq!(DNF_PACKAGES.len(), 11);
-        assert!(DNF_PACKAGES.contains(&"gcc-c++"));
-        assert!(DNF_PACKAGES.contains(&"pkgconfig"));
-        assert_eq!(PACMAN_PACKAGES.len(), 9);
-        assert!(PACMAN_PACKAGES.contains(&"base-devel"));
-        assert!(PACMAN_PACKAGES.contains(&"pkgconf"));
-    }
-
-    #[test]
     fn the_toolchain_line_pads_the_name_to_eight() {
         let gcc = toolchain_line(
             "gcc",

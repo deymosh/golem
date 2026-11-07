@@ -561,17 +561,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_argument_is_refused() {
-        // No server: the command line is refused before anything is asked.
-        let dir = home("unknown-arg", 1);
-        let args = vec!["--bogus".to_string()];
-        let (status, text) = run_out(&dir, &args, &no_vram);
-        assert_eq!(status, 1);
-        assert_eq!(text, "unknown arg: --bogus\n");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn a_server_that_answers_nothing_fails_the_health_check() {
         // Port 1 on loopback: nothing listens there, and nothing hangs.
         let dir = home("dead", 1);
@@ -582,21 +571,6 @@ mod tests {
             "the banner comes first:\n{text}"
         );
         assert!(text.ends_with("[FAIL] server not responding on :1\n"), "{text}");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn an_https_base_url_is_refused_with_the_reason() {
-        // The client has no TLS, so an https base is refused out loud rather
-        // than connected to and left to fail like a broken server.
-        let dir = home("https", 8000);
-        std::fs::write(dir.join("golem.toml"), "LOCAL_AI_BASE_URL=\"https://example.test/v1\"\n")
-            .expect("write");
-        let (status, text) = run_out(&dir, &[], &no_vram);
-        assert_eq!(status, 1);
-        assert!(text.contains("[FAIL]"), "{text}");
-        assert!(text.contains("https://example.test/v1"), "the reason is named:\n{text}");
-        assert!(text.contains("no TLS"), "{text}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

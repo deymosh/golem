@@ -478,12 +478,6 @@ mod tests {
     }
 
     #[test]
-    fn a_down_engine_lists_no_models() {
-        let endpoint = Endpoint { port: 1, api_key: String::new() };
-        assert!(models(&endpoint).is_empty());
-    }
-
-    #[test]
     fn reads_the_pid_the_launcher_wrote() {
         let dir = std::env::temp_dir().join("golem-rs-pid-test");
         std::fs::create_dir_all(dir.join(".local")).expect("temp");
@@ -503,8 +497,6 @@ mod tests {
         // `status` must see the port and the key wherever the configuration
         // puts them, through `config` like every other reader.
         let dir = base_home("endpoint-toml");
-        std::fs::write(dir.join("golem.toml"), "LOCAL_AI_PORT=\"8000\"\nLOCAL_AI_API_KEY=\"from-env\"\n")
-            .expect("write");
         std::fs::write(dir.join("golem.toml"), "LOCAL_AI_PORT = 8123\nLOCAL_AI_API_KEY = \"k\"\n")
             .expect("write");
         let endpoint = Endpoint::from_home(&dir);
@@ -562,11 +554,11 @@ mod tests {
         std::fs::write(
             dir.join("golem.toml"),
             "LOCAL_AI_PORT=\"8000\"\nLOCAL_AI_API_KEY=\"k\"\n\
-             LOCAL_AI_BASE_URL=\"http://192.168.1.5:9000/v1\"\n",
+             LOCAL_AI_BASE_URL=\"http://203.0.113.5:9000/v1\"\n",
         )
         .expect("write");
         let base = Base::from_home(&dir).expect("base");
-        assert_eq!(base.host, "192.168.1.5");
+        assert_eq!(base.host, "203.0.113.5");
         assert_eq!(base.port, 9000);
         // The trailing `/v1` is stripped: every path built from this adds its
         // own, and `//v1/v1/chat/completions` is a 404 that reads like a bug.

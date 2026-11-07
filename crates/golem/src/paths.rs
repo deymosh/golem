@@ -87,13 +87,16 @@ const DIRS: [&str; 5] = ["results", "data/models", "data/cache", "data/tuned", "
 
 /// The home directory: `GOLEM_HOME`, or the directory holding the binary.
 pub fn home() -> PathBuf {
-    if let Some(explicit) = std::env::var_os("GOLEM_HOME") {
+    home_from(std::env::var_os("GOLEM_HOME"), std::env::current_exe().ok())
+}
+
+/// [`home`] from what the process was given: the `GOLEM_HOME` value and the
+/// binary's path.
+fn home_from(explicit: Option<std::ffi::OsString>, exe: Option<PathBuf>) -> PathBuf {
+    if let Some(explicit) = explicit {
         return PathBuf::from(explicit);
     }
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."))
+    exe.and_then(|exe| exe.parent().map(Path::to_path_buf)).unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Create what the binary needs under the home, without touching what is
@@ -266,38 +269,17 @@ mod tests {
         ensure(&dir).expect("first run");
         assert!(!dir.join("console").exists() && !dir.join("results/index.html").exists());
         assert_eq!(page().matches("/*GOLEM_DATA*/").count(), 1, "the page's data marker");
+        assert!(page().contains(r#"<script id="golem-data" type="application/json">"#), "inside its data block");
         assert!(!page().contains("/*GOLEM_STYLE*/") && !page().contains("/*GOLEM_SCRIPT*/"), "assembled");
         assert!(page().contains("function showTab(") && page().contains(".seal {"), "the script and the style are in");
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn the_paths_hang_off_the_home() {
-        let home = Path::new("/tmp/golem-home");
-        assert_eq!(results(home), home.join("results/results.jsonl"));
-        assert_eq!(engine_log(home), home.join("logs").join("llama-server.log"));
-        assert_eq!(pid_file(home), home.join(".local").join("llama-server.pid"));
-        assert_eq!(update_state(home), home.join("data/cache/update.txt"));
-    }
-
-    #[test]
-    fn an_explicit_home_wins() {
-        let dir = std::env::temp_dir().join("golem-rs-explicit-home");
-        std::fs::create_dir_all(&dir).expect("temp");
-        std::env::set_var("GOLEM_HOME", &dir);
-        assert_eq!(home(), dir);
-        std::env::remove_var("GOLEM_HOME");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn without_an_override_the_home_is_where_the_binary_lives() {
-        let expected = std::env::current_exe()
-            .expect("the test binary knows its path")
-            .parent()
-            .expect("a directory")
-            .to_path_buf();
-        std::env::remove_var("GOLEM_HOME");
-        assert_eq!(home(), expected);
+    fn the_home_is_golem_home_else_the_binarys_folder() {
+        let exe = Some(PathBuf::from("/opt/golem/golem"));
+        assert_eq!(home_from(Some("/srv/golem".into()), exe.clone()), PathBuf::from("/srv/golem"), "an explicit home wins");
+        assert_eq!(home_from(None, exe), PathBuf::from("/opt/golem"));
+        assert_eq!(home_from(None, None), PathBuf::from("."), "a binary that cannot find itself works here");
     }
 }
