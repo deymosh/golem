@@ -683,10 +683,15 @@ ctx-size = 8192
             mmproj: String::new(),
             draft: String::new(),
         };
+        // Read on both sides of the write: a run across midnight sees either day.
+        let before = golem_core::time::today();
         assert_eq!(add(&dir, &form).expect("write"), "added");
+        let after = golem_core::time::today();
         let text = std::fs::read_to_string(dir.join("config/models.ini")).expect("read");
-        let stamp = golem_core::time::today();
-        assert!(text.contains(&format!("; Added from the web console {stamp}")), "{text}");
+        assert!(
+            [before, after].iter().any(|stamp| text.contains(&format!("; Added from the web console {stamp}"))),
+            "{text}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

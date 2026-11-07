@@ -622,7 +622,10 @@ fn a_bare_home_runs_actions() {
 
     // api/run answers before the job it started has run - that is the point
     // of it - so the slot is the only way to see that the job finished.
-    for _ in 0..200 {
+    // A deadline, not a count of polls: under a full parallel test run the
+    // job's own process can take several seconds to start.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
         if request(addr, "/api/state").contains("\"job_running\": false") {
             return;
         }

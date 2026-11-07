@@ -58,11 +58,17 @@ fn front(tag: &str, engine_port: u16) -> (PathBuf, u16) {
     let dir = std::env::temp_dir().join(format!("golem-rs-api-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp");
-    let port = free_port();
-    std::fs::write(dir.join("golem.toml"), format!("LOCAL_AI_PORT = \"{port}\"\nENGINE_PORT = \"{engine_port}\"\n"))
-        .expect("golem.toml");
-    golem::api::start(&dir, &Overrides::default()).expect("the front binds");
-    (dir, port)
+    // A port freed for this front can be taken by a parallel test before the
+    // front binds it; another one is asked for then.
+    for _ in 0..5 {
+        let port = free_port();
+        std::fs::write(dir.join("golem.toml"), format!("LOCAL_AI_PORT = \"{port}\"\nENGINE_PORT = \"{engine_port}\"\n"))
+            .expect("golem.toml");
+        if golem::api::start(&dir, &Overrides::default()).is_ok() {
+            return (dir, port);
+        }
+    }
+    panic!("the front never bound a free port");
 }
 
 /// One request to the front: the raw answer.
