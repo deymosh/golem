@@ -342,6 +342,11 @@ pub const START_CTX: u64 = 32768;
 /// `up`, `pull` and the console fetch its files from. `keys` are the flags
 /// the pull settled beyond the file and the context: speculative decoding
 /// when the file carries an MTP head, then the sampling defaults.
+///
+/// The prompt batch is the tuner's 2048, the one `fit` predicts with: at the
+/// engine's own 512 a 35B-A3B prefills under the 350 t/s floor at every split
+/// (Agents-A1, 2026-11-07: 254-296 t/s), and the split search reads that as
+/// spilling.
 pub fn section(name: &str, repo: &Repo, quant: &Quant, projector: Option<&File>, keys: &[(&str, String)]) -> String {
     let mut out = String::new();
     out.push_str(&format!("; Pulled from {} ({}).\n", repo.id, quant.label));
@@ -355,6 +360,7 @@ pub fn section(name: &str, repo: &Repo, quant: &Quant, projector: Option<&File>,
     }
     let ctx = repo.ctx_train.map_or(START_CTX, |c| c.min(START_CTX));
     out.push_str(&format!("ctx-size = {ctx}\n"));
+    out.push_str("batch-size = 2048\nubatch-size = 2048\n");
     for (key, value) in keys {
         out.push_str(&format!("{key} = {value}\n"));
     }
@@ -524,6 +530,8 @@ mod tests {
              model = Qwen3.5-9B-UD-Q4_K_XL.gguf\n\
              mmproj = mmproj-F16.gguf\n\
              ctx-size = 32768\n\
+             batch-size = 2048\n\
+             ubatch-size = 2048\n\
              temp = 0.7\n"
         );
         // The section round-trips through the preset reader: the downloads
