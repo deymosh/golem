@@ -190,18 +190,23 @@ generation, skipped: Qwen3-Coder-30B-A3B, Devstral-Small-2-24B.
 
 ### The everyday slot (fits in VRAM, the desktop stays usable)
 
-**`ornith-1.5-9b`** at Q4_K_M holds the slot since 2026-10-28. The candidates, tuned and
-gated on b11379 on a quiet desktop, one at a time:
+**`mimo-v2.6-distill-qwen-9b`** at Q4_K_M holds the slot since 2026-11-07, on the agent
+suite (12/12 against Ornith-1.5-9B's 11/12, at a 2.6% slower decode; [models.md](models.md)).
+The candidates, tuned and gated on b11379 on a quiet desktop, one at a time:
 
 | Preset | File | Context | Decode | Prefill (8K) | Gate | At depth |
 |---|---|---|---|---|---|---|
-| **`ornith-1.5-9b`** (2026-10-28) | Q4_K_M, 5.6 GB, MTP off | 262144 | **54.3 t/s** | 1647 | 200K **PASS**, 937 t/s | 22.3 t/s |
+| **`mimo-v2.6-distill-qwen-9b`** (2026-11-07) | Q4_K_M, 5.8 GB | 239616 | 50.7 t/s | 1633 | 200K **PASS**, 946 t/s | 21.5 t/s |
+| `oxcoder-9b` (2026-11-07) | Q4_K_M, 5.6 GB | 249856 | 51.8 t/s | 1613 | 200K PASS, 931 t/s; suite 9/12 | 21.6 t/s |
+| `ornith-1.5-9b` (2026-10-28) | Q4_K_M, 5.6 GB, MTP off | 262144 | 54.3 t/s | 1647 | 200K **PASS**, 937 t/s | 22.3 t/s |
 | `qwen3.5-9b` (2026-10-25) | UD-Q4_K_XL, 5.6 GB | 258048 | 52.1 t/s | 1659 | 200K **PASS**, 941 t/s | 21.9 t/s |
 | `ornith-1.5-9b` Q6_K (2026-10-25) | Q6_K, 7.0 GB | 156672 | 42.3 t/s | 1540 | 141K PASS, 1039 t/s | 23.8 t/s |
 | `gemma-4-12b-it-qat-q4_0` (2026-10-25) | QAT Q4_0, 6.5 GB | 262144 | 40.0 t/s | 1244 | 200K **PASS**, 476 t/s | 19.5 t/s |
 
+- **MiMo-V2.6-9B** has the lowest vendor score of the three Qwen3.5-9B derivatives (SWE-V
+  61.1) and the best result here: every agent task, in a third of Ornith's output.
 - **Ornith-1.5-9B** (dense, Qwen3.5-based; vendor SWE-V 70.6 against Qwen3.5-9B's 53.2)
-  wins on speed and on the vendor scores once its quant leaves room for the context: the
+  wins on speed once its quant leaves room for the context: the
   Q6_K stops at 156672 tokens, the Q4_K_M holds the trained 262144. Its MTP head decodes
   76-78 t/s, but the draft's own KV cache caps the context at 209920 tokens, short of the
   200K gate's 223232, so the tuner serves it with MTP off ([models.md](models.md)).

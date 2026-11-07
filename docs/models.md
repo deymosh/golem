@@ -8,13 +8,13 @@ both hold Claude Code's 200K window on a 12 GB card with 32 GB of RAM:
 | Preset | Role | File | Served | Decode | Prefill (8K) | 200K gate | At depth |
 |---|---|---|---|---|---|---|---|
 | **`ornith-1.5-35b`** | coder, the default | Q4_K_M, 21.7 GB, MTP head inside | n-cpu-moe 35, ctx 248832, MTP | 63.5 t/s | 846 | **PASS**, 666 t/s | 34.7 t/s |
-| **`ornith-1.5-9b`** | everyday | Q4_K_M, 5.6 GB, all on the card | ctx 262144, MTP off | 54.3 t/s | 1647 | **PASS**, 937 t/s | 22.3 t/s |
+| **`mimo-v2.6-distill-qwen-9b`** | everyday | Q4_K_M, 5.8 GB, all on the card | ctx 239616, ub 1024 | 50.7 t/s | 1633 | **PASS**, 946 t/s | 21.5 t/s |
 
 Both read images: the vision projector runs on the CPU (`no-mmproj-offload`), so it costs
 RAM rather than the VRAM the context is sized from, and the eval's picture step passes on
-both ("what colour is the circle" - "Red"). Measured 2026-10-28 on llama.cpp b11379,
-quiet desktop; the coder's split and context are its 2026-10-25 tune, re-gated with the
-projector.
+both ("what colour is the circle" - "Red"). Measured on llama.cpp b11379, quiet desktop:
+the coder's split and context are its 2026-10-25 tune, re-gated with the projector on
+2026-10-28; the everyday model's are its 2026-11-07 tune.
 
 **The coder** is Ornith-1.5-35B-A3B (MIT): a Qwen3.5-MoE skeleton (256 experts, 8 per
 token, 40 layers, 30 linear-attention + 10 full), continued pretraining and
@@ -22,21 +22,23 @@ self-improvement RL. Vendor scores: SWE-bench Verified 79, SWE-bench Pro 59.6,
 Terminal-Bench 2.1 67.8. Most experts stay in system RAM and the card holds attention, the
 remaining experts and the KV cache, which is what leaves room for 248832 tokens.
 
-**The everyday model** is Ornith-1.5-9B (MIT, dense, Qwen3.5-based), vendor SWE-bench
-Verified 70.6 against Qwen3.5-9B's 53.2 - the model that held this slot until 2026-10-28,
-and which it also beats on speed (54.3 against 52.1 t/s) at the same 262144 context. Its
-GGUF carries an MTP head, and MTP is faster still, but on this card it cannot hold the
-200K gate, so the tuner passes it over ([tuning.md](tuning.md)):
+**The everyday model** is MiMo-V2.6-Distill-Qwen-9B (MIT, dense, Qwen3.5-based), Xiaomi's
+distillation of MiMo-V2.6: vendor SWE-bench Verified 61.1, Terminal-Bench 2.1 37.1,
+Toolathlon 35.2. It holds the slot by the agent suite, not the vendor score. Measured
+2026-11-07, b11379, quiet desktop, the benches alternating (A B B A) in one session:
 
-| Ornith-1.5-9B Q4_K_M | Context | Decode | VRAM | |
-|---|---|---|---|---|
-| MTP on | 209920 (largest under the wall) | 76.4 t/s | 11263 MiB | 189K gate only |
-| MTP on, q4_0 draft cache | 223232 | 75.4 t/s | 11916 MiB | over the 11264 MiB wall |
-| **MTP off** | **262144** | **54.3 t/s** | 11217 MiB | **200K PASS** |
+| | Decode (best of 3, twice) | Prefill 28.6K | Context | At 200K | Agent suite, each API |
+|---|---|---|---|---|---|
+| **`mimo-v2.6-distill-qwen-9b`** | 50.6, 50.5 t/s | 1522, 1520 | 239616 | 21.5 t/s | **12/12**, ~270 s, 11.5K output tokens |
+| `ornith-1.5-9b` (the slot until 2026-11-07) | 51.9, 51.9 t/s | 1488, 1478 | 262144 | 22.3 t/s | 11/12 (misses the rename), ~700 s, 32K output tokens |
+| `OxCoder-9B` Q4_K_M | 51.8 (tune) | 1613 (8K) | 249856 | 21.6 t/s | 9/12 at ub 1024, 7/12 at ub 2048 |
 
-MTP's draft keeps a KV cache of its own, about 5 KB per token beside the model's ~21.6,
-plus ~0.4 GB of buffers; a q4_0 draft cache halves the per-token part and still does not
-fit.
+The decode gap is 2.6%, inside the tuner's 3% tie; MiMo solves every task, the backoff
+task every other model here misses included, and spends a third of the output doing it, so
+an agent turn on it ends in well under half the time. OxCoder's Q5_K_M was not pulled:
+`fit` placed it at 187K tokens, under the gate. Ornith-1.5-9B's GGUF carries an MTP head
+that decodes 76 t/s, but on this card the draft's own KV cache stops the context at 209920
+tokens, short of the gate's 223232.
 
 ### How the coder was chosen
 
@@ -52,6 +54,23 @@ Ornith matches Qwen3.6 on speed with 0.8 GB more VRAM headroom and better vendor
 scores. The APEX quant passes the gate but its bundled MTP head is weak (32% acceptance)
 and costs a third of decode. The tuner then moved the split from the hand-set
 `n-cpu-moe 36` to 35 and the context to 248832.
+
+### Coder candidates measured 2026-11-07
+
+Two Qwen3.5/3.6-35B-A3B fine-tunes from InternScience, each `golem pull`ed, tuned with
+`golem tune` (frontier at the gate's 223232 tokens) and gated, on b11379, quiet desktop.
+Ornith's row is `golem bench` on the served preset in the same session.
+
+| Preset | File | Tuned | Decode | 200K gate | At depth | Agent suite |
+|---|---|---|---|---|---|---|
+| **`ornith-1.5-35b`** | Q4_K_M, MTP | n-cpu-moe 35, 248832 | **62.8** best (68% MTP), 869 prefill @ 28.6K | PASS, 671 t/s (10-25) | **35.9** | 11/12 both APIs |
+| `Agents-A1` | Q4_K_M 21.2 GB, no MTP head | n-cpu-moe 30, ub 1024, 262144 | 51.9, 625 prefill | PASS, 564 t/s | 20.7 | 10/12 (misses the rename and the backoff) |
+| `Sage-A1.5` | Q4_K_M 21.7 GB, MTP | n-cpu-moe 34, ub 1024, 262144 | 56.3 (52.7 in the gate), 578 prefill | PASS, 554 t/s | 29.8 | 11/12 (misses the backoff), ~1060 s per API |
+
+Neither is adopted: both clear every floor and hold the full trained context, and both are
+slower than Ornith at every depth for no better suite. Agents-A1's GGUF carries no MTP
+head, which is most of its gap; Sage-A1.5 drafts, and still decodes 16% under Ornith in the
+same session.
 
 ### Every preset, re-tuned 2026-10-25
 

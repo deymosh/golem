@@ -397,7 +397,7 @@ for the go-ahead.
 ## Candidates, when the GPU is free
 
 The lineup is two presets, both gated at 200K on b11379: `ornith-1.5-35b` for code and
-`ornith-1.5-9b` (Q4_K_M, MTP off) for everything else, with the 0.5B smoke model beside
+`mimo-v2.6-distill-qwen-9b` (Q4_K_M) for everything else, with the 0.5B smoke model beside
 them ([models.md](models.md)). A model joins only by beating one of them on this machine
 and holding the 200K gate. What is still open, from
 [engines-and-models.md](engines-and-models.md):
@@ -412,6 +412,18 @@ and holding the 200K gate. What is still open, from
 - **Strata.** Through 0.2.12 no release claims enough on 12 GB + 32 GB to close the gap
   that kept 0.2.6 at half llama.cpp's decode ([engines-and-models.md](engines-and-models.md));
   it is measured when one does.
+- **Coder candidates.** Agents-A1 and Sage-A1.5 (Qwen3.5/3.6-35B-A3B fine-tunes) pass the
+  gate and lose to Ornith on decode at every depth for no better suite
+  ([models.md](models.md#coder-candidates-measured-2026-11-07)). A 35B-A3B GGUF without an
+  MTP head (Agents-A1, Logics-SWE-Qwen3.6's) decodes ~52 t/s here against Ornith's ~63, so
+  such a file has to win on the agent suite by a clear margin to be worth the load.
+- **The suite under another prompt batch.** A gate keeps an earlier gate's agent suite
+  across placements, on the reading that the split, the context and the batch sizes move
+  only speed (`tune::PLACEMENT_FLAGS`). OxCoder-9B's tune on 2026-11-07 gated the same file
+  twice at temperature 0: 7/12 at `ubatch-size 2048`, 9/12 at 1024, on both APIs. A
+  different batch changes the kernels' summation order, and a greedy answer can turn on
+  it. Open: whether `ubatch-size` leaves `PLACEMENT_FLAGS`, which costs a suite per batch
+  probe, or a model's share is read across batch sizes as the noise it is.
 - **`load-mode = none` for the coder.** With experts on the CPU the engine says a load
   without mmap may run faster; the served preset pins with `mlock`. Measured 2026-10-30 on
   the served split, `mlock` / `none` / `none` / `mlock`: decode best 60.8 and 60.9 against
@@ -433,10 +445,10 @@ and holding the 200K gate. What is still open, from
   served split read 11220 MiB and 61.8 t/s against 11203 and 63.0-63.2 with it. So the
   shipped presets drop `n-gpu-layers = 99`, and the coder's section says `fit = on` where
   it carried this box's `n-cpu-moe 36`; a tune's overlay still sets the split.
-- **MTP for the everyday model.** Ornith-1.5-9B decodes 76-78 t/s with its MTP head, but
-  the draft's own KV cache stops the context at 209920 tokens on 12 GB. A build or flag
-  that shrinks the draft's cache below the wall at 223232 tokens would be a ~40% faster
-  everyday model. Measured 2026-11-03: b11379's `spec-draft-type-k/v = q8_0` (the
+- **MTP for the everyday slot.** MiMo-V2.6-9B's GGUF carries no MTP head. Ornith-1.5-9B
+  decodes 76-78 t/s with its own, but the draft's KV cache stops the context at 209920
+  tokens on 12 GB; a build or flag that shrinks the draft's cache below the wall at 223232
+  tokens would make it a ~40% faster everyday model. Measured 2026-11-03: b11379's `spec-draft-type-k/v = q8_0` (the
   draft's cache type) does not: the tune drafted at 77.4 t/s and stopped at 194560
   tokens (196608 read 29 MiB over the wall, desktop 329 MiB), short of the gate as
   before; MTP off at 262144 passed it again (944 t/s prefill, 22.4 at depth, the agent

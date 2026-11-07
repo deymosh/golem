@@ -31,8 +31,8 @@ Two models out of the box, both holding Claude Code's **200K window** on a 12 GB
 
 - **The coder, `ornith-1.5-35b`** — a 35B mixture of experts (3B active) served at 248K
   context, most experts in system RAM, MTP speculative decoding: ~63 tok/s.
-- **The everyday model, `ornith-1.5-9b`** — a dense 9B entirely on the card, served at
-  262K context: ~54 tok/s, and the desktop stays usable.
+- **The everyday model, `mimo-v2.6-distill-qwen-9b`** — a dense 9B entirely on the card,
+  served at 234K context: ~51 tok/s, and the desktop stays usable.
 
 Any other GGUF on Hugging Face is one `golem pull` away, and `golem tune` fits it to the
 machine. Measured numbers: [docs/models.md](docs/models.md).
@@ -160,7 +160,7 @@ On the Golem machine itself: `golem claude` does all of this. See
 
 ### Anything OpenAI (OpenCode, Aider, scripts)
 
-Base URL `http://<golem-host>:8000/v1`, model `ornith-1.5-35b` (or `ornith-1.5-9b`),
+Base URL `http://<golem-host>:8000/v1`, model `ornith-1.5-35b` (or `mimo-v2.6-distill-qwen-9b`),
 Bearer = `LOCAL_AI_API_KEY`. Golem answers the Chat Completions API and the Responses API
 (what Codex speaks, `wire_api = "responses"`), with or without the `/v1`. The console's
 **Connect an agent** panel writes the exact setup for Claude Code, OpenCode and Codex.
@@ -196,7 +196,7 @@ clients get when they name none.
 | `model` | Use | On an RTX 3060 12 GB + 32 GB RAM |
 |---|---|---|
 | `ornith-1.5-35b` | Coding (Claude Code, OpenCode) — the default | ~11.2 GB VRAM + ~14 GB RAM, 248K ctx, ~63 tok/s, images |
-| `ornith-1.5-9b` | Everyday: summaries, shell one-liners, quick questions and code | ~11.2 GB VRAM, 262K ctx, ~54 tok/s, images |
+| `mimo-v2.6-distill-qwen-9b` | Everyday: summaries, shell one-liners, quick questions and code | ~11.2 GB VRAM, 234K ctx, ~51 tok/s, images |
 
 To add one: `golem pull owner/repo[:quant]` writes its section, `golem tune <preset>
 --adopt` fits it to the machine and gates it at 200K. `SLEEP_IDLE_SECONDS` unloads the
