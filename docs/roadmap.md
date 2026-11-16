@@ -18,7 +18,7 @@ Checked against the code and `results/results.jsonl`:
   build, backend, flags and model file, so a number is always traceable; nothing is
   adopted without the 200K gate.
 - **The gate measures work.** Beside the needle and decode at depth, `golem eval --long`
-  runs twelve agent tasks on `/v1/messages` and `/v1/chat/completions` and holds each to
+  runs fourteen agent tasks on `/v1/messages` and `/v1/chat/completions` and holds each to
   a 75% floor (section 2).
 - **Choosing a model reads this machine first.** Whether a model fits is predicted before
   the download from its header and the engine's own sizing; `tune --auto` ranks by the
@@ -181,10 +181,26 @@ file with search, recover from a tool error, two independent calls in one turn.
   tests, and it asks for them eight times). The 9B solves it and still misses only the
   rename past a built name. So the suite has a task the 35B does not solve, and the two
   models' scores meet at 11/12 - the separation the first eleven could not give.
-- **Next:** more tasks in that class - a number or a decision the tools cannot hand over,
-  where the failure is to keep calling instead of answering. A missed
-  task leaves its calls, last answer and changed files in `logs/agent/`, and `--task NAME`
-  reruns one task.
+- **In, the answer and the graders.** A task's text answer is its final turn's - a turn
+  that calls no tool and was not cut at the token cap - so a run stopped at the turn limit
+  has none, whatever it said on the way. An answer gives a number when one of its digit
+  runs is that number (`47110` is not 4711; `11,250` is 11250). A fix is read off the
+  code that runs: a function's own body, with comments and docstrings left out, so a fix
+  commented out, shadowed or emptied does not pass, and a docstring or a two-name import
+  does not fail one. A missed task leaves its calls, its answer (or the last text it
+  wrote) and the files it changed in `logs/agent/`, and `--task NAME` reruns one task.
+- **In, two more tasks in that class** - a number or a decision the tools cannot hand
+  over: which of two pricing plans would have cost less over a year's usage, and by how
+  much (a twelve-row table and two price sheets, each misreading another gap); and the
+  longest a call can take before it fails for good, from a client whose timeout doubles
+  on a slow network, grows per try and is capped, with the region's file over the
+  defaults and a deploy note saying which region (each misreading another total).
+- **Measured**, 2026-11-16, the fourteen tasks on the served presets, both APIs: the 35B
+  solves thirteen (536 and 507 s, 273K prompt tokens) and still misses the backoff the
+  same way - it reads all eight files, then calls `run_tests` eight times "to verify by
+  simulating" and ends at the turn limit with no answer. It solves both new tasks, in 4
+  and 6 turns. The 9B solves all fourteen (298 and 285 s, 189K prompt tokens). So the
+  new tasks do not separate the two; the backoff alone does.
 
 ## 3. Discovery: fit before download, rank by local results
 

@@ -37,7 +37,7 @@ impl Default for Floor {
     fn default() -> Self {
         // 25 felt fine in real sessions where 16.7 did not; 350 refuses the
         // ~80 s first prompt; 15 refuses a context that is unusable at depth;
-        // 0.75 is nine of the suite's twelve tasks on each API.
+        // 0.75 is eleven of the suite's fourteen tasks on each API.
         Floor { decode: 25.0, prefill: 350.0, depth_decode: 15.0, agent: 0.75 }
     }
 }
@@ -1791,9 +1791,9 @@ mod tests {
             gate_row("2026-11-03T01:44Z", 35, 32768, "q8_0", [12, 12]),
             gate_row("2026-11-03T02:19Z", 35, 32768, "q8_0", [12, 8]),
         ];
-        // The newest scored 8 of 12 on one API, under 75%: run it again.
+        // The newest scored 8 of 14 on one API, under 75%: run it again.
         assert!(kept_agent(&rows, &coder_setup(242688), 0.75).is_none());
-        assert_eq!(kept_agent(&rows, &coder_setup(242688), 0.6).map(|r| r.ts.as_str()), Some("2026-11-03T02:19Z"));
+        assert_eq!(kept_agent(&rows, &coder_setup(242688), 0.55).map(|r| r.ts.as_str()), Some("2026-11-03T02:19Z"));
         // A row whose suite ran on one API only does not stand for a gate's.
         let one = crate::results::Row::parse(
             r#"{"ts": "t", "kind": "eval", "model": "m", "host": "rtx-3060_12g_32g_i7-12700kf", "model_file": "Ornith-1.5-35B-Q4_K_M.gguf", "engine": "llama.cpp", "engine_build": "b11379", "backend": "cuda", "ctx": 1, "agent": {"anthropic": {"solved": 11, "total": 11}}}"#,

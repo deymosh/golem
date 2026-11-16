@@ -1026,6 +1026,79 @@ fn backoff_grade(_: &Workspace, answer: &str) -> Result<(), String> {
     number_grade(answer, BACKOFF_TOTAL, &BACKOFF_WRONG)
 }
 
+// A decision with a number in it, over a table: which of two plans would
+// have cost less for a year's usage, and by how much. No tool adds a column
+// or prices a plan, so the model reads three files and works it out.
+// Leaving out the flat plan's overage makes the gap 261.60, leaving out the
+// metered plan's monthly fee turns the winner round (32.40 the other way).
+const PLAN_FLAT: &str = "# Flat plan\n600 euros a year, paid up front. It includes 1,500,000 requests a year; \
+each request over that costs 0.001 euros.\n";
+const PLAN_METERED: &str = "# Metered plan\n20 euros a month, plus 0.0004 euros for each request.\n";
+const PLAN_USAGE: [u32; 12] = [98, 104, 121, 133, 140, 151, 162, 149, 138, 127, 119, 112];
+const PLAN_GAP: &str = "207.60";
+const PLAN_WRONG: [&str; 2] = ["261.60", "32.40"];
+
+fn plans_files() -> Workspace {
+    let mut csv = String::from("month,requests\n");
+    for (month, thousands) in PLAN_USAGE.iter().enumerate() {
+        csv.push_str(&format!("2026-{:02},{}\n", month + 1, thousands * 1000));
+    }
+    let mut w = Workspace::new(&[(
+        "README.md",
+        "# Billing\nThe service's requests per month are in usage/2026.csv. The two plans on offer are \
+described in pricing/.\n",
+    )]);
+    w.write("pricing/flat.md", PLAN_FLAT);
+    w.write("pricing/metered.md", PLAN_METERED);
+    w.write("usage/2026.csv", &csv);
+    w
+}
+
+fn plans_grade(_: &Workspace, answer: &str) -> Result<(), String> {
+    number_grade(answer, PLAN_GAP, &PLAN_WRONG)?;
+    if answer.to_lowercase().contains("flat") {
+        Ok(())
+    } else {
+        Err("the answer does not name the flat plan".into())
+    }
+}
+
+// A number the code works out from layered settings, like the backoff: the
+// gateway's region comes from a deploy note, the region's file overrides
+// the defaults, and the timeout grows per try up to a cap. Each misreading
+// is another total - no slow-network doubling 42, no cap 64, the decoy
+// region 72, a try too many 69.
+const TIMEOUT_CLIENT: &str = "def request_timeout(cfg, attempt):\n    \
+\"\"\"Seconds one try may take; the first try is attempt 0.\"\"\"\n    \
+base = cfg[\"timeout_s\"] * (2 if cfg[\"slow_network\"] else 1)\n    \
+return min(base + attempt * cfg[\"step_s\"], cfg[\"cap_s\"])\n\n\n\
+def worst_case(cfg):\n    \"\"\"Seconds a call can take, every try timing out, before it fails for good.\"\"\"\n    \
+return sum(request_timeout(cfg, attempt) for attempt in range(cfg[\"tries\"]))\n";
+const TIMEOUT_TOTAL: &str = "54";
+const TIMEOUT_WRONG: [&str; 4] = ["42", "64", "72", "69"];
+
+fn timeout_files() -> Workspace {
+    let mut w = Workspace::new(&[(
+        "README.md",
+        "# Gateway client\nSettings come from config/defaults.json, then from config/<region>.json, whose \
+values override the defaults. deploy/ says where each service runs.\n",
+    )]);
+    w.write("client.py", TIMEOUT_CLIENT);
+    w.write(
+        "config/defaults.json",
+        "{\"timeout_s\": 5, \"step_s\": 4, \"cap_s\": 15, \"tries\": 4, \"slow_network\": false}\n",
+    );
+    w.write("config/eu-west.json", "{\"slow_network\": true}\n");
+    w.write("config/us-east.json", "{\"tries\": 6}\n");
+    w.write("deploy/mobile-gateway.md", "# Mobile gateway\nRuns in eu-west.\n");
+    w.write("deploy/web-frontend.md", "# Web frontend\nRuns in us-east.\n");
+    w
+}
+
+fn timeout_grade(_: &Workspace, answer: &str) -> Result<(), String> {
+    number_grade(answer, TIMEOUT_TOTAL, &TIMEOUT_WRONG)
+}
+
 /// An answer that gives `right` and none of the totals a misreading gives:
 /// a hedge between two is not an answer.
 fn number_grade(answer: &str, right: &str, wrong: &[&str]) -> Result<(), String> {
@@ -1040,7 +1113,7 @@ fn number_grade(answer: &str, right: &str, wrong: &[&str]) -> Result<(), String>
 }
 
 /// The suite, in the order it runs.
-pub const TASKS: [Task; 12] = [
+pub const TASKS: [Task; 14] = [
     Task {
         name: "fix-a-failing-test",
         prompt: "The tests in this project fail. Find out why and fix the code, not the tests. Run the tests to check.",
@@ -1125,6 +1198,22 @@ client spend waiting between attempts before it gives up? Answer with the number
         files: backoff_files,
         tests: no_tests,
         grade: backoff_grade,
+    },
+    Task {
+        name: "cheaper-of-two-plans",
+        prompt: "Which of our two pricing plans would have cost less for our 2026 usage, and by how many \
+euros? Answer with the plan and the difference to the cent.",
+        files: plans_files,
+        tests: no_tests,
+        grade: plans_grade,
+    },
+    Task {
+        name: "timeout-through-overrides",
+        prompt: "How many seconds can one call from the mobile gateway take, every try timing out, before \
+it fails for good? Answer with the number.",
+        files: timeout_files,
+        tests: no_tests,
+        grade: timeout_grade,
     },
 ];
 
@@ -1890,5 +1979,43 @@ mod tests {
         assert_eq!(dispatch_grade(&w, ""), Ok(()), "{}", dispatch_tests(&w));
         w.write("api.py", "from users import get_team as lookup\n\n\ndef handler(request):\n    return lookup(request[\"id\"])\n");
         assert!(dispatch_grade(&w, "").is_err(), "the name imported has to be the user lookup");
+    }
+
+    #[test]
+    fn the_cheaper_plan_is_flat_by_its_overage() {
+        let w = plans_files();
+        let requests: u64 = PLAN_USAGE.iter().map(|k| u64::from(*k) * 1000).sum();
+        let cents = |euros: f64| (euros * 100.0).round() as i64;
+        let flat = 600.0 + (requests.saturating_sub(1_500_000)) as f64 * 0.001;
+        let metered = 12.0 * 20.0 + requests as f64 * 0.0004;
+        assert_eq!(format!("{:.2}", (cents(metered) - cents(flat)) as f64 / 100.0), PLAN_GAP);
+        assert_eq!(format!("{:.2}", (cents(metered) - cents(600.0)) as f64 / 100.0), PLAN_WRONG[0], "the overage left out");
+        assert_eq!(format!("{:.2}", (cents(flat) - cents(requests as f64 * 0.0004)) as f64 / 100.0), PLAN_WRONG[1], "the fee left out");
+        assert!(w.read("usage/2026.csv").is_some_and(|c| c.lines().count() == 13));
+        assert!(plans_grade(&w, "The flat plan: 654.00 against 861.60, so 207.60 euros less.").is_ok());
+        assert!(plans_grade(&w, "Flat, by 207.6 EUR").is_ok());
+        assert!(plans_grade(&w, "The metered plan, by 207.60").is_err());
+        assert!(plans_grade(&w, "Flat, by 261.60").is_err());
+        assert!(plans_grade(&w, "Flat, by 2207.60").is_err());
+    }
+
+    #[test]
+    fn the_gateways_timeout_is_eu_wests_doubled_and_capped() {
+        // client.py's `worst_case`, by hand.
+        let worst = |timeout: u32, slow: bool, step: u32, cap: u32, tries: u32| -> String {
+            let base = timeout * if slow { 2 } else { 1 };
+            (0..tries).map(|a| (base + a * step).min(cap)).sum::<u32>().to_string()
+        };
+        assert_eq!(worst(5, true, 4, 15, 4), TIMEOUT_TOTAL, "eu-west over the defaults");
+        assert_eq!(worst(5, false, 4, 15, 4), TIMEOUT_WRONG[0], "no doubling");
+        assert_eq!(worst(5, true, 4, u32::MAX, 4), TIMEOUT_WRONG[1], "no cap");
+        assert_eq!(worst(5, false, 4, 15, 6), TIMEOUT_WRONG[2], "us-east");
+        assert_eq!(worst(5, true, 4, 15, 5), TIMEOUT_WRONG[3], "a try too many");
+        let w = timeout_files();
+        assert!(w.read("deploy/mobile-gateway.md").is_some_and(|d| d.contains("eu-west")));
+        assert!(timeout_grade(&w, "54 seconds").is_ok());
+        assert!(timeout_grade(&w, "10 + 14 + 15 + 15 = 54 s").is_ok());
+        assert!(timeout_grade(&w, "54, or 64 without the cap").is_err());
+        assert!(timeout_grade(&w, "540").is_err());
     }
 }
