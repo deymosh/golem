@@ -213,8 +213,14 @@ impl<R: Source> Cursor<R> {
         if n as u64 > self.size {
             return Err(GgufError::Truncated);
         }
-        let mut buf = vec![0u8; n];
-        self.reader.read_exact(&mut buf)?;
+        // Grown as the bytes arrive: `size` is what a listing claimed for a
+        // header read from the Hub, and a length is not worth an allocation
+        // until the reader has that much.
+        let mut buf = Vec::with_capacity(n.min(1 << 16));
+        (&mut self.reader).take(n as u64).read_to_end(&mut buf)?;
+        if buf.len() != n {
+            return Err(GgufError::Truncated);
+        }
         self.pos += n as u64;
         Ok(buf)
     }
@@ -761,6 +767,15 @@ mod tests {
     fn a_range_short_of_the_header_is_truncated() {
         let bytes = hybrid_fixture();
         let err = read_bytes(&bytes[..100], bytes.len() as u64).expect_err("cut inside the header");
+        assert!(matches!(err, GgufError::Truncated), "{err}");
+    }
+
+    #[test]
+    fn a_length_past_the_bytes_at_hand_is_truncated_whatever_size_was_claimed() {
+        // A key a terabyte long, in a file a listing says is larger still:
+        // the answer is the reader's, with nothing allocated for the claim.
+        let bytes = write_gguf(1, |b| b.extend_from_slice(&(1u64 << 40).to_le_bytes()), 0, |_| {});
+        let err = read_bytes(&bytes, u64::MAX).expect_err("the key is not there");
         assert!(matches!(err, GgufError::Truncated), "{err}");
     }
 

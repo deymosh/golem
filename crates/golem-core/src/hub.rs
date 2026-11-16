@@ -67,9 +67,20 @@ pub fn stored_name(path: &str) -> &str {
 }
 
 /// Whether `name` is a plain file name: not empty, not `.` or `..`, and no
-/// drive (`C:x`) or separator in it.
+/// drive (`C:x`), separator or control character in it - a name is written
+/// into a path and into a preset's lines, and a line break in one would
+/// start a line of its own there.
 pub fn safe_name(name: &str) -> bool {
-    !name.is_empty() && name != "." && name != ".." && !name.contains([':', '/', '\\'])
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains([':', '/', '\\'])
+        && !name.contains(char::is_control)
+}
+
+/// Whether `id` is a repository's `owner/name`, each part a plain name.
+pub fn safe_repo(id: &str) -> bool {
+    matches!(id.split_once('/'), Some((owner, name)) if safe_name(owner) && safe_name(name))
 }
 
 /// The Hub's answer about a repository.
@@ -94,15 +105,19 @@ pub fn parse_repo(text: &str) -> Result<Repo, String> {
         return Err(error.to_string());
     }
     let id = doc.get("id").and_then(Value::as_str).ok_or("the Hub's answer has no id")?;
+    if !safe_repo(id) {
+        return Err(format!("the Hub's answer names a repository golem cannot store: {id:?}"));
+    }
     let number = |v: Option<&Value>| v.and_then(Value::as_f64).map(|n| n as u64);
     let files = match doc.get("siblings") {
         Some(Value::Array(items)) => items
             .iter()
             .filter_map(|s| {
-                Some(File {
-                    path: s.get("rfilename")?.as_str()?.to_string(),
-                    size: number(s.get("size")).unwrap_or(0),
-                })
+                // A path is a preset line and a URL's tail: one with a
+                // control character in it is not a file to offer.
+                let path = s.get("rfilename")?.as_str()?;
+                (!path.contains(char::is_control))
+                    .then(|| File { path: path.to_string(), size: number(s.get("size")).unwrap_or(0) })
             })
             .collect(),
         _ => Vec::new(),
@@ -447,6 +462,24 @@ mod tests {
         assert!(!is_moe(&repo));
         assert!(is_moe(&parse_repo(MOE).expect("parse")));
         assert_eq!(parse_repo(r#"{"error": "Repository not found"}"#).unwrap_err(), "Repository not found");
+    }
+
+    #[test]
+    fn a_name_that_would_break_a_path_or_a_preset_line_is_not_plain() {
+        assert!(safe_name("Qwen3.5-9B-Q4_K_M.gguf"));
+        for bad in ["", ".", "..", "a/b", "a\\b", "C:x", "x.gguf\n[evil]", "x\r.gguf", "x\u{0}"] {
+            assert!(!safe_name(bad), "{bad:?}");
+        }
+        assert!(safe_repo("unsloth/Qwen3.5-9B-GGUF"));
+        for bad in ["unsloth", "a/b/c", "../x", "a/b\n; Download: c/d -> e"] {
+            assert!(!safe_repo(bad), "{bad:?}");
+        }
+        // The Hub's answer is held to the same: a repository named so is
+        // refused, a file named so is not offered.
+        assert!(parse_repo(r#"{"id": "a/b\n[evil]"}"#).is_err());
+        let repo = parse_repo(r#"{"id": "a/b", "siblings": [{"rfilename": "x.gguf\n[evil]"}, {"rfilename": "y.gguf"}]}"#)
+            .expect("parse");
+        assert_eq!(repo.files.len(), 1);
     }
 
     #[test]

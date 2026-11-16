@@ -102,6 +102,10 @@ pub fn parse_release(text: &str) -> Result<Release, String> {
         .and_then(Value::as_str)
         .ok_or("the releases answer names no tag_name")?
         .to_string();
+    // The tag and each asset's name become file names here.
+    if !crate::hub::safe_name(&tag_name) {
+        return Err(format!("the releases answer's tag_name is not a plain name: {tag_name:?}"));
+    }
     let html_url = doc
         .get("html_url")
         .and_then(Value::as_str)
@@ -112,7 +116,7 @@ pub fn parse_release(text: &str) -> Result<Release, String> {
             .iter()
             .filter_map(|asset| {
                 Some(Asset {
-                    name: asset.get("name")?.as_str()?.to_string(),
+                    name: asset.get("name")?.as_str().filter(|name| crate::hub::safe_name(name))?.to_string(),
                     url: asset.get("browser_download_url")?.as_str()?.to_string(),
                     size: asset.get("size").and_then(Value::as_f64).unwrap_or(0.0) as u64,
                 })
@@ -334,6 +338,14 @@ mod tests {
             "the releases answer names no tag_name"
         );
         assert!(parse_release("not json").is_err());
+        // A tag or an asset's name is a file name here: one that walks out
+        // of its folder is refused, the asset dropped.
+        assert!(parse_release(r#"{"tag_name": "../.."}"#).is_err());
+        let walked = parse_release(
+            r#"{"tag_name": "v1", "assets": [{"name": "../x.zip", "browser_download_url": "https://example.invalid/x"}]}"#,
+        )
+        .expect("a release");
+        assert!(walked.assets.is_empty());
     }
 
     #[test]

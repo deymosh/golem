@@ -141,7 +141,7 @@ pub fn ensure(home: &Path, pinned: &Pinned, out: &mut dyn Write) -> Result<Insta
             format!("No {} {} release of {} found on GitHub", pinned.backend, platform(), pinned.engine)
         })?;
         tag = tag_of(&release).ok_or_else(|| {
-            format!("the newest {} release of {} has no tag_name", pinned.backend, pinned.engine)
+            format!("the newest {} release of {} has no plain tag_name", pinned.backend, pinned.engine)
         })?;
         // Keep it: the install below reuses this release rather than asking
         // GitHub for the same tag twice.
@@ -361,13 +361,14 @@ fn adapter_key(adapter: &ini::Document, key: &str) -> Option<String> {
     adapter.global(key).filter(|value| !value.is_empty()).map(str::to_string)
 }
 
-/// The `tag_name` of a release.
+/// The `tag_name` of a release, when it is a plain name: the tag names the
+/// install's directory and the download's.
 fn tag_of(release: &Value) -> Option<String> {
-    release.get("tag_name").and_then(Value::as_str).map(str::to_string)
+    release.get("tag_name").and_then(Value::as_str).filter(|tag| golem_core::hub::safe_name(tag)).map(str::to_string)
 }
 
-/// One release's assets, as its JSON describes them. A member without a name
-/// or a URL is not an asset worth carrying.
+/// One release's assets, as its JSON describes them. A member without a URL
+/// or a plain file name is not an asset worth carrying.
 fn assets_of(release: &Value) -> Vec<Asset> {
     let Some(Value::Array(items)) = release.get("assets") else {
         return Vec::new();
@@ -376,7 +377,7 @@ fn assets_of(release: &Value) -> Vec<Asset> {
         .iter()
         .filter_map(|asset| {
             Some(Asset {
-                name: asset.get("name")?.as_str()?.to_string(),
+                name: asset.get("name")?.as_str().filter(|name| golem_core::hub::safe_name(name))?.to_string(),
                 url: asset.get("browser_download_url")?.as_str()?.to_string(),
                 size: asset.get("size").and_then(Value::as_f64).unwrap_or(0.0) as u64,
             })

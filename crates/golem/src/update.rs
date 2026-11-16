@@ -404,7 +404,8 @@ fn install_unix(new: &Path, exe: &Path) -> Result<(), String> {
 /// A best-effort sweep of the last update's leftovers, run early in every
 /// command: the `.old` binaries a Windows update left beside this one. The
 /// one still running cannot be removed, and that is fine - the next start
-/// gets it.
+/// gets it. An `.old` whose binary is missing is an update cut between
+/// moving the old one aside and putting the new one in: it goes back.
 pub fn cleanup_old_binaries() {
     let Some(dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf))
     else {
@@ -416,8 +417,19 @@ pub fn cleanup_old_binaries() {
             spelled.push(format!("{name}.exe"));
         }
         for spelled in spelled {
-            let _ = std::fs::remove_file(dir.join(format!("{spelled}.old")));
+            sweep_old(&dir, &spelled);
         }
+    }
+}
+
+/// One binary's `.old` in `dir`: removed beside its binary, moved back
+/// where the binary is missing.
+fn sweep_old(dir: &Path, name: &str) {
+    let old = dir.join(format!("{name}.old"));
+    if dir.join(name).exists() {
+        let _ = std::fs::remove_file(old);
+    } else if old.is_file() {
+        let _ = std::fs::rename(old, dir.join(name));
     }
 }
 
@@ -472,6 +484,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp");
         dir
+    }
+
+    #[test]
+    fn the_sweep_removes_an_old_binary_and_puts_back_an_orphaned_one() {
+        let dir = temp("sweep");
+        std::fs::write(dir.join("golem.exe"), "new").expect("exe");
+        std::fs::write(dir.join("golem.exe.old"), "old").expect("old");
+        std::fs::write(dir.join("golemw.exe.old"), "old-w").expect("old-w");
+        sweep_old(&dir, "golem.exe");
+        sweep_old(&dir, "golemw.exe");
+        assert!(!dir.join("golem.exe.old").exists());
+        assert_eq!(std::fs::read_to_string(dir.join("golem.exe")).expect("exe"), "new");
+        assert_eq!(std::fs::read_to_string(dir.join("golemw.exe")).expect("restored"), "old-w", "the update was cut");
+        assert!(!dir.join("golemw.exe.old").exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The rename dance on a target directory of fake files: an "exe" is a
