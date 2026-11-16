@@ -268,6 +268,106 @@ pub struct Task {
     pub grade: fn(&Workspace, &str) -> Result<(), String>,
 }
 
+// ---------------------------------------------------------------
+// Reading what the agent left
+// ---------------------------------------------------------------
+
+/// A Python file's statements, one per line with its whitespace collapsed:
+/// no comment, no blank line and no docstring, so a fix commented out is
+/// not a fix and a docstring added is not a change. A `#` ends the line
+/// wherever it stands, which holds for the suite's files (none has one in a
+/// string).
+fn statements(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_docstring: Option<&str> = None;
+    for line in text.lines() {
+        let code = line.split('#').next().unwrap_or("").trim();
+        if let Some(quote) = in_docstring {
+            if code.contains(quote) {
+                in_docstring = None;
+            }
+            continue;
+        }
+        if code.is_empty() {
+            continue;
+        }
+        if let Some(quote) = ["\"\"\"", "'''"].into_iter().find(|q| code.starts_with(q)) {
+            if !(code.len() >= 6 && code.ends_with(quote)) {
+                in_docstring = Some(quote);
+            }
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        out.push(format!("{}{}", " ".repeat(indent), code.split_whitespace().collect::<Vec<_>>().join(" ")));
+    }
+    out
+}
+
+/// A text with every whitespace character taken out.
+fn flat(text: &str) -> String {
+    text.split_whitespace().collect()
+}
+
+/// The statements of the last `def name(` in a file (the one Python keeps):
+/// its `def` line, then its body, each with the whitespace taken out.
+fn function(text: &str, name: &str) -> Option<Vec<String>> {
+    let lines = statements(text);
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let at = lines.iter().rposition(|l| l.trim_start().starts_with(&format!("def {name}(")))?;
+    let depth = indent(&lines[at]);
+    let end = lines[at + 1..].iter().position(|l| indent(l) <= depth).map_or(lines.len(), |n| at + 1 + n);
+    Some(lines[at..end].iter().map(|l| flat(l)).collect())
+}
+
+/// The numbers a text gives, a digit run at a time: `11,250`, `11 250` and
+/// `11250` are one number, `4711.` at the end of a sentence is 4711, and
+/// `47110` is not 4711. A group separator joins only a run of one to three
+/// digits to groups of exactly three.
+fn numbers(text: &str) -> Vec<f64> {
+    let chars: Vec<char> = text.chars().collect();
+    let digit = |i: usize| chars.get(i).is_some_and(char::is_ascii_digit);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if !digit(i) {
+            i += 1;
+            continue;
+        }
+        let mut number = String::new();
+        while digit(i) {
+            number.push(chars[i]);
+            i += 1;
+        }
+        if number.len() <= 3 {
+            while matches!(chars.get(i), Some(',' | ' ' | '\u{a0}' | '\u{202f}' | '\u{2009}'))
+                && (1..=3).all(|k| digit(i + k))
+                && !digit(i + 4)
+            {
+                number.extend(&chars[i + 1..i + 4]);
+                i += 4;
+            }
+        }
+        if chars.get(i) == Some(&'.') && digit(i + 1) {
+            number.push('.');
+            i += 1;
+            while digit(i) {
+                number.push(chars[i]);
+                i += 1;
+            }
+        }
+        if let Ok(value) = number.parse() {
+            out.push(value);
+        }
+    }
+    out
+}
+
+/// Whether `answer` gives `number` as one of its numbers.
+fn gives(answer: &str, number: &str) -> bool {
+    let wanted: f64 = number.parse().expect("a task's number parses");
+    numbers(answer).iter().any(|n| (n - wanted).abs() < 1e-6)
+}
+
 const SYSTEM: &str = "You are a coding agent working in a small project. Use the tools to look at the \
 project and change it; do not guess what a file says. When the work is done, answer with a short \
 summary of what you did.";
@@ -281,8 +381,18 @@ fn fix_files() -> Workspace {
 
 fn fix_tests(w: &Workspace) -> String {
     let code = w.read("calc.py").unwrap_or("");
-    let add_ok = code.contains("return a + b") || code.contains("return b + a");
-    let mul_ok = code.contains("return a * b") || code.contains("return b * a");
+    // What each function does, read off its own body: a fix commented out,
+    // or one that another definition of the name shadows, is not there.
+    let returns = |name: &str, op: char| {
+        function(code, name).is_some_and(|f| {
+            f.len() == 2
+                && f[0] == format!("def{name}(a,b):")
+                && [format!("returna{op}b"), format!("returnb{op}a"), format!("return(a{op}b)"), format!("return(b{op}a)")]
+                    .contains(&f[1])
+        })
+    };
+    let add_ok = returns("add", '+');
+    let mul_ok = returns("mul", '*');
     let tests_kept = w.read("test_calc.py") == Some(CALC_TEST);
     match (add_ok && mul_ok, tests_kept) {
         (_, false) => "FAILED: test_calc.py was changed; the tests are not to be edited.".into(),
@@ -328,8 +438,17 @@ fn rename_grade(w: &Workspace, _: &str) -> Result<(), String> {
             return Err(format!("{path} does not say fetch_user"));
         }
     }
-    if !w.read("users.py").unwrap_or("").contains("def fetch_user(") {
+    if function(w.read("users.py").unwrap_or(""), "fetch_user").is_none() {
         return Err("users.py does not define fetch_user".into());
+    }
+    // A rename changes the name and nothing else: a definition commented
+    // out or a body emptied is not one. Comments, blank lines and
+    // docstrings are free.
+    for (path, original) in [("users.py", USERS), ("api.py", API), ("jobs.py", JOBS)] {
+        let flat_all = |text: &str| -> Vec<String> { statements(text).iter().map(|l| flat(l)).collect() };
+        if flat_all(w.read(path).unwrap_or("")) != flat_all(&original.replace("get_user", "fetch_user")) {
+            return Err(format!("{path} changed more than the name"));
+        }
     }
     Ok(())
 }
@@ -359,7 +478,7 @@ fn find_files() -> Workspace {
 }
 
 fn find_grade(_: &Workspace, answer: &str) -> Result<(), String> {
-    if answer.contains("4711") {
+    if gives(answer, "4711") {
         Ok(())
     } else {
         Err("the answer does not give 4711".into())
@@ -428,20 +547,33 @@ fn shop_tests(w: &Workspace) -> String {
     let vat_text = assigned(rates, "VAT").unwrap_or("");
     let mut failed = Vec::new();
 
-    // The invoice, evaluated for the forms a fix takes: the rate divided by
-    // 100 where it is used, or used whole.
-    let invoice: String = w.read("shop/invoice.py").unwrap_or("").split_whitespace().collect();
+    // The invoice's `total`, evaluated for the forms a fix takes: the rate
+    // divided by 100 where it is used, or used whole. Read off the return
+    // it runs and the discount line it uses, so a fix in a comment, a
+    // docstring or a line nothing reads does not count, and the cents are
+    // the `round(..., 2)` the docstring promises.
+    let body = function(w.read("shop/invoice.py").unwrap_or(""), "total").unwrap_or_default();
+    let ret = body.iter().find(|l| l.starts_with("return")).cloned().unwrap_or_default();
+    let discount_line = if ret.contains("discounted") {
+        body.iter().find(|l| l.starts_with("discounted=")).cloned().unwrap_or_default()
+    } else {
+        ret.clone()
+    };
+    let rounded = ret.starts_with("returnround(") && ret.ends_with(",2)");
     let vat: Option<f64> = vat_text.parse().ok();
     let discount: Option<f64> = assigned(rates, "DISCOUNT").and_then(|d| d.parse().ok());
-    let as_fraction = |name: &str| ["/100", "/100.0", "*0.01"].iter().any(|d| invoice.contains(&format!("rates.{name}{d}")));
-    let vat_part = if as_fraction("VAT") {
+    let as_fraction =
+        |text: &str, name: &str| ["/100", "/100.0", "*0.01"].iter().any(|d| text.contains(&format!("rates.{name}{d}")));
+    let vat_part = if !rounded {
+        None
+    } else if as_fraction(&ret, "VAT") {
         vat.map(|v| v / 100.0)
-    } else if invoice.contains("(1+rates.VAT)") {
+    } else if ret.contains("(1+rates.VAT)") {
         vat
     } else {
         None
     };
-    let discount_part = if as_fraction("DISCOUNT") { discount.map(|d| d / 100.0) } else { None };
+    let discount_part = if as_fraction(&discount_line, "DISCOUNT") { discount.map(|d| d / 100.0) } else { None };
     match (vat_part, discount_part) {
         (Some(v), Some(d)) => {
             let total = (100.0 * (1.0 - d) * (1.0 + v) * 100.0).round() / 100.0;
@@ -488,7 +620,7 @@ names, in that order. A file read later overrides one read earlier.\n",
 }
 
 fn includes_grade(_: &Workspace, answer: &str) -> Result<(), String> {
-    if answer.contains("6000") {
+    if gives(answer, "6000") {
         Ok(())
     } else {
         Err("the answer does not give 6000".into())
@@ -656,10 +788,8 @@ fn orders_total() -> String {
 }
 
 fn orders_grade(_: &Workspace, answer: &str) -> Result<(), String> {
-    // "1,234.56" and "1 234.56" are the same number.
-    let plain: String = answer.chars().filter(|c| *c != ',' && *c != ' ' && *c != '\u{a0}').collect();
     let total = orders_total();
-    if plain.contains(&total) {
+    if gives(answer, &total) {
         Ok(())
     } else {
         Err(format!("the answer does not give {total}"))
@@ -697,11 +827,29 @@ fn dispatch_tests(w: &Workspace) -> String {
         return "FAILED: test_app.py was changed; the tests are not to be edited.".into();
     }
     let users = w.read("users.py").unwrap_or("");
-    let flat = |path: &str| -> String { w.read(path).unwrap_or("").split_whitespace().collect() };
+    // A module's statements as one text, whitespace out: a comment or a
+    // docstring says nothing about what runs.
+    let code = |path: &str| -> String { statements(w.read(path).unwrap_or("")).iter().map(|l| flat(l)).collect() };
     let mut failed = Vec::new();
 
-    // api.py: whatever it imports from users has to be there, and is what
-    // the handler calls.
+    // Each lookup users.py defines still returns its record: a body emptied
+    // or changed fails whichever test reaches it.
+    for line in statements(users).iter().filter(|l| l.starts_with("def ")) {
+        let name: String = line[4..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        let (key, test) = if name.contains("user") {
+            ("id", "test_handler")
+        } else if name.contains("team") {
+            ("team", "test_load")
+        } else {
+            continue;
+        };
+        let f = function(users, &name).unwrap_or_default();
+        let param = f.first().and_then(|d| d.split_once('(')).and_then(|(_, rest)| rest.strip_suffix("):")).unwrap_or("");
+        if f.len() != 2 || param.is_empty() || f[1] != format!("return{{\"{key}\":{param}}}") {
+            return format!("FAILED test_app.py::{test} - users.{name} does not return its record\n1 failed, 1 passed");
+        }
+    }
+
     // Every `users.<name>` a module calls, read off its flattened text.
     let called = |text: &str| -> Vec<String> {
         text.split("users.")
@@ -712,20 +860,34 @@ fn dispatch_tests(w: &Workspace) -> String {
 
     // api.py: what it imports from users, or calls on the module, has to be
     // there, and the handler has to call it.
-    let api = flat("api.py");
-    let imported = api.strip_prefix("fromusersimport").and_then(|rest| rest.split("def").next()).unwrap_or("");
-    let handler_ok = if !imported.is_empty() {
-        defines(users, imported) && api.contains(&format!("return{imported}(request"))
-    } else {
-        api.starts_with("importusers") && called(&api).iter().any(|n| n.contains("user") && defines(users, n))
-    };
+    // The names `from users import a, b as c` binds, each to the function it
+    // names, kept when that is a user lookup users.py defines.
+    let api_lines = statements(w.read("api.py").unwrap_or(""));
+    let bound: Vec<String> = api_lines
+        .iter()
+        .filter_map(|line| line.strip_prefix("from users import "))
+        .flat_map(|names| names.trim_matches(|c| c == '(' || c == ')').split(','))
+        .filter_map(|part| {
+            let words: Vec<&str> = part.split_whitespace().collect();
+            let (name, local) = match words.as_slice() {
+                [name] => (*name, *name),
+                [name, "as", local] => (*name, *local),
+                _ => return None,
+            };
+            (name.contains("user") && defines(users, name)).then(|| local.to_string())
+        })
+        .collect();
+    let api = code("api.py");
+    let handler_ok = bound.iter().any(|local| api.contains(&format!("return{local}(request")))
+        || (api_lines.iter().any(|l| l == "import users")
+            && called(&api).iter().any(|n| n.contains("user") && defines(users, n)));
     if !handler_ok {
         failed.push("FAILED test_app.py::test_handler - ImportError: cannot import name from 'users'".to_string());
     }
 
     // jobs.py: the lookup for "user" and for "team" both have to resolve,
     // by a name built from a prefix or by naming the functions outright.
-    let jobs = flat("jobs.py");
+    let jobs = code("jobs.py");
     let resolves = |kind: &str| -> bool {
         match jobs.split("getattr(users,\"").nth(1).and_then(|rest| rest.split('"').next()) {
             Some(prefix) if jobs.contains(&format!("getattr(users,\"{prefix}\"+kind)")) => defines(users, &format!("{prefix}{kind}")),
@@ -861,14 +1023,19 @@ fn backoff_files() -> Workspace {
 }
 
 fn backoff_grade(_: &Workspace, answer: &str) -> Result<(), String> {
-    let plain: String = answer.chars().filter(|c| *c != ',' && *c != ' ' && *c != '\u{a0}').collect();
-    if let Some(wrong) = BACKOFF_WRONG.iter().find(|wrong| plain.contains(*wrong)) {
+    number_grade(answer, BACKOFF_TOTAL, &BACKOFF_WRONG)
+}
+
+/// An answer that gives `right` and none of the totals a misreading gives:
+/// a hedge between two is not an answer.
+fn number_grade(answer: &str, right: &str, wrong: &[&str]) -> Result<(), String> {
+    if let Some(wrong) = wrong.iter().find(|wrong| gives(answer, wrong)) {
         return Err(format!("the answer gives {wrong}"));
     }
-    if plain.contains(BACKOFF_TOTAL) {
+    if gives(answer, right) {
         Ok(())
     } else {
-        Err(format!("the answer does not give {BACKOFF_TOTAL}"))
+        Err(format!("the answer does not give {right}"))
     }
 }
 
@@ -1641,5 +1808,87 @@ mod tests {
         assert_eq!(answer(&turn("It is 4711.", 0, false)), Some("It is 4711."));
         assert_eq!(answer(&turn("4711, let me check the tests.", 1, false)), None, "a turn that calls is not done");
         assert_eq!(answer(&turn("It is 47", 0, true)), None, "a turn cut mid-thought is not an answer");
+    }
+
+    #[test]
+    fn a_number_is_a_whole_digit_run() {
+        assert_eq!(numbers("It is 4711."), vec![4711.0]);
+        assert_eq!(numbers("11,250 ms, or 11 250, or 11\u{a0}250"), vec![11250.0; 3]);
+        assert_eq!(numbers("EUR 5,238.53"), vec![5238.53]);
+        assert_eq!(numbers("4711 250"), vec![4711.0, 250.0], "four digits are not a group's head");
+        assert_eq!(numbers("1,2,3"), vec![1.0, 2.0, 3.0]);
+        assert!(gives("max_connections = 4711", "4711"));
+        assert!(!gives("47110", "4711") && !gives("14711", "4711") && !gives("4711.5", "4711"));
+        assert!(gives("207.6 euros", "207.60"), "the same number, written shorter");
+        let w = find_files();
+        assert!(find_grade(&w, "47110").is_err());
+        assert!(orders_grade(&w, &format!("1{}", orders_total())).is_err());
+        assert!(backoff_grade(&w, "117750 ms").is_err() && backoff_grade(&w, "117750 ms").unwrap_err().contains("does not give"));
+    }
+
+    #[test]
+    fn a_fix_commented_out_or_shadowed_is_not_a_fix() {
+        let mut w = fix_files();
+        w.write("calc.py", &CALC.replace("    return a - b", "    # return a + b\n    return a - b"));
+        assert!(fix_grade(&w, "").is_err(), "commented out");
+        w.write("calc.py", &format!("{}\n\ndef add(a, b):\n    return a - b\n", CALC.replace("a - b", "a + b")));
+        assert!(fix_grade(&w, "").is_err(), "a later definition wins");
+        w.write("calc.py", &CALC.replace("def add(a, b):\n", "def add(a, b):\n    \"\"\"The sum.\"\"\"  # fixed\n").replace("a - b", "a + b"));
+        assert_eq!(fix_grade(&w, ""), Ok(()), "a docstring and a comment are free");
+
+        let mut shop = shop_files();
+        let commented = INVOICE.replace(
+            "    return round(discounted * (1 + rates.VAT), 2)",
+            "    # return round(discounted * (1 + rates.VAT / 100), 2)\n    return round(discounted * (1 + rates.VAT), 2)",
+        );
+        shop.write("shop/invoice.py", &commented);
+        assert!(shop_grade(&shop, "").is_err(), "commented out");
+        shop.write("shop/invoice.py", &INVOICE.replace("round(discounted * (1 + rates.VAT), 2)", "108.9"));
+        assert!(shop_grade(&shop, "").is_err(), "gutted");
+        shop.write("shop/invoice.py", &INVOICE.replace("round(discounted * (1 + rates.VAT), 2)", "discounted * (1 + rates.VAT / 100)"));
+        assert!(shop_grade(&shop, "").is_err(), "not to the cent");
+        let inline = "from shop import rates\n\n\ndef total(net):\n    return round(net * (1 - rates.DISCOUNT / 100) * (1 + rates.VAT / 100), 2)\n";
+        shop.write("shop/invoice.py", inline);
+        assert_eq!(shop_grade(&shop, ""), Ok(()), "inlined");
+
+        let renamed = |w: &mut Workspace| {
+            for path in ["api.py", "jobs.py"] {
+                let text = w.read(path).unwrap().replace("get_user", "fetch_user");
+                w.write(path, &text);
+            }
+        };
+        let mut rename = rename_files();
+        renamed(&mut rename);
+        rename.write("users.py", "# def fetch_user(user_id):\n#     return {\"id\": user_id}\n");
+        assert!(rename_grade(&rename, "").is_err(), "commented out");
+        rename.write("users.py", "def fetch_user(user_id):\n    pass\n");
+        assert_eq!(rename_grade(&rename, ""), Err("users.py changed more than the name".into()), "gutted");
+        rename.write("users.py", "\"\"\"Users.\"\"\"\n\n# the lookup\ndef fetch_user(user_id):\n    return {\"id\": user_id}\n");
+        assert_eq!(rename_grade(&rename, ""), Ok(()));
+
+        let mut dispatch = dispatch_files();
+        dispatch.write("users.py", &DISPATCH_USERS.replace("get_user(user_id):\n    return {\"id\": user_id}", "fetch_user(user_id):\n    pass"));
+        dispatch.write("api.py", &DISPATCH_API.replace("get_user", "fetch_user"));
+        dispatch.write("jobs.py", "import users\n\n\ndef load(kind, key):\n    return {\"user\": users.fetch_user, \"team\": users.get_team}[kind](key)\n");
+        assert!(dispatch_tests(&dispatch).contains("users.fetch_user does not return its record"), "{}", dispatch_tests(&dispatch));
+        // The dispatch fixed only in a comment.
+        let mut naive = dispatch_files();
+        naive.write("users.py", &DISPATCH_USERS.replace("get_user", "fetch_user"));
+        naive.write("api.py", &DISPATCH_API.replace("get_user", "fetch_user"));
+        naive.write("jobs.py", &DISPATCH_JOBS.replace("    return getattr", "    # return getattr(users, \"fetch_\" + kind)(key)\n    return getattr"));
+        assert!(dispatch_grade(&naive, "").is_err());
+    }
+
+    #[test]
+    fn a_dispatch_fix_may_carry_a_docstring_and_import_two_names() {
+        let mut w = dispatch_files();
+        w.write("users.py", &DISPATCH_USERS.replace("get_user", "fetch_user"));
+        w.write("jobs.py", "import users\n\n\ndef load(kind, key):\n    return {\"user\": users.fetch_user, \"team\": users.get_team}[kind](key)\n");
+        w.write("api.py", "\"\"\"The HTTP handler.\"\"\"\nfrom users import fetch_user, get_team\n\n\ndef handler(request):\n    return fetch_user(request[\"id\"])\n");
+        assert_eq!(dispatch_grade(&w, ""), Ok(()), "{}", dispatch_tests(&w));
+        w.write("api.py", "from users import get_team, fetch_user as lookup\n\n\ndef handler(request):\n    return lookup(request[\"id\"])\n");
+        assert_eq!(dispatch_grade(&w, ""), Ok(()), "{}", dispatch_tests(&w));
+        w.write("api.py", "from users import get_team as lookup\n\n\ndef handler(request):\n    return lookup(request[\"id\"])\n");
+        assert!(dispatch_grade(&w, "").is_err(), "the name imported has to be the user lookup");
     }
 }
