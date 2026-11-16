@@ -72,7 +72,8 @@ impl Document {
     /// Set `key`, replacing the line that assigns it or appending one.
     ///
     /// A commented-out assignment is left alone: it is documentation of an
-    /// alternative, not the setting.
+    /// alternative, not the setting. A comment after the value stays on
+    /// its line.
     ///
     /// Appending is the rare case - `tune --adopt` rewrites two keys the file
     /// already has, so it replaces in place - and it adds no blank line: the
@@ -83,7 +84,8 @@ impl Document {
             let body = strip_comment(line).trim();
             let Some((k, _)) = body.split_once('=') else { continue };
             if k.trim() == key {
-                *line = rendered;
+                let comment = &line[strip_comment(line).len()..];
+                *line = if comment.is_empty() { rendered } else { format!("{rendered}  {comment}") };
                 return;
             }
         }
@@ -258,6 +260,15 @@ MODEL_ALIAS = \"ornith-1.5-35b\"
         // A second read of what was written gives the same answer.
         let again = Document::parse(&text).expect("reparse");
         assert_eq!(again.get("MODEL_ALIAS").as_deref(), Some("qwen3.6-35b-a3b"));
+    }
+
+    #[test]
+    fn setting_a_key_keeps_the_comment_on_its_line() {
+        let mut doc = Document::parse("PORT = 8000  # the agents' port\nNAME = \"a#b\"\n").expect("parse");
+        doc.set("PORT", "9000");
+        doc.set("NAME", "c");
+        assert_eq!(doc.text(), "PORT = 9000  # the agents' port\nNAME = \"c\"\n");
+        assert_eq!(doc.get("PORT").as_deref(), Some("9000"));
     }
 
     #[test]

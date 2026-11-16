@@ -30,7 +30,9 @@ pub fn console_host(home: &Path) -> String {
 
 /// Whether `host` keeps the console on this machine.
 pub fn is_loopback(host: &str) -> bool {
-    host == "localhost" || host == "::1" || host.starts_with("127.")
+    // An address, not a name that starts like one: `127.0.0.1.example.com`
+    // is whatever its owner resolves it to.
+    host == "localhost" || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// The console's address in this machine's browser. A console bound to
@@ -184,7 +186,7 @@ mod tests {
         for host in ["127.0.0.1", "127.1.2.3", "localhost", "::1"] {
             assert!(is_loopback(host), "{host}");
         }
-        for host in ["0.0.0.0", "::", "192.0.2.7"] {
+        for host in ["0.0.0.0", "::", "192.0.2.7", "127.0.0.1.example.com", "127.example"] {
             assert!(!is_loopback(host), "{host}");
         }
     }

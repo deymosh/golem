@@ -196,9 +196,15 @@ pub fn add(home: &Path, form: &NewModel) -> Result<&'static str, std::io::Error>
     let ctx = number(Some(form.ctx.as_str())).unwrap_or(32_768);
     let ncpu = number(Some(form.ncpu.as_str())).unwrap_or(32);
 
-    let preset = state::preset_path(home);
-    backup(&preset)?;
-    let Ok(doc) = ini::Document::read(&preset) else { return Ok("bad-input") };
+    let presets = preset_files(home);
+    let mut docs = Vec::new();
+    for preset in &presets {
+        let Ok(doc) = ini::Document::read(preset) else { return Ok("bad-input") };
+        if doc.preset_names().iter().any(|n| n == &name) {
+            return Ok("bad-input");
+        }
+        docs.push(doc);
+    }
     // The leading blank line and the comment are what make the section look
     // hand-written in the file.
     let mut block = String::from("\n");
@@ -223,7 +229,10 @@ pub fn add(home: &Path, form: &NewModel) -> Result<&'static str, std::io::Error>
         block.push_str("spec-type = draft-mtp\n");
     }
     block.push_str("batch-size = 2048\nubatch-size = 2048\ntemp = 0.6\ntop-k = 20\nmin-p = 0");
-    std::fs::write(&preset, doc.append(&block))?;
+    for (preset, doc) in presets.iter().zip(&docs) {
+        backup(preset)?;
+        std::fs::write(preset, doc.append(&block))?;
+    }
     Ok("added")
 }
 
@@ -261,11 +270,28 @@ pub fn delete_preset(home: &Path, name: &str) -> Result<&'static str, std::io::E
     if name.is_empty() || name == alias || !preset_names(home).iter().any(|n| n == name) {
         return Ok("bad-input");
     }
-    let preset = state::preset_path(home);
-    let Ok(doc) = ini::Document::read(&preset) else { return Ok("bad-input") };
-    backup(&preset)?;
-    std::fs::write(&preset, doc.remove(name))?;
+    for preset in preset_files(home) {
+        let Ok(doc) = ini::Document::read(&preset) else { continue };
+        if doc.preset_names().iter().any(|n| n == name) {
+            backup(&preset)?;
+            std::fs::write(&preset, doc.remove(name))?;
+        }
+    }
     Ok("removed")
+}
+
+/// The preset files an edit is made in: the served one, and the base a tune
+/// rebuilds it from when the machine serves its tuned preset - a section
+/// only the served file held would be gone at the next tune, and one only
+/// removed there would be back.
+fn preset_files(home: &Path) -> Vec<PathBuf> {
+    let served = state::preset_path(home);
+    let base = home.join(crate::tune::base_preset(home));
+    if base == served {
+        vec![served]
+    } else {
+        vec![base, served]
+    }
 }
 
 /// The preset file's section names, without the shared `[*]` one.
@@ -554,6 +580,36 @@ ctx-size = 8192
         assert!(text.contains("; Added from the web console 2"), "a dated comment:\n{text}");
         // The file is backed up before it is touched.
         assert!(dir.join("config/models.ini.bak").is_file());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_edit_reaches_the_base_a_tune_rebuilds_the_served_preset_from() {
+        let dir = home("add-tuned");
+        std::fs::create_dir_all(dir.join("data/tuned")).expect("tuned");
+        std::fs::write(dir.join(crate::paths::EFFECTIVE_PRESET), PRESET).expect("effective");
+        std::fs::write(
+            dir.join("golem.toml"),
+            format!("MODEL_ALIAS=\"model-a\"\nMODELS_PRESET=\"{}\"\n", crate::paths::EFFECTIVE_PRESET),
+        )
+        .expect("env");
+        let form = NewModel {
+            name: "extra".into(),
+            repo: "unsloth/Thing-GGUF".into(),
+            file: "Thing-Q4_K_M.gguf".into(),
+            ctx: String::new(),
+            ncpu: String::new(),
+            mtp: false,
+            mmproj: String::new(),
+            draft: String::new(),
+        };
+        let names = |file: &str| ini::parse(&std::fs::read_to_string(dir.join(file)).expect("read")).preset_names();
+        assert_eq!(add(&dir, &form).expect("write"), "added");
+        assert_eq!(names(crate::paths::EFFECTIVE_PRESET), vec!["model-a", "tiny", "extra"]);
+        assert_eq!(names("config/models.ini"), vec!["model-a", "tiny", "extra"], "the next tune keeps it");
+        assert_eq!(delete_preset(&dir, "extra").expect("write"), "removed");
+        assert_eq!(names(crate::paths::EFFECTIVE_PRESET), vec!["model-a", "tiny"]);
+        assert_eq!(names("config/models.ini"), vec!["model-a", "tiny"], "and does not bring it back");
         std::fs::remove_dir_all(&dir).ok();
     }
 

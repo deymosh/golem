@@ -220,7 +220,11 @@ pub fn check_on(key: &str, value: &str, machine: &Machine, current: impl Fn(&str
         }
         "LOCAL_AI_PORT" | "ENGINE_PORT" | "CONSOLE_PORT" => {
             let (api, engine, console) = ports_with(key, &value, &current);
-            if api == engine || api == console || engine == console {
+            if engine > u32::from(u16::MAX) {
+                // The engine's default is the port after the API's, and
+                // there is none after the last.
+                Err(format!("the engine takes the port after the API's ({api}): 65534 at most, or set ENGINE_PORT"))
+            } else if api == engine || api == console || engine == console {
                 Err(format!(
                     "the API ({api}), the engine ({engine}) and the console ({console}) each need their own port"
                 ))

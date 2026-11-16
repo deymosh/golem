@@ -315,7 +315,7 @@ const COLS = [
   ["engine_build", "Build", (r) => esc(`${r.engine} ${buildOf(r)}`)],
   ["model_stats", "Params", (r) => paramsCell(r), false],
   ["ctx", "Ctx", (r) => (r.ctx ? (r.ctx / 1024).toFixed(0) + "K" : "–"), true],
-  ["threads", "Threads", (r) => (r.threads != null ? r.threads : "–"), true],
+  ["threads", "Threads", (r) => (r.threads != null ? esc(r.threads) : "–"), true],
   ["decode", "Decode", (r) => fmt(r.kind === "eval" ? r.eval?.decode_best : r.decode_median), true],
   ["prefill", "Prefill", (r) => fmt(r.kind === "eval" ? r.eval?.needle_prefill : r.prefill, 0), true],
   ["vram_mib", "VRAM GB", (r) => (r.vram_mib ? fmt(r.vram_mib / 1024) : "–"), true],

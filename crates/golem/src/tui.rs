@@ -872,7 +872,11 @@ impl<F: Fn(Action, String) -> String + Send + Sync + 'static> Job<'_, F> {
         app.set_busy(true);
         app.set_message(format!("{label}: running..."));
         std::thread::spawn(move || {
-            let _ = tx.send(act(action, arg));
+            // An action that panics still answers: with no message the
+            // screen would say "running" until it is closed.
+            let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| act(action, arg)))
+                .unwrap_or_else(|_| format!("{label}: stopped on an internal error"));
+            let _ = tx.send(answer);
         });
     }
 }
