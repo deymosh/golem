@@ -99,6 +99,9 @@ const START_POLL: Duration = Duration::from_millis(100);
 /// asking for anything, which is most of a service's life.
 const ACCEPT_POLL: Duration = Duration::from_millis(100);
 
+/// How long a `shutdown` waits for a start that is still running to end.
+const START_WIND_DOWN: Duration = Duration::from_secs(30);
+
 /// How often the load guard asks the router whether a model failed to load.
 ///
 /// A load that dies on the card does so twenty seconds or more into it (a
@@ -152,27 +155,36 @@ impl Endpoint {
         })
     }
 
-    /// Write it, so a client can find this service.
+    /// Write it, so a client can find this service: whole beside the file,
+    /// then renamed over it, so a client never reads half of one and takes
+    /// the service for gone.
     fn write(home: &Path, endpoint: &Endpoint) -> std::io::Result<()> {
         let path = Endpoint::path(home);
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
+        let staged = path.with_extension(format!("json.{}", std::process::id()));
         std::fs::write(
-            &path,
+            &staged,
             format!(
                 "{{\"port\":{},\"token\":{},\"background\":{}}}\n",
                 endpoint.port,
                 json::quote(&endpoint.token),
                 endpoint.background
             ),
-        )
+        )?;
+        std::fs::rename(&staged, &path).inspect_err(|_| {
+            let _ = std::fs::remove_file(&staged);
+        })
     }
 
     /// Forget it, so the next client starts a service instead of dialling a
-    /// dead port.
-    fn remove(home: &Path) {
-        let _ = std::fs::remove_file(Endpoint::path(home));
+    /// dead port - while the file is still this service's: one that lost
+    /// the home to another service must not take that one's file with it.
+    fn remove(home: &Path, endpoint: &Endpoint) {
+        if Endpoint::read(home).map_or(true, |found| found.token == endpoint.token) {
+            let _ = std::fs::remove_file(Endpoint::path(home));
+        }
     }
 }
 
@@ -565,7 +577,7 @@ fn serve(home: &Path, start_now: bool) -> i32 {
     if start_now {
         let code = start_engine(home);
         if code != 0 {
-            Endpoint::remove(home);
+            Endpoint::remove(home, &endpoint);
             return code;
         }
     }
@@ -659,7 +671,7 @@ fn serve(home: &Path, start_now: bool) -> i32 {
         let (busy, starting, shutdown) = (Arc::clone(&busy), Arc::clone(&starting), Arc::clone(&shutdown));
         std::thread::spawn(move || serve_one(&home, &token, stream, &busy, &starting, &shutdown));
     };
-    Endpoint::remove(home);
+    Endpoint::remove(home, &endpoint);
     println!("[ OK ] golem service stopped");
     code
 }
@@ -732,7 +744,18 @@ fn serve_one(
         let stopped = {
             let mut stdout = std::io::stdout();
             let mut sink = Sink::new(Some(&mut stream), &mut stdout);
-            let stopped = launch::down(home, &mut sink);
+            let mut stopped = launch::down(home, &mut sink);
+            // A start still running would spawn its engine after this stop
+            // and leave it to a service that is gone. Stopping its engine as
+            // it appears ends the start; one still installing or downloading
+            // is given `START_WIND_DOWN` and ends with the process.
+            let deadline = std::time::Instant::now() + START_WIND_DOWN;
+            while busy.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                std::thread::sleep(ACCEPT_POLL);
+                if engine::pid(home).is_some() {
+                    stopped = launch::down(home, &mut sink);
+                }
+            }
             let _ = sink.flush();
             stopped
         };
@@ -999,8 +1022,13 @@ mod tests {
         let endpoint = Endpoint { port: 8123, token: "abc123".to_string(), background: true };
         Endpoint::write(&dir, &endpoint).expect("write");
         assert_eq!(Endpoint::read(&dir), Some(endpoint.clone()));
-        Endpoint::remove(&dir);
+        // Another service's file is not this one's to remove.
+        Endpoint::remove(&dir, &Endpoint { token: "other".to_string(), ..endpoint.clone() });
+        assert_eq!(Endpoint::read(&dir), Some(endpoint.clone()));
+        Endpoint::remove(&dir, &endpoint);
         assert_eq!(Endpoint::read(&dir), None);
+        let left: Vec<_> = std::fs::read_dir(dir.join(".local")).expect("dir").flatten().map(|e| e.file_name()).collect();
+        assert!(left.is_empty(), "nothing staged is left behind: {left:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

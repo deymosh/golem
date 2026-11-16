@@ -82,9 +82,17 @@ pub struct Status {
     pub port: u16,
 }
 
-/// The engine's pid, from the pid file `up` writes.
+/// The engine's pid, from the pid file `up` writes: its first line.
 pub fn pid(home: &Path) -> Option<u32> {
-    std::fs::read_to_string(crate::paths::pid_file(home)).ok()?.trim().parse().ok()
+    std::fs::read_to_string(crate::paths::pid_file(home)).ok()?.lines().next()?.trim().parse().ok()
+}
+
+/// The name the engine's process was started under, the pid file's second
+/// line: what tells the engine from another process that was given its pid
+/// once it had gone. `None` in a pid file that records only the pid.
+pub fn image(home: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(crate::paths::pid_file(home)).ok()?;
+    text.lines().nth(1).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string)
 }
 
 /// The engine as it is right now.

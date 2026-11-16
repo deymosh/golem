@@ -73,12 +73,13 @@ pub fn down(home: &Path, out: &mut dyn Write) -> i32 {
         let _ = writeln!(out, "[INFO] no pid file - nothing to stop");
         return 0;
     };
-    if !alive(pid) {
-        // A pid file outliving its process is normal enough (a crash, a kill),
-        // and the honest answer is to clean it up rather than report a stop
-        // that did not happen.
-        let _ = writeln!(out, "[INFO] process {pid} is not running - clearing the pid file");
-        remove_pid(home);
+    if !is_engine(pid, engine::image(home).as_deref()) {
+        // A pid file outliving its process is normal enough (a crash, a kill,
+        // a reboot), and the honest answer is to clean it up rather than
+        // report a stop that did not happen - or stop whatever process was
+        // given the pid since.
+        let _ = writeln!(out, "[INFO] the engine (pid {pid}) is not running - clearing the pid file");
+        remove_pid(home, pid);
         return 0;
     }
 
@@ -100,7 +101,7 @@ pub fn down(home: &Path, out: &mut dyn Write) -> i32 {
             return 1;
         }
     }
-    remove_pid(home);
+    remove_pid(home, pid);
 
     if !wait_for_card() {
         let _ = writeln!(
@@ -513,7 +514,9 @@ fn ensure_models(home: &Path, plan: &Startup, out: &mut dyn Write) -> Result<(),
 
 /// Spawn the server, record its pid, and wait for it to answer.
 fn start(home: &Path, plan: &Startup, endpoint: &engine::Endpoint, out: &mut dyn Write) -> Result<(), String> {
-    let mut command = Command::new(engine_program(plan));
+    let program = engine_program(plan);
+    let image = program.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut command = Command::new(&program);
     command
         .args(&plan.args)
         .current_dir(&plan.workdir)
@@ -556,7 +559,9 @@ fn start(home: &Path, plan: &Startup, endpoint: &engine::Endpoint, out: &mut dyn
     if let Some(dir) = plan.pid_file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Err(e) = std::fs::write(&plan.pid_file, format!("{pid}\n")) {
+    // The pid, and the name the process runs under: a pid alone names
+    // whatever process holds it later (`is_engine`).
+    if let Err(e) = std::fs::write(&plan.pid_file, format!("{pid}\n{image}\n")) {
         // Without its pid file nothing could stop this engine later - `down`
         // finds engines by it - so a start that cannot record one is undone.
         kill_tree(pid, true);
@@ -725,14 +730,7 @@ pub fn alive(pid: u32) -> bool {
         return false;
     }
     if cfg!(windows) {
-        let Ok(out) = Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-            .output()
-        else {
-            return false;
-        };
-        let text = String::from_utf8_lossy(&out.stdout);
-        text.lines().next().is_some_and(|line| line.trim_start().starts_with('"'))
+        tasklist_image(pid).is_some()
     } else {
         Command::new("kill")
             .args(["-0", &pid.to_string()])
@@ -742,9 +740,42 @@ pub fn alive(pid: u32) -> bool {
     }
 }
 
-/// Remove the home's pid file.
-fn remove_pid(home: &Path) {
-    let _ = std::fs::remove_file(paths::pid_file(home));
+/// The image name Windows' `tasklist` gives for `pid`, or `None` when no
+/// process has it.
+fn tasklist_image(pid: u32) -> Option<String> {
+    let out = Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]).output().ok()?;
+    image_of_row(String::from_utf8_lossy(&out.stdout).lines().next()?)
+}
+
+/// The image name in a `tasklist /FO CSV /NH` row: its first quoted field.
+/// `None` for the `INFO:` line that says nothing matched.
+fn image_of_row(row: &str) -> Option<String> {
+    let rest = row.trim_start().strip_prefix('"')?;
+    rest.split_once('"').map(|(image, _)| image.to_string())
+}
+
+/// Whether `pid` is the engine: a running process, and on Windows one that
+/// runs under `image`, the name the pid file recorded at the start. Windows
+/// hands a pid out again once its process has gone, so after a reboot or a
+/// killed service the pid file's number is soon some other program's, and
+/// stopping it by number would end that program's whole tree. A pid file
+/// with no name is taken at its pid.
+fn is_engine(pid: u32, image: Option<&str>) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    match image {
+        Some(image) if cfg!(windows) => tasklist_image(pid).is_some_and(|found| found.eq_ignore_ascii_case(image)),
+        _ => alive(pid),
+    }
+}
+
+/// Remove the home's pid file while it still records `pid`: a start that
+/// came in during the stop has written its own engine's there.
+fn remove_pid(home: &Path, pid: u32) {
+    if engine::pid(home).map_or(true, |recorded| recorded == pid) {
+        let _ = std::fs::remove_file(paths::pid_file(home));
+    }
 }
 
 /// Wait until the card is back to a desktop's worth of use. `false` when it
@@ -1167,6 +1198,45 @@ mod tests {
     #[test]
     fn a_pid_that_cannot_exist_is_not_alive() {
         assert!(!alive(0), "pid 0 is never a user process");
+        assert!(!is_engine(0, None));
+    }
+
+    #[test]
+    fn a_tasklist_row_names_its_image() {
+        assert_eq!(
+            image_of_row("\"Golem engine (llama.cpp).exe\",\"4242\",\"Console\",\"1\",\"1,024 K\"").as_deref(),
+            Some("Golem engine (llama.cpp).exe")
+        );
+        assert_eq!(image_of_row("INFO: No tasks are running which match the specified criteria."), None);
+        assert_eq!(image_of_row(""), None);
+    }
+
+    /// The pid file's number, held by another program since: this test's own
+    /// process stands in for it, and has to outlive the `down`.
+    #[cfg(windows)]
+    #[test]
+    fn a_pid_another_program_holds_is_not_stopped() {
+        let dir = home("reused");
+        let pid_file = dir.join(".local/llama-server.pid");
+        std::fs::write(&pid_file, format!("{}\nGolem engine (llama.cpp).exe\n", std::process::id())).expect("write");
+        assert_eq!(engine::pid(&dir), Some(std::process::id()));
+        assert!(alive(std::process::id()));
+        assert!(!is_engine(std::process::id(), engine::image(&dir).as_deref()));
+        assert_eq!(down(&dir, &mut std::io::sink()), 0);
+        assert!(!pid_file.exists(), "the stale pid file is gone");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_stop_leaves_the_pid_file_a_new_start_wrote() {
+        let dir = home("restarted");
+        let pid_file = dir.join(".local/llama-server.pid");
+        std::fs::write(&pid_file, "4242\nserver\n").expect("write");
+        remove_pid(&dir, 1111);
+        assert!(pid_file.exists(), "another engine's");
+        remove_pid(&dir, 4242);
+        assert!(!pid_file.exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A home with one engine adapter, a preset, and a config, enough for
