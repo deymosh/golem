@@ -422,16 +422,16 @@ pub fn read(path: &Path) -> std::io::Result<(Vec<Row>, Vec<(usize, String)>)> {
 }
 
 /// The share of the agent suite a model file solved in its newest run of
-/// the whole suite (every task of [`crate::agent::TASKS`]) on `host` - a
-/// gate's or `eval --agent`'s - on the API it did worse on, or `None` where
-/// it never ran there. A run of one task (`--task`) or of an older, smaller
-/// suite is another measure, and does not count.
+/// the whole suite (every task of [`crate::agent::TASKS`], on both APIs) on
+/// `host` - a gate's or `eval --agent`'s - on the API it did worse on, or
+/// `None` where it never ran there. A run of one task (`--task`), of one API
+/// or of an older, smaller suite is another measure, and does not count.
 pub fn agent_share(rows: &[Row], host: &str, model_file: &str) -> Option<f64> {
     let whole = crate::agent::TASKS.len() as u32;
     let newest = rows
         .iter()
         .filter(|r| r.host == host && r.model_file == model_file)
-        .filter(|r| !r.agent.is_empty() && r.agent.iter().all(|s| s.total == whole))
+        .filter(|r| crate::agent::ran_both(&r.agent) && r.agent.iter().all(|s| s.total == whole))
         .max_by(|a, b| a.ts.cmp(&b.ts))?;
     newest
         .agent
@@ -446,8 +446,9 @@ pub fn agent_share(rows: &[Row], host: &str, model_file: &str) -> Option<f64> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Best {
     pub row: Row,
-    /// The needle verdict for this model *and engine*, from the last eval row
-    /// that measured both. `None` when nothing gated this pair.
+    /// The needle verdict for this model on this engine, build and backend,
+    /// from the last eval row that measured them. `None` when nothing gated
+    /// that setup.
     pub needle: Option<String>,
 }
 
@@ -465,22 +466,24 @@ pub fn best_per_configuration(rows: &[Row]) -> Vec<Best> {
     // The last verdict a model has wins (later rows overwrite earlier
     // ones), so a re-run corrects the report without an edit.
     //
-    // Keyed by model *and engine*, not by model alone: the needle is the
-    // model's quality gate, but it is measured on one engine, and an engine
-    // that was never gated must not inherit the winner's PASS. On the
-    // reference box the tuner sweeps ik_llama.cpp and llama.cpp and gates
-    // only the winner - so a PASS on the ik_llama.cpp row would be a claim
-    // nothing measured.
+    // Keyed by model *and engine, build and backend*, not by model alone:
+    // the needle is the model's quality gate, but it is measured on one
+    // engine, and an engine that was never gated must not inherit the
+    // winner's PASS. On the reference box the tuner sweeps ik_llama.cpp and
+    // llama.cpp and gates only the winner - so a PASS on the ik_llama.cpp
+    // row would be a claim nothing measured. A build on trial is the same:
+    // its rows wait for its own gate, and its FAIL is not the pinned one's.
     //
     // And by host: a gate passed on one machine says nothing about another,
     // and machines never share a table.
-    let mut needles: Vec<((String, String, String), String)> = Vec::new();
+    let setup = |row: &Row| (row.host.clone(), row.identity(), row.engine.clone(), row.engine_build.clone(), row.served_backend());
+    let mut needles: Vec<((String, String, String, String, String), String)> = Vec::new();
     for row in rows {
         if row.kind != Kind::Eval {
             continue;
         }
         if let Some(n) = row.eval.as_ref().and_then(|e| e.needle.clone()) {
-            let key = (row.host.clone(), row.identity(), row.engine.clone());
+            let key = setup(row);
             match needles.iter_mut().find(|(k, _)| k == &key) {
                 Some((_, existing)) => *existing = n,
                 None => needles.push((key, n)),
@@ -509,7 +512,7 @@ pub fn best_per_configuration(rows: &[Row]) -> Vec<Best> {
     let mut out: Vec<Best> = best
         .into_iter()
         .map(|(_, _, row)| {
-            let key = (row.host.clone(), row.identity(), row.engine.clone());
+            let key = setup(&row);
             let needle = needles.iter().find(|(k, _)| k == &key).map(|(_, n)| n.clone());
             Best { row, needle }
         })
@@ -586,7 +589,7 @@ mod tests {
     /// A bench row shaped like the ones the recorder writes.
     const BENCH: &str = r#"{"ts": "2026-10-19T18:02:22Z", "kind": "bench", "host": "rtx-3060_12g_32g_i7-12700kf", "gpu": "NVIDIA GeForce RTX 3060", "os": "windows", "mode": "windows", "engine": "llama.cpp", "engine_build": "b11379-1537a0a8b", "model": "ornith-1.5-35b", "model_file": "Ornith-1.5-35B-Q4_K_M.gguf", "ctx": 236544, "threads": 16, "params_b": 35.51, "params_active_b": 3.52, "moe": true, "experts": "256x8", "n_layer": 40, "ctx_train": 262144, "flags": {"jinja": "true", "ctx-size": 236544}, "decode_best": 59.6, "decode_median": 59.3, "draft_accept": 0.66, "prefill": 832, "vram_mib": 11000, "ram_used_gib": 19.4, "ram_free_gib": 8.1, "quiet": true, "note": ""}"#;
 
-    const EVAL: &str = r#"{"ts": "2026-10-20T00:00:38Z", "kind": "eval", "host": "rtx-3060_12g_32g_i7-12700kf", "model": "ornith-1.5-35b", "model_file": "Ornith-1.5-35B-Q4_K_M.gguf", "engine": "llama.cpp", "engine_build": "b11379-1537a0a8b", "ctx": 236544, "eval": {"tools": "PASS", "needle": "PASS", "needle_tokens": 211818, "depth_decode": 30.6, "decode_best": 58.1}, "quiet": true, "note": ""}"#;
+    const EVAL: &str = r#"{"ts": "2026-10-20T00:00:38Z", "kind": "eval", "host": "rtx-3060_12g_32g_i7-12700kf", "gpu": "NVIDIA GeForce RTX 3060", "model": "ornith-1.5-35b", "model_file": "Ornith-1.5-35B-Q4_K_M.gguf", "engine": "llama.cpp", "engine_build": "b11379-1537a0a8b", "ctx": 236544, "eval": {"tools": "PASS", "needle": "PASS", "needle_tokens": 211818, "depth_decode": 30.6, "decode_best": 58.1}, "quiet": true, "note": ""}"#;
 
     #[test]
     fn parses_a_bench_row() {
@@ -744,6 +747,19 @@ mod tests {
     }
 
     #[test]
+    fn a_needle_verdict_does_not_cross_builds() {
+        let build = Row::parse(BENCH).expect("should parse").engine_build;
+        assert!(!build.is_empty(), "the fixture names its build");
+        let other = BENCH.replace(&build, "b99999-0000000");
+        let rows: Vec<Row> = [BENCH, &other, EVAL].iter().map(|l| Row::parse(l).expect("should parse")).collect();
+        let best = best_per_configuration(&rows);
+        let gated = best.iter().find(|b| b.row.engine_build == build).expect("the gated build");
+        assert_eq!(gated.needle.as_deref(), Some("PASS"));
+        let trial = best.iter().find(|b| b.row.engine_build == "b99999-0000000").expect("the other build");
+        assert_eq!(trial.needle, None, "a build nothing gated");
+    }
+
+    #[test]
     fn a_needle_verdict_does_not_cross_hosts() {
         let other = BENCH.replace(r#""host": "rtx-3060_12g_32g_i7-12700kf""#, r#""host": "rtx-4090_24g_64g_i9-13900k""#);
         let rows: Vec<Row> = [BENCH, &other, EVAL].iter().map(|l| Row::parse(l).expect("should parse")).collect();
@@ -883,6 +899,8 @@ mod tests {
             row("2026-10-31T00:00Z", "other", "9b.gguf", &both(1, 1)),
             row("2026-10-30T01:43Z", "box", "35b.gguf", &both(n, n)),
             row("2026-10-31T01:00Z", "box", "35b.gguf", &format!(r#"{{"openai": {{"solved": 2, "total": {}}}}}"#, n - 1)),
+            // The whole suite on one API says nothing of the other.
+            row("2026-10-31T02:00Z", "box", "35b.gguf", &format!(r#"{{"openai": {{"solved": 3, "total": {n}}}}}"#)),
         ];
         assert_eq!(agent_share(&rows, "box", "9b.gguf"), Some((n - 1) as f64 / n as f64));
         assert_eq!(agent_share(&rows, "box", "35b.gguf"), Some(1.0));

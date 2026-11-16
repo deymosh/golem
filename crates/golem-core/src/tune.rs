@@ -777,7 +777,7 @@ pub fn kept_agent<'a>(rows: &'a [crate::results::Row], setup: &GateSetup, floor:
     let newest = rows
         .iter()
         .filter(|r| r.kind == crate::results::Kind::Eval)
-        .filter(|r| ["anthropic", "openai"].iter().all(|api| r.agent.iter().any(|s| s.api == *api)))
+        .filter(|r| crate::agent::ran_both(&r.agent))
         .filter(|r| r.agent.iter().all(|s| s.total as usize == crate::agent::TASKS.len()))
         .filter(|r| r.host == setup.host && r.model_file == setup.model_file && r.engine == setup.engine)
         .filter(|r| r.engine_build == setup.build || r.engine_build.starts_with(&build))

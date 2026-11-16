@@ -23,13 +23,13 @@ const TURN_TIMEOUT: Duration = Duration::from_secs(600);
 /// RESULT line per API. 0 when the suite ran, whatever it solved; 1 when the
 /// engine could not be asked.
 pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
-    let mut apis = vec![Api::Anthropic, Api::OpenAi];
+    let mut named: Vec<Api> = Vec::new();
     let mut only: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "anthropic" => apis = vec![Api::Anthropic],
-            "openai" => apis = vec![Api::OpenAi],
+            "anthropic" => named.push(Api::Anthropic),
+            "openai" => named.push(Api::OpenAi),
             "--task" => match args.get(i + 1) {
                 Some(name) if agent::TASKS.iter().any(|t| t.name == name) => {
                     only = Some(name.clone());
@@ -48,6 +48,9 @@ pub fn run(home: &Path, args: &[String], out: &mut dyn Write) -> i32 {
         }
         i += 1;
     }
+    // Both when none is named, and each once, in the suite's own order.
+    let apis: Vec<Api> =
+        [Api::Anthropic, Api::OpenAi].into_iter().filter(|api| named.is_empty() || named.contains(api)).collect();
     let Some(base) = Base::from_home(home) else {
         let _ = writeln!(out, "[FAIL] LOCAL_AI_BASE_URL in golem.toml is not a URL golem can reach");
         return 1;

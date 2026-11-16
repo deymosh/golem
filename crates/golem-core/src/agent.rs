@@ -1237,11 +1237,16 @@ pub fn over_context(status: u16, message: &str) -> bool {
     status == 400 && message.contains("exceeds the available context size")
 }
 
+/// Whether a run holds a summary for each API the suite speaks: a run of one
+/// API, or one the engine stopped answering before the second, does not.
+pub fn ran_both(summaries: &[Summary]) -> bool {
+    [Api::Anthropic, Api::OpenAi].iter().all(|api| summaries.iter().any(|s| s.api == api.name()))
+}
+
 /// Whether a run clears `floor`, the share of tasks each API must solve: an
 /// API that was not run does not pass, and no run at all is not a pass.
 pub fn passes(summaries: &[Summary], floor: f64) -> bool {
-    !summaries.is_empty()
-        && summaries.iter().all(|s| s.total > 0 && s.solved as f64 >= floor * s.total as f64 - 1e-9)
+    ran_both(summaries) && summaries.iter().all(|s| s.total > 0 && s.solved as f64 >= floor * s.total as f64 - 1e-9)
 }
 
 #[cfg(test)]
@@ -1599,5 +1604,7 @@ mod tests {
         assert!(!passes(&[s("anthropic", 5, 8), s("openai", 8, 8)], 0.75));
         assert!(!passes(&[], 0.0), "no run is not a pass");
         assert!(!passes(&[s("openai", 0, 0)], 0.0));
+        assert!(!passes(&[s("anthropic", 8, 8)], 0.75), "the API the engine stopped answering on did not pass");
+        assert!(!passes(&[s("openai", 8, 8), s("openai", 8, 8)], 0.75));
     }
 }
