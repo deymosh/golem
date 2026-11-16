@@ -109,6 +109,16 @@ inside each; the levers are fewer loads and less bench per load.
   previous build, and the 200K gate passes on the result. Met: 2 loads and 516 s against
   run B's 7 loads and 1681 s, the gate passed. The first run on a moved desktop still
   measures its points; what it no longer spends is the suite.
+- **Measured, what a gate on a new split or batch costs**, 2026-11-16, desktop about 1 GB
+  of the card (364 MiB on 2026-11-03): nothing was kept, n34 and n35 read over the wall
+  (n35 by 2 MiB), and the run ranked `n-cpu-moe 36` at `ubatch-size 1024` and 262144
+  tokens first (54.4 t/s). No gate had run that split and batch, so the gate ran its own
+  suite - 450 and 457 s, ten of twelve on both APIs - and passed (needle 512 t/s
+  prefill, 36.4 at depth): 7 loads and 1842 s, half of it the suite. That is the rule
+  working as written - a suite is kept per split and batch already, and there was none
+  to keep - so the cost is one suite whenever the verdict is a setup never gated, and
+  nothing is changed. The verdict was not the served setup's (the desktop's extra 650
+  MiB took n35), which stays.
 
 ## 2. Agent evaluation
 
