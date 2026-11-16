@@ -131,6 +131,9 @@ fn run_task(base: &Base, api: Api, model: &str, task: &Task) -> Result<(Verdict,
     let mut body = agent::first_request(api, model, task);
     let mut verdict = Verdict { task: task.name, ..Verdict::default() };
     let start = Instant::now();
+    // The answer graded is the final turn's (`agent::answer`); the last
+    // text of any turn is kept for the report of a task with none.
+    let mut final_answer: Option<String> = None;
     let mut last_text = String::new();
     let mut over: Option<String> = None;
     while verdict.turns < agent::MAX_TURNS {
@@ -151,6 +154,7 @@ fn run_task(base: &Base, api: Api, model: &str, task: &Task) -> Result<(Verdict,
         if !turn.text.trim().is_empty() {
             last_text = turn.text.clone();
         }
+        final_answer = agent::answer(&turn).map(str::to_string);
         if turn.calls.is_empty() {
             // A turn cut at the token cap is not an answer: say so, rather
             // than grade a half-thought as the model's last word.
@@ -173,7 +177,7 @@ fn run_task(base: &Base, api: Api, model: &str, task: &Task) -> Result<(Verdict,
         trace.extend(results);
     }
     verdict.seconds = start.elapsed().as_secs_f64();
-    match (&over, (task.grade)(&workspace, &last_text)) {
+    match (&over, (task.grade)(&workspace, final_answer.as_deref().unwrap_or(""))) {
         (Some(said), _) => verdict.reason = format!("the setup's context cannot hold it: {said}"),
         (None, Ok(())) => verdict.solved = true,
         (None, Err(reason)) => verdict.reason = reason,
@@ -184,6 +188,7 @@ fn run_task(base: &Base, api: Api, model: &str, task: &Task) -> Result<(Verdict,
     if !verdict.solved && verdict.turns >= agent::MAX_TURNS {
         verdict.reason = format!("{} (stopped at {} turns)", verdict.reason, agent::MAX_TURNS);
     }
-    let report = (!verdict.solved).then(|| agent::failure_report(&verdict, &(task.files)(), &workspace, &trace, &last_text));
+    let report = (!verdict.solved)
+        .then(|| agent::failure_report(&verdict, &(task.files)(), &workspace, &trace, final_answer.as_deref(), &last_text));
     Ok((verdict, report))
 }

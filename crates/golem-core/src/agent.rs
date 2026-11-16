@@ -263,7 +263,8 @@ pub struct Task {
     pub files: fn() -> Workspace,
     /// What `run_tests` answers for the workspace as it stands.
     pub tests: fn(&Workspace) -> String,
-    /// Done or not, from the final workspace and the last answer's text.
+    /// Done or not, from the final workspace and the answer ([`answer`]),
+    /// empty when the run ended without one.
     pub grade: fn(&Workspace, &str) -> Result<(), String>,
 }
 
@@ -997,6 +998,14 @@ pub struct Turn {
     pub cut: bool,
 }
 
+/// The text a turn answers with, when it is the model's last word: a turn
+/// that calls no tool and was not cut at [`MAX_TOKENS`]. A task's answer is
+/// its final turn's; a run stopped at [`MAX_TURNS`] ended on a turn with
+/// calls and has none, whatever it said on the way.
+pub fn answer(turn: &Turn) -> Option<&str> {
+    (turn.calls.is_empty() && !turn.cut).then_some(turn.text.as_str())
+}
+
 fn count(value: Option<&Value>) -> u64 {
     value.and_then(Value::as_f64).map_or(0, |n| n.max(0.0) as u64)
 }
@@ -1140,10 +1149,18 @@ pub fn result_line(api: Api, verdicts: &[Verdict]) -> String {
 }
 
 /// What a missed task did, to read afterwards: why it failed, every call it
-/// made with the first line of its answer, its last answer, and each file it
-/// changed or added. A file under 200 lines is given whole; a longer one
-/// only by the lines that differ, numbered, as one-line edits mostly are.
-pub fn failure_report(verdict: &Verdict, start: &Workspace, end: &Workspace, calls: &[(Call, Outcome)], answer: &str) -> String {
+/// made with the first line of its answer, its answer - or, when it gave
+/// none, the last text it wrote - and each file it changed or added. A file
+/// under 200 lines is given whole; a longer one only by the lines that
+/// differ, numbered, as one-line edits mostly are.
+pub fn failure_report(
+    verdict: &Verdict,
+    start: &Workspace,
+    end: &Workspace,
+    calls: &[(Call, Outcome)],
+    answer: Option<&str>,
+    last_text: &str,
+) -> String {
     let mut out = format!("{} - {}\n\ncalls:\n", verdict.task, verdict.reason);
     for (call, outcome) in calls {
         let args: String = call.arguments.chars().take(300).collect();
@@ -1151,7 +1168,10 @@ pub fn failure_report(verdict: &Verdict, start: &Workspace, end: &Workspace, cal
         let said = outcome.text.lines().next().unwrap_or("");
         out.push_str(&format!("  {}({args}{more})\n    -> {said}\n", call.name));
     }
-    out.push_str(&format!("\nlast answer:\n{}\n", answer.trim()));
+    match answer {
+        Some(answer) => out.push_str(&format!("\nanswer:\n{}\n", answer.trim())),
+        None => out.push_str(&format!("\nno answer; the last text it wrote:\n{}\n", last_text.trim())),
+    }
     for (path, text) in end.files() {
         let before = start.read(path);
         if before == Some(text.as_str()) {
@@ -1578,10 +1598,12 @@ mod tests {
         end.write("notes.md", "renamed\n");
         let calls = vec![(call("search", r#"{"text":"get_user"}"#), Outcome { text: "users.py:1: def get_user(user_id):\nmore".into(), valid: true })];
         let verdict = Verdict { task: "rename-past-a-dispatch", reason: "api.py still says get_user".into(), ..Verdict::default() };
-        let report = failure_report(&verdict, &start, &end, &calls, " Done. ");
+        let report = failure_report(&verdict, &start, &end, &calls, Some(" Done. "), "Looking.");
         assert!(report.starts_with("rename-past-a-dispatch - api.py still says get_user\n"), "{report}");
         assert!(report.contains("  search({\"text\":\"get_user\"})\n    -> users.py:1: def get_user(user_id):\n"), "{report}");
-        assert!(report.contains("last answer:\nDone.\n"));
+        assert!(report.contains("\nanswer:\nDone.\n"));
+        let none = failure_report(&verdict, &start, &end, &calls, None, " Let me check once more. ");
+        assert!(none.contains("\nno answer; the last text it wrote:\nLet me check once more.\n"), "{none}");
         assert!(report.contains("--- users.py (changed)\ndef fetch_user"));
         assert!(report.contains("--- notes.md (new)\nrenamed"));
         assert!(!report.contains("--- jobs.py"), "unchanged files are left out");
@@ -1591,7 +1613,7 @@ mod tests {
         let mut end = start.clone();
         let text = end.read("tables.py").unwrap().replace("% 255", "% 254");
         end.write("tables.py", &text);
-        let report = failure_report(&verdict, &start, &end, &[], "");
+        let report = failure_report(&verdict, &start, &end, &[], Some(""), "");
         assert!(report.contains("(changed; the lines that differ)\n"), "{report}");
         assert!(report.contains(" -     return sum(data) % 255\n") && report.contains(" +     return sum(data) % 254\n"), "{report}");
         assert!(report.lines().count() < 20, "{report}");
@@ -1606,5 +1628,18 @@ mod tests {
         assert!(!passes(&[s("openai", 0, 0)], 0.0));
         assert!(!passes(&[s("anthropic", 8, 8)], 0.75), "the API the engine stopped answering on did not pass");
         assert!(!passes(&[s("openai", 8, 8), s("openai", 8, 8)], 0.75));
+    }
+
+    #[test]
+    fn the_answer_is_the_final_turns_text() {
+        let turn = |text: &str, calls: usize, cut: bool| Turn {
+            text: text.into(),
+            calls: (0..calls).map(|_| call("run_tests", "{}")).collect(),
+            cut,
+            ..Turn::default()
+        };
+        assert_eq!(answer(&turn("It is 4711.", 0, false)), Some("It is 4711."));
+        assert_eq!(answer(&turn("4711, let me check the tests.", 1, false)), None, "a turn that calls is not done");
+        assert_eq!(answer(&turn("It is 47", 0, true)), None, "a turn cut mid-thought is not an answer");
     }
 }
