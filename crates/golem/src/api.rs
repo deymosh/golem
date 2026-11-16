@@ -60,6 +60,10 @@ const ANTHROPIC_NATIVE: bool = true;
 /// The largest page fetched.
 const FETCH_MAX_BYTES: &str = "5000000";
 
+/// The most of one curl answer golem reads, head and unpacked body: four
+/// times what a fetch may download.
+const WEB_OUTPUT_MAX: usize = 20_000_000;
+
 /// How many searches are kept for `WEB_CACHE_MINUTES`.
 const SEARCH_CACHE: usize = 64;
 
@@ -182,7 +186,7 @@ impl Request {
 fn read_request(reader: &mut BufReader<TcpStream>, client: &mut TcpStream) -> std::io::Result<Option<Request>> {
     let mut line = String::new();
     let mut head_len = 0;
-    if reader.read_line(&mut line)? == 0 {
+    if read_line_within(reader, &mut line, HEAD_MAX)? == 0 {
         return Ok(None);
     }
     let mut parts = line.split_whitespace();
@@ -191,9 +195,12 @@ fn read_request(reader: &mut BufReader<TcpStream>, client: &mut TcpStream) -> st
     let mut headers = Vec::new();
     loop {
         line.clear();
-        let n = reader.read_line(&mut line)?;
+        if head_len >= HEAD_MAX {
+            return Ok(None);
+        }
+        let n = read_line_within(reader, &mut line, HEAD_MAX - head_len)?;
         head_len += n;
-        if n == 0 || head_len > HEAD_MAX {
+        if n == 0 {
             return Ok(None);
         }
         let trimmed = line.trim_end_matches(['\r', '\n']);
@@ -221,13 +228,24 @@ fn read_request(reader: &mut BufReader<TcpStream>, client: &mut TcpStream) -> st
     Ok(Some(request))
 }
 
+/// One line of a request's framing, of at most `max` bytes: a line that
+/// runs past it is an error before it is memory, where `read_line` alone
+/// reads until the client sends a line break.
+fn read_line_within(reader: &mut impl BufRead, line: &mut String, max: usize) -> std::io::Result<usize> {
+    let n = reader.by_ref().take(max as u64).read_line(line)?;
+    if n == max && !line.ends_with('\n') {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "line too long"));
+    }
+    Ok(n)
+}
+
 /// A chunked body, de-framed.
 fn read_chunked(reader: &mut impl BufRead, max: usize) -> std::io::Result<Vec<u8>> {
     let mut body = Vec::new();
     let mut line = String::new();
     loop {
         line.clear();
-        if reader.read_line(&mut line)? == 0 {
+        if read_line_within(reader, &mut line, HEAD_MAX)? == 0 {
             return Ok(body);
         }
         let size = usize::from_str_radix(line.trim().split(';').next().unwrap_or("").trim(), 16).unwrap_or(0);
@@ -235,19 +253,21 @@ fn read_chunked(reader: &mut impl BufRead, max: usize) -> std::io::Result<Vec<u8
             // The trailers and the blank line that ends them.
             loop {
                 line.clear();
-                if reader.read_line(&mut line)? == 0 || line.trim().is_empty() {
+                if read_line_within(reader, &mut line, HEAD_MAX)? == 0 || line.trim().is_empty() {
                     return Ok(body);
                 }
             }
         }
-        if body.len() + size > max {
+        // By what is left, so a chunk size near the largest number is over
+        // the limit rather than around it.
+        if size > max - body.len() {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "body too large"));
         }
         let start = body.len();
         body.resize(start + size, 0);
         reader.read_exact(&mut body[start..])?;
         line.clear();
-        reader.read_line(&mut line)?;
+        read_line_within(reader, &mut line, HEAD_MAX)?;
     }
 }
 
@@ -529,6 +549,7 @@ fn relay_answer(answer: &mut Answer, client: &mut TcpStream) -> std::io::Result<
 fn intercept(front: &Front, api: ChatApi, request: &Request, body: Value, client: &mut TcpStream) -> std::io::Result<()> {
     let measuring = request.header(tools::MEASURE_HEADER).is_some_and(|v| v.trim().eq_ignore_ascii_case("off"));
     let on = web_tools_on(&front.home) && !measuring;
+    let original = body.clone();
     let mut prepared = match api {
         ChatApi::Anthropic => tools::prepare_anthropic(body, on),
         ChatApi::OpenAi => tools::prepare_openai(body, on),
@@ -542,6 +563,11 @@ fn intercept(front: &Front, api: ChatApi, request: &Request, body: Value, client
     // A Responses stream always goes through the relay, which writes the
     // fields the engine's stream leaves out and clients read.
     if !prepared.tools_added && !(api == ChatApi::Responses && prepared.stream) {
+        // A request golem adds nothing to goes on as the bytes the client
+        // sent; only one the preparation changed is written out again.
+        if prepared.body == original {
+            return pass(front, request, &request.body, client);
+        }
         return pass(front, request, prepared.body.to_json().as_bytes(), client);
     }
     match (api, prepared.stream) {
@@ -1046,13 +1072,30 @@ fn log_call(home: &Path, label: &str) {
 // The web
 // ---------------------------------------------------------------
 
-/// curl's output, its exit code, and what it said on stderr.
+/// curl's output, its exit code, and what it said on stderr. `-q` first, so
+/// a `.curlrc` on this machine adds no option of its own - one that follows
+/// redirects would take a hop past the address check. The output is read
+/// to [`WEB_OUTPUT_MAX`] and no further: `--max-filesize` counts what
+/// crosses the wire, and a compressed answer unpacks to many times that.
 fn curl(args: &[&str]) -> Result<Vec<u8>, String> {
-    let out = Command::new("curl")
+    let mut child = Command::new("curl")
+        .arg("-q")
         .args(args)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("cannot run curl: {e}"))?;
+    let mut stdout = Vec::new();
+    if let Some(pipe) = child.stdout.take() {
+        let _ = pipe.take(WEB_OUTPUT_MAX as u64 + 1).read_to_end(&mut stdout);
+    }
+    if stdout.len() > WEB_OUTPUT_MAX {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("the answer is too large to read".to_string());
+    }
+    let out = child.wait_with_output().map_err(|e| format!("cannot run curl: {e}"))?;
     if !out.status.success() {
         let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
         // curl's own words are in the machine's language; the model gets
@@ -1065,7 +1108,7 @@ fn curl(args: &[&str]) -> Result<Vec<u8>, String> {
             None => format!("the request failed (curl exit {})", out.status.code().unwrap_or(-1)),
         });
     }
-    Ok(out.stdout)
+    Ok(stdout)
 }
 
 /// Split curl's `-D -` output into the head and the body.
@@ -1191,16 +1234,20 @@ fn fetch(home: &Path, url: &str, limits: &tools::Limits, detail: &mut Detail) ->
             return Err(format!("{host} is on this machine or the local network; Golem only fetches public pages"));
         }
         let addr = public_address(&host, port)?;
-        let pin = match addr {
-            SocketAddr::V4(v4) => format!("{host}:{port}:{}", v4.ip()),
-            SocketAddr::V6(v6) => format!("{host}:{port}:[{}]", v6.ip()),
+        let ip = match addr {
+            SocketAddr::V4(v4) => v4.ip().to_string(),
+            SocketAddr::V6(v6) => format!("[{}]", v6.ip()),
         };
+        // The name with its root dot too: a URL may write it either way, and
+        // a name curl found no pin for it would resolve again by itself.
+        let (pin, pin_rooted) = (format!("{host}:{port}:{ip}"), format!("{host}.:{port}:{ip}"));
         let output = curl(&[
             "-sS", "-m", &timeout, "--compressed", "--max-filesize", FETCH_MAX_BYTES,
             "--proto", "=http,https", "-A", USER_AGENT,
             "-H", "Accept: text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
             "-H", "Accept-Language: en-US,en;q=0.9",
             "--resolve", &pin,
+            "--resolve", &pin_rooted,
             "-D", "-",
             &url,
         ])?;
@@ -1304,5 +1351,20 @@ mod tests {
         assert_eq!(read_chunked(&mut reader, 100).expect("body"), b"abcde");
         let mut big = std::io::Cursor::new(b"ff\r\n".to_vec());
         assert!(read_chunked(&mut big, 10).is_err());
+        // A chunk size that would wrap the count is over the limit too.
+        let mut wrap = std::io::Cursor::new(b"1\r\na\r\nffffffffffffffff\r\n".to_vec());
+        assert!(read_chunked(&mut wrap, 10).is_err());
+    }
+
+    #[test]
+    fn a_framing_line_is_read_only_to_its_limit() {
+        let mut line = String::new();
+        let mut short = std::io::Cursor::new(b"abc\r\nrest".to_vec());
+        assert_eq!(read_line_within(&mut short, &mut line, 5).expect("a line"), 5);
+        assert_eq!(line, "abc\r\n");
+        line.clear();
+        let mut long = std::io::Cursor::new(vec![b'a'; 1000]);
+        assert!(read_line_within(&mut long, &mut line, 16).is_err());
+        assert_eq!(line.len(), 16, "nothing past the limit was read");
     }
 }

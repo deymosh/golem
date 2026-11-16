@@ -198,8 +198,10 @@ pub fn split_parts(text: &str, max: usize) -> Vec<String> {
         }
         for line in paragraph.split('\n') {
             let mut rest: &str = line;
-            while rest.chars().count() > max {
-                let at = rest.char_indices().nth(max).map_or(rest.len(), |(i, _)| i);
+            // A character past `max` is a line longer than it: found in one
+            // walk of the window, where counting the rest each time walks a
+            // megabyte line once per window.
+            while let Some((at, _)) = rest.char_indices().nth(max) {
                 push(&rest[..at], "\n", &mut current, &mut current_len, &mut parts);
                 rest = &rest[at..];
             }
@@ -382,9 +384,12 @@ pub fn private_ip(ip: std::net::IpAddr) -> bool {
                 || v4.is_private()
                 || v4.is_link_local()
                 || v4.is_unspecified()
-                || v4.is_broadcast()
                 || a == 0
                 || (a == 100 && (64..128).contains(&b))
+                // Benchmarking between networks, and the reserved block
+                // with the broadcast address at its end.
+                || (a == 198 && (18..20).contains(&b))
+                || a >= 240
         }
         std::net::IpAddr::V6(v6) => {
             let first = v6.segments()[0];
@@ -392,6 +397,8 @@ pub fn private_ip(ip: std::net::IpAddr) -> bool {
                 || v6.is_unspecified()
                 || (first & 0xfe00) == 0xfc00
                 || (first & 0xffc0) == 0xfe80
+                // Site-local, the private range before unique local ones.
+                || (first & 0xffc0) == 0xfec0
                 || v6.to_ipv4_mapped().is_some_and(|v4| private_ip(std::net::IpAddr::V4(v4)))
         }
     }
@@ -407,9 +414,10 @@ pub fn resolve_location(base: &str, location: &str) -> String {
     if let Some(rest) = location.strip_prefix("//") {
         return format!("{scheme}://{rest}");
     }
-    let after_scheme = base.split_once("://").map_or(base, |(_, r)| r);
-    let origin_len = scheme.len() + 3 + after_scheme.find('/').unwrap_or(after_scheme.len());
-    let origin = &base[..origin_len.min(base.len())];
+    // The origin ends at the first `/` after the scheme's own - or at the
+    // first one of a base that names no scheme.
+    let (written, after_scheme) = base.split_once("://").map_or((0, base), |(s, r)| (s.len() + 3, r));
+    let origin = &base[..written + after_scheme.find('/').unwrap_or(after_scheme.len())];
     if location.starts_with('/') {
         return format!("{origin}{location}");
     }
@@ -2408,7 +2416,10 @@ mod tests {
         for ip in ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.1.1", "100.64.0.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:192.168.1.1"] {
             assert!(private_ip(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["93.184.216.34", "2606:4700::1111", "100.128.0.1"] {
+        for ip in ["198.18.0.1", "198.19.255.254", "240.0.0.1", "255.255.255.255", "fec0::1"] {
+            assert!(private_ip(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["93.184.216.34", "2606:4700::1111", "100.128.0.1", "198.17.0.1", "198.20.0.1", "239.1.1.1"] {
             assert!(!private_ip(ip.parse().unwrap()), "{ip}");
         }
     }
@@ -2420,6 +2431,17 @@ mod tests {
         assert_eq!(resolve_location("https://a.test", "z"), "https://a.test/z");
         assert_eq!(resolve_location("http://a.test/x", "//b.test/"), "http://b.test/");
         assert_eq!(resolve_location("http://a.test/x", "https://c.test/"), "https://c.test/");
+        // A base with no scheme and letters of more than one byte: an
+        // answer, not a cut inside a letter.
+        assert_eq!(resolve_location("äää/xxxxxxä", "x"), "äää/x");
+    }
+
+    #[test]
+    fn a_long_line_is_cut_into_parts_in_one_pass() {
+        let line = "é".repeat(2_000_000);
+        let parts = split_parts(&line, 20_000);
+        assert_eq!(parts.len(), 100);
+        assert!(parts.iter().all(|p| p.chars().count() == 20_000));
     }
 
     #[test]
