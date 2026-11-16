@@ -177,7 +177,8 @@ effective file, so one tune's answers never become the next one's assumptions.
 effective preset, and an engine that was up comes back on it. The console's and the
 screen's Tune is `tune <model> --adopt`: it always gates, so a tune started there serves
 its verdict once the gate passes. `data/tuned/<host>/winner.txt` records the verdict and every point, and
-every point is also a row in `results/results.jsonl`.
+every point this run benched is also a row in `results/results.jsonl` - not one stopped
+over the wall, nor one kept from an earlier run.
 
 ## Profiles
 

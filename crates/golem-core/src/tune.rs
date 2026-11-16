@@ -37,7 +37,7 @@ impl Default for Floor {
     fn default() -> Self {
         // 25 felt fine in real sessions where 16.7 did not; 350 refuses the
         // ~80 s first prompt; 15 refuses a context that is unusable at depth;
-        // 0.75 is nine of the suite's eleven tasks on each API.
+        // 0.75 is nine of the suite's twelve tasks on each API.
         Floor { decode: 25.0, prefill: 350.0, depth_decode: 15.0, agent: 0.75 }
     }
 }
@@ -644,7 +644,12 @@ pub fn required_ctx(gate_tokens: u64, ctx_train: u64) -> u64 {
 /// only as good as the context it leaves room for - Agents-A1, pulled at
 /// 32768, found its frontier at `n-cpu-moe 23` (2026-11-07) and that split
 /// filled the card at 54272 tokens, a quarter of the 223232 the gate needs.
+///
+/// A preset that asks for more than the model was trained on is held to the
+/// trained context, when the file states one: no split fits past it, and
+/// the search would end with no point at all.
 pub fn frontier_ctx(preset_ctx: u64, gate_tokens: u64, ctx_train: u64) -> u64 {
+    let preset_ctx = if ctx_train > 0 { preset_ctx.min(ctx_train) } else { preset_ctx };
     preset_ctx.max(required_ctx(gate_tokens, ctx_train))
 }
 
@@ -1020,6 +1025,9 @@ mod tests {
         assert_eq!(frontier_ctx(248_832, 200_000, 262_144), 248_832);
         // A model trained on less is searched at the preset's own.
         assert_eq!(frontier_ctx(32_768, 200_000, 32_768), 32_768);
+        // A preset that asks for more than the model was trained on.
+        assert_eq!(frontier_ctx(262_144, 200_000, 32_768), 32_768);
+        assert_eq!(frontier_ctx(262_144, 200_000, 0), 262_144, "an unknown trained context holds nothing");
     }
 
     /// The reference box's wall: 12288 MiB less the default 1024 of headroom.

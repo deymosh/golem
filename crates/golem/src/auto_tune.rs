@@ -327,10 +327,15 @@ fn shared_args(args: &mut Vec<String>, opts: &Options) {
         args.push("--engine".to_string());
         args.push(opts.engine.clone());
     }
-    // `max` is the tuner's own default, so only a pin is forwarded.
-    if opts.ctx != "max" {
-        args.push("--ctx".to_string());
-        args.push(opts.ctx.clone());
+    // `max` is the tuner's own default, so only a pin or the ladder is
+    // forwarded, each as the flag the sweep reads it by.
+    match opts.ctx.as_str() {
+        "max" => {}
+        "ladder" => args.push("--ctx-ladder".to_string()),
+        pin => {
+            args.push("--ctx".to_string());
+            args.push(pin.to_string());
+        }
     }
 }
 
@@ -354,6 +359,24 @@ fn candidate(preset: String, model: String, preset_text: &str, models_dir: &Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_context_policy_reaches_the_sweep_as_the_flag_it_reads() {
+        let dir = std::env::temp_dir().join(format!("golem-auto-tune-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("home");
+        let args_with = |policy: &str| {
+            std::fs::write(dir.join("golem.toml"), format!("TUNE_CTX_POLICY = \"{policy}\"\n")).expect("config");
+            sweep_args("smoke", &Options::parse(&dir, &[]).expect("options"))
+        };
+        let has = |args: &[String], flag: &str| args.iter().any(|a| a == flag);
+        let ladder = args_with("ladder");
+        assert!(has(&ladder, "--ctx-ladder") && !has(&ladder, "--ctx"), "{ladder:?}");
+        let pinned = args_with("65536");
+        assert!(pinned.windows(2).any(|w| w[0] == "--ctx" && w[1] == "65536"), "{pinned:?}");
+        let max = args_with("max");
+        assert!(!has(&max, "--ctx") && !has(&max, "--ctx-ladder"), "{max:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn the_scores_come_from_the_shipped_library() {

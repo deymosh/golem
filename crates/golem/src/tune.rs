@@ -1677,7 +1677,7 @@ impl<'a> Tuner<'a> {
                 let ctx = self.points[key].ctx;
                 let n_cpu_moe = self.points[key].n_cpu_moe.clone();
 
-                if pass == 0 && self.opts.ctx == CtxPolicy::Max && ctx < need {
+                if pass == 0 && !matches!(self.opts.ctx, CtxPolicy::Pinned(_)) && ctx < need {
                     self.emit(format_args!(
                         "  [WARN] {engine} {} holds {ctx} tokens, under the {need} a {}-token gate needs - trying the next candidate",
                         self.points[key].label, self.opts.gate_tokens_max
