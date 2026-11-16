@@ -287,20 +287,31 @@ fn ram_used_gib(home: &Path) -> Option<f64> {
     }
 }
 
-/// `WorkingSet64` of the process and its descendants, summed and rounded.
+/// The working set of the process and its descendants, summed and rounded.
 ///
 /// The router spawns one child per loaded model and Strata runs its engine as
 /// a child, so the tree - not the one process - is what holds the RAM.
+///
+/// Windows keeps a process's parent id after the parent exits and hands the
+/// id out again, so the engine can carry the id of the shell that started
+/// the service, and the service then reads as the engine's child while the
+/// engine is the service's: a walk by parent id alone counts the service and
+/// never ends. A child counts only when it started after its parent, and
+/// each process once.
 fn ram_used_gib_windows(pid: u32) -> Option<f64> {
     const SCRIPT: &str = r#"
-$ids = @([int]$env:SRV_PID); $all = @()
+$procs = @(Get-CimInstance Win32_Process)
+$byId = @{}; foreach ($p in $procs) { $byId[[int]$p.ProcessId] = $p }
+$seen = @{}; $ids = @([int]$env:SRV_PID)
 while ($ids.Count) {
     $n = $ids[0]; $ids = @($ids | Select-Object -Skip 1)
-    if (Get-Process -Id $n -ErrorAction SilentlyContinue) { $all += $n }
-    $ids += @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$n" |
-              Select-Object -ExpandProperty ProcessId)
+    if ($seen.ContainsKey($n) -or -not $byId.ContainsKey($n)) { continue }
+    $seen[$n] = $true
+    $born = $byId[$n].CreationDate
+    $ids += @($procs | Where-Object { [int]$_.ParentProcessId -eq $n -and $_.CreationDate -ge $born } |
+              ForEach-Object { [int]$_.ProcessId })
 }
-[math]::Round(($all | ForEach-Object { (Get-Process -Id $_).WorkingSet64 } |
+[math]::Round(($seen.Keys | ForEach-Object { [double]$byId[$_].WorkingSetSize } |
                Measure-Object -Sum).Sum / 1GB, 1)
 "#;
     let out = Command::new("powershell.exe")
