@@ -2141,13 +2141,17 @@ impl<'a> Tuner<'a> {
                 p.engine, p.label, p.decode, p.prefill, p.vram_mib
             ));
         }
-        let verdict_path = self.out_dir.join("winner.txt");
+        // `winner.txt` is the gated verdict, the one a tune can adopt; a run
+        // that did not gate (`--frontier`, `--no-gate`) leaves it to the last
+        // run that did and writes its own candidate beside it.
+        let (file, what) = if self.opts.gate { ("winner.txt", "winner") } else { ("candidate.txt", "candidate (not gated)") };
+        let verdict_path = self.out_dir.join(file);
         std::fs::write(&verdict_path, text)
             .map_err(|e| format!("cannot write {}: {e}", verdict_path.display()))?;
 
         self.emit(format_args!(""));
         self.emit(format_args!(
-            "[ OK ] winner: {} with n-cpu-moe {} - {:.1} t/s decode, {:.0} t/s prefill",
+            "[ OK ] {what}: {} with n-cpu-moe {} - {:.1} t/s decode, {:.0} t/s prefill",
             verdict.engine, verdict.n_cpu_moe, verdict.decode, verdict.prefill
         ));
         self.emit(format_args!("[ OK ] verdict: {}", verdict_path.strip_prefix(self.home).unwrap_or(&verdict_path).display()));

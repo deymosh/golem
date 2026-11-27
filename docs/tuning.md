@@ -179,7 +179,9 @@ effective file, so one tune's answers never become the next one's assumptions.
 `--adopt` then backs up `golem.toml` and sets `ENGINE` and `MODELS_PRESET` to the
 effective preset, and an engine that was up comes back on it. The console's and the
 screen's Tune is `tune <model> --adopt`: it always gates, so a tune started there serves
-its verdict once the gate passes. `data/tuned/<host>/winner.txt` records the verdict and every point, and
+its verdict once the gate passes. `data/tuned/<host>/winner.txt` records the gated verdict
+and every point (a run that does not gate, `--frontier` or `--no-gate`, writes
+`candidate.txt` instead and leaves the last gated verdict alone), and
 every point this run benched is also a row in `results/results.jsonl` - not one stopped
 over the wall, nor one kept from an earlier run.
 
