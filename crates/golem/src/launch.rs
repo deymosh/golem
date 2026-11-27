@@ -519,6 +519,13 @@ fn start(home: &Path, plan: &Startup, endpoint: &engine::Endpoint, out: &mut dyn
     // and its tail would read as this start's failure. Emptied here, the
     // log is this start's whatever happens.
     let _ = std::fs::write(&plan.log, "");
+    if let Some(text) = &plan.served_copy {
+        let path = home.join(paths::SERVED_PRESET);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
     let program = engine_program(plan);
     let image = program.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     let mut command = Command::new(&program);
@@ -850,6 +857,9 @@ pub struct Startup {
     /// must be on disk before the server starts; `served` cannot say it there,
     /// because a router serves all of them.
     pub alias: String,
+    /// The text of `data/tuned/models.served.ini` when the engine reads that
+    /// copy in place of the preset (`adapter::served`); [`start`] writes it.
+    pub served_copy: Option<String>,
 }
 
 impl Startup {
@@ -952,17 +962,9 @@ pub fn plan(home: &Path, overrides: &Overrides) -> Result<Startup, String> {
     // cannot serve replaced as the adapter says (`adapter::served`). Every
     // preset file goes through it, a tune's candidates and its gate too, so
     // what a tune measures is what is served.
-    let preset_path = match served_text(home, &preset_rel, &adapter, &backend) {
-        Some(text) => {
-            let path = home.join(paths::SERVED_PRESET);
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-            path
-        }
-        None => preset_path,
-    };
+    // The copy is written by `start`, not here: a plan writes nothing.
+    let served_copy = served_text(home, &preset_rel, &adapter, &backend);
+    let preset_path = if served_copy.is_some() { home.join(paths::SERVED_PRESET) } else { preset_path };
 
     let mut flags: Vec<(String, String)> = vec![
         ("host".to_string(), "127.0.0.1".to_string()),
@@ -1000,7 +1002,10 @@ pub fn plan(home: &Path, overrides: &Overrides) -> Result<Startup, String> {
         served = format!("router ({preset_rel})");
         workdir = home.join("data/models");
     } else {
-        let text = std::fs::read_to_string(&preset_path).unwrap_or_default();
+        let text = match &served_copy {
+            Some(text) => text.clone(),
+            None => std::fs::read_to_string(&preset_path).unwrap_or_default(),
+        };
         // A server with no model on it is refused here, naming the section
         // it wanted, rather than started and found empty at the first request.
         if ini::parse(&text).get(&alias).is_none() {
@@ -1049,6 +1054,7 @@ pub fn plan(home: &Path, overrides: &Overrides) -> Result<Startup, String> {
         preset: preset_rel.clone(),
         router,
         alias,
+        served_copy,
     })
 }
 
@@ -1323,6 +1329,9 @@ mod tests {
         let preset = plan.args.iter().skip_while(|a| *a != "--models-preset").nth(1).expect("a preset on the line");
         assert!(preset.ends_with("models.served.ini"), "the engine reads the served copy: {preset}");
         assert_eq!(plan.served, "router (config/models.ini)");
+        // The plan carries the copy and writes nothing: `up --dry-run` is a plan.
+        assert!(plan.served_copy.as_deref().is_some_and(|t| t.contains("load-mode = mmap+mlock")), "{:?}", plan.served_copy);
+        assert!(!dir.join(paths::SERVED_PRESET).exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1680,6 +1689,7 @@ mod tests {
             preset: "config/models.ini".to_string(),
             router: false,
             alias: "fake".to_string(),
+            served_copy: None,
         }
     }
 
