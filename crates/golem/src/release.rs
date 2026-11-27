@@ -80,6 +80,9 @@ struct Asset {
     url: String,
     /// `size` in bytes, only for the `[ .. ] name (N MB)` line.
     size: u64,
+    /// The SHA-256 GitHub lists for it (`digest`), which the download must
+    /// match before it is extracted.
+    sha256: Option<String>,
 }
 
 /// Make sure the pinned release is installed under `pinned.root`, downloading
@@ -218,6 +221,18 @@ pub fn ensure(home: &Path, pinned: &Pinned, out: &mut dyn Write) -> Result<Insta
         let _ = writeln!(out, "[ .. ] {} ({mb} MB)", asset.name);
         let zip = tmp.join(&asset.name);
         curl_download(&asset.url, &zip, &format!("install: {}", asset.name), asset.size, out)?;
+        // Nothing is extracted that is not the file the release lists. The
+        // download stays in the temp folder for a look.
+        if let Some(want) = &asset.sha256 {
+            let got = sha256_of(&zip, &asset.name, out)?;
+            if &got != want {
+                return Err(format!(
+                    "{} does not match the sha256 GitHub lists for it ({got} against {want}); kept at {}",
+                    asset.name,
+                    zip.display()
+                ));
+            }
+        }
         let _ = writeln!(out, "[ .. ] extracting {}", asset.name);
         extract(&tar, &zip, &dir)?;
     }
@@ -306,8 +321,13 @@ pub fn fetch_libraries(home: &Path, libs: &adapter::Libraries, dir: &Path, out: 
 /// Whether `file` hashes to the SHA-256 `libs` pins. Half a gigabyte takes a
 /// few seconds, so the work shows as a bar.
 fn matches_pin(file: &Path, libs: &adapter::Libraries, out: &mut dyn Write) -> Result<bool, String> {
+    Ok(sha256_of(file, &libs.archive(), out)? == libs.sha256)
+}
+
+/// `file`'s SHA-256 in hex, with a bar labelled for `name` while it runs.
+fn sha256_of(file: &Path, name: &str, out: &mut dyn Write) -> Result<String, String> {
     let total = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
-    let label = format!("sha256: {}", libs.archive());
+    let label = format!("sha256: {name}");
     let mut said = std::time::Instant::now();
     let hash = golem_core::sha256::file(file, &mut |done| {
         if said.elapsed() >= crate::proc::PROGRESS_EVERY {
@@ -317,7 +337,14 @@ fn matches_pin(file: &Path, libs: &adapter::Libraries, out: &mut dyn Write) -> R
     })
     .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
     let _ = writeln!(out, "{}", progress::CLEAR);
-    Ok(golem_core::sha256::hex(&hash) == libs.sha256)
+    Ok(golem_core::sha256::hex(&hash))
+}
+
+/// The SHA-256 in an asset's `digest` (`sha256:<64 hex>`), lowercased; `None`
+/// for a release published before GitHub listed digests, or another hash.
+fn digest_sha256(digest: &str) -> Option<String> {
+    let hex = digest.strip_prefix("sha256:")?;
+    (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then(|| hex.to_ascii_lowercase())
 }
 
 /// The size a HEAD request reports for `url` after its redirects, or `None`
@@ -380,6 +407,7 @@ fn assets_of(release: &Value) -> Vec<Asset> {
                 name: asset.get("name")?.as_str().filter(|name| golem_core::hub::safe_name(name))?.to_string(),
                 url: asset.get("browser_download_url")?.as_str()?.to_string(),
                 size: asset.get("size").and_then(Value::as_f64).unwrap_or(0.0) as u64,
+                sha256: asset.get("digest").and_then(Value::as_str).and_then(digest_sha256),
             })
         })
         .collect()
@@ -733,6 +761,26 @@ mod tests {
     ]"#;
 
     const CUDA_ASSET: &str = r"^llama-.*bin-win-cuda-13\.\d+-x64\.zip$";
+
+    #[test]
+    fn an_asset_carries_the_sha256_github_lists() {
+        let release = json::parse(
+            r#"{"assets": [
+              {"name": "a.zip", "browser_download_url": "https://example.invalid/a.zip", "size": 1,
+               "digest": "sha256:1F438D5F2551F9A7A0B52EC42BE5534C7E1463B9DE43221B58DE52FE014A4DE3"},
+              {"name": "b.zip", "browser_download_url": "https://example.invalid/b.zip", "size": 1},
+              {"name": "c.zip", "browser_download_url": "https://example.invalid/c.zip", "size": 1,
+               "digest": "sha512:abc"}
+            ]}"#,
+        )
+        .expect("fixture");
+        let sums: Vec<Option<String>> = assets_of(&release).into_iter().map(|a| a.sha256).collect();
+        assert_eq!(
+            sums,
+            vec![Some("1f438d5f2551f9a7a0b52ec42be5534c7e1463b9de43221b58de52fe014a4de3".to_string()), None, None]
+        );
+        assert_eq!(digest_sha256("sha256:short"), None);
+    }
 
     #[test]
     fn the_newest_release_with_a_matching_asset_wins_and_a_stub_is_skipped() {
