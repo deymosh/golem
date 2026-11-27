@@ -1013,16 +1013,13 @@ fn downloading(home: &Path, model: &str) -> Option<String> {
     if let Some((_, message)) = DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(m, _)| m == model) {
         return Some(message.clone());
     }
-    // A local check first: this runs on every chat request.
-    if crate::pull::preset_jobs(home, model).map_or(true, |jobs| jobs.is_empty()) {
-        return None;
-    }
-    let (jobs, bytes) = crate::pull::missing(home, model)?;
+    // From the disk alone: this runs on every chat request, and a client
+    // waits for the 503. The sizes are the pull's to find out and log.
+    let jobs = crate::pull::preset_jobs(home, model).ok().filter(|jobs| !jobs.is_empty())?;
     let files: Vec<&str> = jobs.iter().map(|(_, file)| golem_core::hub::stored_name(file)).collect();
-    let size = bytes.map_or(String::new(), |b| format!(", {:.1} GB", b as f64 / 1e9));
     let log = format!("logs/pull-{}.log", model.replace(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != '-', "_"));
     let message = format!(
-        "golem is downloading {model} ({}{size}) - retry when it finishes; progress in {log}",
+        "golem is downloading {model} ({}) - retry when it finishes; progress in {log}",
         files.join(", ")
     );
     let mut downloads = DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner());
