@@ -698,6 +698,7 @@ impl<'a> Log<'a> {
     fn open(home: &Path, out: &'a mut dyn Write) -> Log<'a> {
         let dir = home.join("logs");
         let _ = std::fs::create_dir_all(&dir);
+        crate::logs::prune(&dir, "download-model-", crate::logs::DOWNLOAD_LOGS_KEPT);
         let path = dir.join(format!("download-model-{}.log", timestamp()));
         let file = File::create(&path).ok();
         Log { path, file, out }

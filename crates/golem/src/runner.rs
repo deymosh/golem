@@ -116,6 +116,8 @@ pub fn plan(action: &str, arg: &str) -> Option<Plan> {
 /// job also starts and ends with the progress clear, so the bar the page and
 /// the screen draw is always this job's, and goes when it is done.
 pub fn run(home: &Path, action: &str, arg: &str, log: &Path) -> i32 {
+    // Set aside before the job's first line, so no job spans two files.
+    crate::logs::rotate(log);
     let _ = line(log, progress::CLEAR);
     let started = Instant::now();
     let _ = line(log, &joblog::header(action, arg, &today()));

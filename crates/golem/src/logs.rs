@@ -185,9 +185,83 @@ fn read_from(path: &Path, pos: u64) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// The size past which an appended log is set aside ([`rotate`]).
+pub const ROTATE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Set an appended log aside when it has grown past [`ROTATE_BYTES`]: it
+/// becomes `<name>.1`, replacing the one before, and the next write starts a
+/// new file. Called where a log begins a unit - a job, a request's line, a
+/// restart - so one unit is never split across the two files. A rename that
+/// fails (a reader holding the file without sharing delete) leaves the log
+/// growing until the next try.
+pub fn rotate(path: &Path) {
+    let Ok(meta) = std::fs::metadata(path) else { return };
+    if meta.len() <= ROTATE_BYTES {
+        return;
+    }
+    let mut aside = path.as_os_str().to_owned();
+    aside.push(".1");
+    let _ = std::fs::remove_file(&aside);
+    let _ = std::fs::rename(path, &aside);
+}
+
+/// How many `download-model-*.log` files a pull leaves behind, its own
+/// included.
+pub const DOWNLOAD_LOGS_KEPT: usize = 10;
+
+/// Delete all but the newest `keep - 1` files in `dir` whose names start
+/// with `prefix`, making room for one more. The names carry a sortable
+/// stamp, so name order is age order.
+pub fn prune(dir: &Path, prefix: &str, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(prefix))
+        .collect();
+    for name in surplus(&mut names, keep.saturating_sub(1)) {
+        let _ = std::fs::remove_file(dir.join(name));
+    }
+}
+
+/// The oldest of `names` beyond the newest `keep`, by name.
+fn surplus(names: &mut [String], keep: usize) -> &[String] {
+    names.sort();
+    let cut = names.len().saturating_sub(keep);
+    &names[..cut]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_log_over_the_cap_is_set_aside_and_one_under_it_is_not() {
+        let dir = std::env::temp_dir().join(format!("golem-rotate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let log = dir.join("api.log");
+        std::fs::write(&log, "small\n").expect("log");
+        rotate(&log);
+        assert!(log.exists() && !dir.join("api.log.1").exists());
+        std::fs::write(dir.join("api.log.1"), "older\n").expect("aside");
+        std::fs::write(&log, vec![b'x'; ROTATE_BYTES as usize + 1]).expect("big");
+        rotate(&log);
+        assert!(!log.exists());
+        assert_eq!(std::fs::metadata(dir.join("api.log.1")).expect("aside").len(), ROTATE_BYTES + 1);
+        // A missing log is nothing to do.
+        rotate(&dir.join("nope.log"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pruning_keeps_the_newest_by_name() {
+        let mut names: Vec<String> =
+            ["download-model-20261029-221050.log", "download-model-20261029-211044.log", "download-model-20261029-211130.log"]
+                .map(String::from)
+                .to_vec();
+        assert_eq!(surplus(&mut names, 2), ["download-model-20261029-211044.log".to_string()]);
+        assert!(surplus(&mut names, 5).is_empty());
+    }
 
     #[test]
     fn the_defaults_are_forty_lines_and_follow() {

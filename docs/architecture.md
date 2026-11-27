@@ -383,7 +383,8 @@ repository root uses the checkout's own files.
 | `results/results.jsonl` | every measurement, append-only ([results/README.md](../results/README.md)) |
 | `logs/llama-server.log`, `logs/web-job.log` | the engine's log; the console's job log |
 | `logs/api.log`, `logs/web.log` | the chat requests the API front refused or saw broken off; golem's own web searches and fetches |
-| `logs/download-model-*.log`, `logs/agent/` | one log per `pull`; the agent suite's transcripts, one per model, API and task |
+| `logs/download-model-*.log`, `logs/agent/` | one log per `pull`, the newest ten kept; the agent suite's transcripts, one per model, API and task |
+| `logs/*.log.1` | a log golem appends to, set aside past 8 MiB (the engine truncates its own at each start) |
 | `.local/` | installed engine builds, the pid file, the service endpoint, the dev toolchain |
 
 ## The container

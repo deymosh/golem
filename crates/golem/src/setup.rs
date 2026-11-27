@@ -536,6 +536,7 @@ impl Report {
     /// A reporter whose log is `log`. A log that cannot be opened - a
     /// read-only home - is not fatal: the report still prints.
     fn new(log: &Path) -> Report {
+        crate::logs::rotate(log);
         let log = std::fs::OpenOptions::new().create(true).append(true).open(log).ok();
         Report { log, color: std::io::stdout().is_terminal() }
     }

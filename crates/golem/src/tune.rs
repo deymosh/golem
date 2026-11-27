@@ -601,6 +601,7 @@ fn sweep_with(home: &Path, opts: Options, mut out: Box<dyn Write>) -> Result<Ver
     // start (a missing model, an unreadable preset) included.
     let verdict = Tuner::new(home, opts, out).and_then(|mut tuner| tuner.sweep());
     let verb = if was_up { "restart" } else { "down" };
+    crate::logs::rotate(&home.join(RESTART_LOG));
     let put_back = std::fs::File::options()
         .create(true)
         .append(true)
@@ -1488,6 +1489,7 @@ impl<'a> Tuner<'a> {
         if let Some(dir) = log_path.parent() {
             std::fs::create_dir_all(dir)?;
         }
+        crate::logs::rotate(&log_path);
         let mut out = std::fs::File::options().create(true).append(true).open(&log_path)?;
         Ok(service::request(self.home, "restart", &overrides, &mut out).unwrap_or(1))
     }

@@ -1,7 +1,7 @@
 //! The job log's grammar: what marks one job, and what stamps a line.
 //!
-//! `logs/web-job.log` keeps every job there has been, appended one after
-//! another. A job opens with a `===` header and closes with a `===` footer,
+//! `logs/web-job.log` keeps the jobs appended one after another (past 8 MiB
+//! the file is set aside as `web-job.log.1` before the next job). A job opens with a `===` header and closes with a `===` footer,
 //! so a reader can show just the newest one, and every ordinary line carries
 //! the local clock in front so the pane reads as a record. A `PROGRESS` line
 //! is never stamped: the bar readers parse those lines exactly.

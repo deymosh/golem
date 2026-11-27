@@ -1049,6 +1049,7 @@ fn log_api(home: &Path, line: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    crate::logs::rotate(&path);
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         // One write per line: connections log from their own threads, and
         // `writeln!` on a file writes each piece apart.
@@ -1073,6 +1074,7 @@ fn log_call(home: &Path, label: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    crate::logs::rotate(&path);
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = file.write_all(format!("{} {label}\n", golem_core::time::now_iso()).as_bytes());
     }
