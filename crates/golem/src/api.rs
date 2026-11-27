@@ -50,6 +50,14 @@ const BODY_MAX: usize = 64 * 1024 * 1024;
 /// How long the engine may take to accept a connection on the loopback.
 const ENGINE_CONNECT: Duration = Duration::from_millis(500);
 
+/// How long the engine may stay silent - no byte of its answer - before the
+/// front gives the request up. Silence is normal and long: a router loading
+/// a 20 GB model, a 200K-token prefill at ~220 t/s (fifteen minutes before
+/// the first token streams), a request queued behind another at
+/// `--parallel 1`. This is the backstop for an engine that hung, so that it
+/// does not hold a front thread and its client forever.
+const ENGINE_SILENCE: Duration = Duration::from_secs(30 * 60);
+
 /// Whether an Anthropic client sees golem's searches and page reads as
 /// Anthropic's own server tools (`server_tool_use` with
 /// `web_search_tool_result` or `web_fetch_tool_result`) when it did not ask
@@ -375,6 +383,8 @@ fn to_engine(home: &Path, request: &Request, body: &[u8]) -> std::io::Result<Ans
         .parse()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{e}")))?;
     let mut upstream = TcpStream::connect_timeout(&addr, ENGINE_CONNECT)?;
+    upstream.set_read_timeout(Some(ENGINE_SILENCE))?;
+    upstream.set_write_timeout(Some(ENGINE_SILENCE))?;
     let mut head = format!("{} {} HTTP/1.1\r\n", request.method, request.target);
     for (name, value) in &request.headers {
         if is_framing(name) || name.eq_ignore_ascii_case("expect") || name.eq_ignore_ascii_case(tools::MEASURE_HEADER) {
