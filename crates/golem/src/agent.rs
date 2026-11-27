@@ -72,9 +72,13 @@ pub fn reports_dir(home: &Path) -> PathBuf {
 /// per task and a `RESULT` line per API, to `out`, and for each task it
 /// missed a report under `reports` ([`agent::failure_report`]). A task whose
 /// request is over the setup's context is missed, not an error
-/// ([`agent::over_context`]). `Err` when a request got no answer at all,
-/// which is the engine, not the model, and leaves nothing to grade; the
-/// reason is in `out`.
+/// ([`agent::over_context`]).
+///
+/// A request the engine did not answer is tried once more
+/// ([`post_turn`]); a task whose request still fails is missed, with the
+/// engine's error as its reason, and the suite goes on - one dropped
+/// connection does not cost the whole run. [`ENGINE_ERRORS_IN_A_ROW`] such
+/// tasks in a row is an engine that is gone: `Err`, the reason in `out`.
 pub fn suite(
     base: &Base,
     model: &str,
@@ -89,9 +93,11 @@ pub fn suite(
         let _ = writeln!(out);
         let _ = writeln!(out, "{} ({})", api.name(), api.path());
         let mut verdicts = Vec::new();
+        let mut errors_in_a_row = 0;
         for task in tasks.iter().copied() {
             match run_task(base, api, model, task) {
                 Ok((verdict, report)) => {
+                    errors_in_a_row = 0;
                     let _ = writeln!(
                         out,
                         "  {} {:<26} {:>2} turns {:>2} calls{} {:>5.0}s{}",
@@ -112,14 +118,55 @@ pub fn suite(
                     verdicts.push(verdict);
                 }
                 Err(e) => {
-                    let _ = writeln!(out, "[FAIL] {}: {e}", task.name);
-                    return Err(());
+                    let _ = writeln!(out, "  [FAIL] {:<26} engine error: {e}", task.name);
+                    errors_in_a_row += 1;
+                    if errors_in_a_row >= ENGINE_ERRORS_IN_A_ROW {
+                        let _ = writeln!(
+                            out,
+                            "[FAIL] {errors_in_a_row} tasks in a row got no answer from the engine - the suite stops here"
+                        );
+                        return Err(());
+                    }
+                    verdicts.push(Verdict { task: task.name, reason: format!("engine error: {e}"), ..Verdict::default() });
                 }
             }
         }
         let _ = writeln!(out, "{}", agent::result_line(api, &verdicts));
     }
     Ok(())
+}
+
+/// How many tasks in a row may fail on the engine before the suite stops.
+const ENGINE_ERRORS_IN_A_ROW: usize = 2;
+
+/// A request that failed fast - no connection, a reset, an engine error
+/// (5xx) - is worth one more try after a pause; one that ran out the turn's
+/// whole timeout is not, since a second would only double the wait.
+const RETRY_WITHIN: Duration = Duration::from_secs(60);
+const RETRY_PAUSE: Duration = Duration::from_secs(3);
+
+/// One turn's request, tried a second time when the first failed fast.
+/// An answer over the setup's context is the model's to miss, not an error,
+/// and is never retried.
+fn post_turn(base: &Base, api: Api, body: &str) -> Result<engine::Reply, String> {
+    let mut last = String::new();
+    for attempt in 0..2 {
+        let started = Instant::now();
+        let failure = match engine::post_json(base, api.path(), body, TURN_TIMEOUT) {
+            Some(reply) if reply.status < 500 || agent::over_context(reply.status, &reply.error_message()) => {
+                return Ok(reply)
+            }
+            Some(reply) => format!("HTTP {}: {}", reply.status, reply.error_message()),
+            None => format!("no answer on {}", api.path()),
+        };
+        last = failure;
+        if attempt == 0 && started.elapsed() < RETRY_WITHIN {
+            std::thread::sleep(RETRY_PAUSE);
+            continue;
+        }
+        break;
+    }
+    Err(last)
 }
 
 /// One task, to its end: an answer with no calls, or the turn limit. With
@@ -137,8 +184,7 @@ fn run_task(base: &Base, api: Api, model: &str, task: &Task) -> Result<(Verdict,
     let mut last_text = String::new();
     let mut over: Option<String> = None;
     while verdict.turns < agent::MAX_TURNS {
-        let reply = engine::post_json(base, api.path(), &body.to_json(), TURN_TIMEOUT)
-            .ok_or_else(|| format!("no answer on {}", api.path()))?;
+        let reply = post_turn(base, api, &body.to_json())?;
         if !reply.ok() {
             if agent::over_context(reply.status, &reply.error_message()) {
                 over = Some(reply.error_message());
