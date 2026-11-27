@@ -5,8 +5,11 @@
 //! - `[section]` names are matched literally, and a header only counts at
 //!   column 0;
 //! - keys and values are trimmed; later duplicate keys win;
-//! - `;` and `#` start comments; the `; Download:` lines are read by
-//!   `up`, `pull` and the console, and must round-trip untouched;
+//! - `;` and `#` start a comment only at the start of a line (after any
+//!   indent); the `; Download:` lines are read by `up`, `pull` and the
+//!   console, and must round-trip untouched. There are no inline comments:
+//!   in `ctx-size = 4096 ; note` the value is `4096 ; note`, so a note goes
+//!   on its own line - the engine reads the same file;
 //! - an override replaces the original line in place, or prints right
 //!   after the section header when the key was absent.
 //!
@@ -539,6 +542,13 @@ n-cpu-moe = 0
         assert_eq!(doc.value("a", "key"), Some("x"));
         assert_eq!(doc.value("a", "nope"), None);
         assert_eq!(doc.value("b", "key"), None);
+    }
+
+    #[test]
+    fn a_comment_starts_a_line_and_nothing_is_stripped_inline() {
+        let doc = parse("[a]\n  ; ctx-size = 1\nctx-size = 4096 ; note\nmodel = a#1.gguf\n");
+        assert_eq!(doc.value("a", "ctx-size"), Some("4096 ; note"));
+        assert_eq!(doc.value("a", "model"), Some("a#1.gguf"));
     }
 
     #[test]
