@@ -63,6 +63,63 @@ pub fn between(fits: u32, spills: u32) -> Option<u32> {
     Some(fits - (fits - spills) / 2)
 }
 
+/// The bisection's next split down from `fits`, the lowest split known to
+/// fit: halfway to `spills`, the highest known to spill, or - when nothing
+/// spilled on the way up and the lower end is still open - halfway to zero.
+/// `None` when nothing is left to learn.
+pub fn next_split(fits: u32, spills: Option<u32>) -> Option<u32> {
+    match spills {
+        Some(spills) => between(fits, spills),
+        None if fits > 1 => Some(fits / 2),
+        None => None,
+    }
+}
+
+/// Whether a measured split counts as fitting for the frontier search: its
+/// whole-card reading is under the wall, and its prefill clears the floor -
+/// the project's "usable at all", and the tell of a spill the reading alone
+/// can miss. A milder spill, prefill collapsed but over the floor, is
+/// [`exclusion`]'s business in the ranking, not the search's.
+pub fn split_fits(prefill: f64, vram_mib: f64, floor: &Floor, wall_mib: u64) -> bool {
+    prefill >= floor.prefill && vram_mib <= wall_mib as f64
+}
+
+/// The needle the gate runs for a candidate holding `ctx` tokens: 90% of it,
+/// leaving room for the question and the answer, and never more than the
+/// gate's own size.
+pub fn gate_tokens(ctx: u64, max: u64) -> u64 {
+    (ctx * 9 / 10).min(max)
+}
+
+/// What a gate's eval says about its candidate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GateJudgement {
+    /// Needle held, decode at depth over the floor, agent suite over its
+    /// floor: the candidate is adopted.
+    Pass,
+    /// The needle held but decode at depth is under the floor: a context
+    /// that cannot be used at depth is a fake win.
+    ShallowDepth(f64),
+    /// The needle held but the agent suite is under its floor.
+    AgentShort,
+    /// The needle failed (or gave no verdict).
+    Failed,
+}
+
+/// Judge a gate: `needle_passed` is the needle's verdict, `depth` the decode
+/// it measured at depth (unmeasured is not a violation), `agent_passed`
+/// whether the suite cleared [`Floor::agent`] on every API.
+pub fn judge_gate(needle_passed: bool, depth: Option<f64>, agent_passed: bool, floor: &Floor) -> GateJudgement {
+    if !needle_passed {
+        return GateJudgement::Failed;
+    }
+    match depth {
+        Some(d) if d > 0.0 && d < floor.depth_decode => GateJudgement::ShallowDepth(d),
+        _ if !agent_passed => GateJudgement::AgentShort,
+        _ => GateJudgement::Pass,
+    }
+}
+
 /// A tune's stages, in the order it spends model loads on them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -1071,6 +1128,40 @@ mod tests {
             passed_gate: None,
             depth_decode: None,
         }
+    }
+
+    #[test]
+    fn the_bisection_halves_toward_what_spilled_or_toward_zero() {
+        assert_eq!(next_split(35, Some(31)), Some(33));
+        assert_eq!(next_split(35, Some(34)), None, "adjacent bounds: nothing left");
+        assert_eq!(next_split(36, None), Some(18), "nothing spilled: the low end is open");
+        assert_eq!(next_split(1, None), None);
+    }
+
+    #[test]
+    fn a_split_fits_under_the_wall_and_over_the_prefill_floor() {
+        let floor = Floor::default();
+        assert!(split_fits(393.0, 11691.0, &floor, 15344));
+        assert!(split_fits(350.0, 11264.0, &floor, 11264), "both bounds are inclusive");
+        assert!(!split_fits(349.0, 10000.0, &floor, 11264));
+        assert!(!split_fits(900.0, 11265.0, &floor, 11264));
+    }
+
+    #[test]
+    fn the_gate_runs_ninety_percent_of_the_context_up_to_its_size() {
+        assert_eq!(gate_tokens(248_832, 200_000), 200_000);
+        assert_eq!(gate_tokens(100_000, 200_000), 90_000);
+    }
+
+    #[test]
+    fn a_gate_passes_only_on_the_needle_the_depth_and_the_agent() {
+        let floor = Floor::default();
+        assert_eq!(judge_gate(true, Some(20.0), true, &floor), GateJudgement::Pass);
+        assert_eq!(judge_gate(true, None, true, &floor), GateJudgement::Pass, "an unmeasured depth is no violation");
+        assert_eq!(judge_gate(true, Some(0.0), true, &floor), GateJudgement::Pass);
+        assert_eq!(judge_gate(true, Some(12.0), true, &floor), GateJudgement::ShallowDepth(12.0));
+        assert_eq!(judge_gate(true, Some(20.0), false, &floor), GateJudgement::AgentShort);
+        assert_eq!(judge_gate(false, Some(20.0), true, &floor), GateJudgement::Failed);
     }
 
     #[test]

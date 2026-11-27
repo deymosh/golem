@@ -41,7 +41,7 @@ use golem_core::ini::{self, Entry};
 use golem_core::progress::Progress;
 use golem_core::results;
 use golem_core::time;
-use golem_core::tune::{self, ContextSearch, Exclusion, Floor, Phase, Point, Probe, Rung, RungOutcome};
+use golem_core::tune::{self, ContextSearch, Exclusion, Floor, GateJudgement, Phase, Point, Probe, Rung, RungOutcome};
 
 use crate::config::{self, Overrides};
 use crate::engine;
@@ -998,14 +998,7 @@ impl<'a> Tuner<'a> {
 
         // Then down, by halving the gap between what fits and what spilled.
         for _ in 0..MAX_BISECT {
-            let next = match spills {
-                Some(spills) => tune::between(best, spills),
-                // Nothing spilled on the way up (the seed fit first try): the
-                // lower end of the range is still open, so halve to it.
-                None if best > 1 => Some(best / 2),
-                None => None,
-            };
-            let Some(next) = next else { break };
+            let Some(next) = tune::next_split(best, spills) else { break };
             // A split that will not load is a split that does not fit: it is
             // the search's upper bound, not a lost point.
             match self.measure_split(engine, next) {
@@ -1020,16 +1013,9 @@ impl<'a> Tuner<'a> {
         }
     }
 
-    /// Measure one split, and say whether it fit.
-    ///
-    /// "Fit" is two things. The whole-card reading stays under the wall - the
-    /// same wall the context search grows against, so a split chosen here is
-    /// one the context can still be judged from. And prefill clears the
-    /// floor, which is the project's rule for "usable at all" and the tell of
-    /// a spill the reading alone can miss. A milder spill - prefill collapsed
-    /// but still over the floor - is the ranking's business
-    /// (`tune::exclusion` compares against the engine's best), not the
-    /// search's.
+    /// Measure one split, and say whether it fit (`tune::split_fits`), against
+    /// the same wall the context search grows against, so a split chosen here
+    /// is one the context can still be judged from.
     ///
     /// `None` is "no measurement at all" - the candidate would not start or
     /// the bench returned nothing - which for the search is the same answer as
@@ -1038,8 +1024,8 @@ impl<'a> Tuner<'a> {
         let overrides = vec![Entry::new("n-cpu-moe", n.to_string()), Entry::new("fit", "off")];
         self.measure(engine, &format!("{engine}-n{n}"), &overrides)?;
         let point = self.points.last()?;
-        let wall = self.machine.wall_mib(self.opts.headroom_mib) as f64;
-        Some(point.prefill >= self.opts.floor.prefill && point.vram_mib <= wall)
+        let wall = self.machine.wall_mib(self.opts.headroom_mib);
+        Some(tune::split_fits(point.prefill, point.vram_mib, &self.opts.floor, wall))
     }
 
     /// The measured split under the wall with the best decode on `engine`,
@@ -1691,7 +1677,7 @@ impl<'a> Tuner<'a> {
                     continue;
                 }
 
-                let gate_tokens = (ctx * 9 / 10).min(self.opts.gate_tokens_max);
+                let gate_tokens = tune::gate_tokens(ctx, self.opts.gate_tokens_max);
                 let overlay = self.overlay_text(&engine, key);
                 // Ungated is measured, not adopted: the setup is staged where the
                 // gate would have served it from, and nothing that serves changes.
@@ -1738,35 +1724,29 @@ impl<'a> Tuner<'a> {
                     continue;
                 };
                 let depth = eval.needle.as_ref().and_then(|n| n.gen_tok_s_at_depth);
-                match eval.needle.as_ref().map(|n| n.verdict) {
-                    Some(Gate::Pass) => {
-                        // A context you cannot use at depth is a fake win.
-                        if let Some(depth) = depth {
-                            if depth > 0.0 && depth < floor.depth_decode {
-                                self.emit(format_args!("  [WARN] decode at depth {depth} t/s is under the {} t/s floor - trying the next candidate", floor.depth_decode));
-                                continue;
-                            }
-                        }
-                        // A setup the agent cannot work on is not one to
-                        // serve, however well it holds the needle.
-                        if !agent::passes(&eval.agent, floor.agent) {
-                            let solved: Vec<String> =
-                                eval.agent.iter().map(|s| format!("{} {}/{}", s.api, s.solved, s.total)).collect();
-                            self.emit(format_args!(
-                                "  [WARN] the agent suite is under the {:.0}% floor ({}) - trying the next candidate",
-                                floor.agent * 100.0,
-                                if solved.is_empty() { "it did not run".to_string() } else { solved.join(", ") }
-                            ));
-                            self.points[key].passed_gate = Some(false);
-                            continue;
-                        }
+                let needle_passed = matches!(eval.needle.as_ref().map(|n| n.verdict), Some(Gate::Pass));
+                match tune::judge_gate(needle_passed, depth, agent::passes(&eval.agent, floor.agent), &floor) {
+                    GateJudgement::ShallowDepth(depth) => {
+                        self.emit(format_args!("  [WARN] decode at depth {depth} t/s is under the {} t/s floor - trying the next candidate", floor.depth_decode));
+                    }
+                    GateJudgement::AgentShort => {
+                        let solved: Vec<String> =
+                            eval.agent.iter().map(|s| format!("{} {}/{}", s.api, s.solved, s.total)).collect();
+                        self.emit(format_args!(
+                            "  [WARN] the agent suite is under the {:.0}% floor ({}) - trying the next candidate",
+                            floor.agent * 100.0,
+                            if solved.is_empty() { "it did not run".to_string() } else { solved.join(", ") }
+                        ));
+                        self.points[key].passed_gate = Some(false);
+                    }
+                    GateJudgement::Pass => {
                         self.emit(format_args!("[ OK ] eval gate PASSED"));
                         self.promote(&engine, &overlay)?;
                         self.points[key].passed_gate = Some(true);
                         self.points[key].depth_decode = depth;
                         return Ok(self.verdict(key, &engine, n_cpu_moe, Some(gate_tokens)));
                     }
-                    _ => {
+                    GateJudgement::Failed => {
                         self.emit(format_args!("  [WARN] eval gate FAILED for {engine} + n-cpu-moe {n_cpu_moe} - trying the next candidate"));
                         self.points[key].passed_gate = Some(false);
                     }
