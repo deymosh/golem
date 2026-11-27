@@ -425,7 +425,8 @@ fn local_name(path: &str) -> &str {
 /// `path` is the file's path in the repository; it is stored under its last
 /// part. Completeness is judged against the size Hugging Face reports
 /// (`x-linked-size`), to the byte; when the server does not say, a file curl
-/// finished is taken as it is.
+/// finished is taken as it is. The finished file is hashed, and an LFS file's
+/// hash must be the one the Hub reports (`x-linked-etag`).
 fn hf_get(
     log: &mut Log,
     models_dir: &Path,
@@ -439,7 +440,8 @@ fn hf_get(
     }
     let path = models_dir.join(file);
     let url = format!("https://huggingface.co/{repo}/resolve/main/{path_in_repo}");
-    let expected = linked_size(&url, token);
+    let linked = linked(&url, token);
+    let expected = linked.size;
     let floor = floor_of(expected);
     let expected_mb = expected.unwrap_or(0) / 1_048_576;
 
@@ -481,8 +483,20 @@ fn hf_get(
 
     match hash_file(log, &path, file, size) {
         Ok(line) => {
+            // The Hub's own hash of an LFS file: a download that differs is
+            // not the file the preset names, whatever its size says.
+            let got = line.split_whitespace().next().unwrap_or("");
+            if let Some(want) = linked.sha256.as_deref().filter(|want| *want != got) {
+                let _ = std::fs::remove_file(&path);
+                return Err(format!(
+                    "{file} does not match the Hub's sha256 ({got} against {want}) - deleted; run the pull again"
+                ));
+            }
             let _ = std::fs::write(with_suffix(&path, ".sha256"), &line);
             log.line(line.trim_end());
+            if linked.sha256.is_some() {
+                log.ok(&format!("{file} matches the Hub's sha256."));
+            }
         }
         Err(e) => log.warn(&format!("cannot hash {file}: {e}")),
     }
@@ -518,38 +532,24 @@ fn floor_of(expected: Option<u64>) -> u64 {
     }
 }
 
-/// The `x-linked-size` of `url`, from `curl -sIL`; when more than one hop of
-/// the redirects reports one, the last wins.
+/// The `x-linked-size` of `url` ([`linked`]).
 pub(crate) fn linked_size(url: &str, token: Option<&str>) -> Option<u64> {
+    linked(url, token).size
+}
+
+/// What the Hub's `HEAD` on `url` says of the file (`hub::linked`): its size
+/// and, for a file in LFS, its SHA-256. Nothing when the Hub does not answer.
+fn linked(url: &str, token: Option<&str>) -> hub::Linked {
     let mut command = Command::new("curl");
-    // A deadline: the API front asks this while a client waits for its 503.
+    // A deadline: a Hub that does not answer only costs the checks.
     command.args(["-sIL", "--max-time", "10"]);
     if let Some(token) = token {
         command.arg("-H").arg(format!("Authorization: Bearer {token}"));
     }
-    let out = command
-        .arg(url)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    parse_linked_size(&String::from_utf8_lossy(&out.stdout))
-}
-
-/// The value of the last `x-linked-size` header line, case-insensitively.
-fn parse_linked_size(headers: &str) -> Option<u64> {
-    let mut last = None;
-    for line in headers.lines() {
-        let line = line.trim_end_matches('\r');
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("x-linked-size") {
-                if let Ok(size) = value.trim().parse::<u64>() {
-                    last = Some(size);
-                }
-            }
-        }
+    match command.arg(url).stdin(Stdio::null()).stderr(Stdio::null()).output() {
+        Ok(out) => hub::linked(&String::from_utf8_lossy(&out.stdout)),
+        Err(_) => hub::Linked::default(),
     }
-    last
 }
 
 /// `curl -fL -C - --retry 5 --retry-delay 3 <stall limits> -o <part> <url>`.
@@ -777,17 +777,6 @@ mod tests {
         assert_eq!(floor_of(Some(2_000_000_000)), 2_000_000_000);
         assert_eq!(floor_of(None), FLOOR_FALLBACK);
         assert_eq!(floor_of(Some(0)), FLOOR_FALLBACK);
-    }
-
-    #[test]
-    fn the_linked_size_is_the_last_header() {
-        let headers = "HTTP/2 302\r\n\
-                       x-linked-size: 100\r\n\
-                       location: https://cdn\r\n\
-                       HTTP/2 200\r\n\
-                       X-Linked-Size: 200\r\n\r\n";
-        assert_eq!(parse_linked_size(headers), Some(200), "the redirect's is not the one");
-        assert_eq!(parse_linked_size("HTTP/2 200\r\ncontent-length: 5\r\n"), None);
     }
 
     #[test]

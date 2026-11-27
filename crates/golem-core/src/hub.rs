@@ -59,6 +59,40 @@ impl File {
     }
 }
 
+/// What the Hub says about a file in its answer to a `HEAD` on
+/// `resolve/main/<path>`, read from the `x-linked-*` headers of a
+/// redirect chain.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Linked {
+    /// `x-linked-size`, in bytes.
+    pub size: Option<u64>,
+    /// `x-linked-etag` when it is a SHA-256 - 64 hex digits, lowercased - as
+    /// it is for a file stored in LFS, which every GGUF is. A small file kept
+    /// in git has the blob's SHA-1 there, which is not the file's hash.
+    pub sha256: Option<String>,
+}
+
+/// [`Linked`] from the headers of `curl -sIL`; when more than one hop of the
+/// redirects reports a header, the last wins.
+pub fn linked(headers: &str) -> Linked {
+    let mut linked = Linked::default();
+    for line in headers.lines() {
+        let Some((name, value)) = line.trim_end_matches('\r').split_once(':') else { continue };
+        let (name, value) = (name.trim(), value.trim());
+        if name.eq_ignore_ascii_case("x-linked-size") {
+            if let Ok(size) = value.parse::<u64>() {
+                linked.size = Some(size);
+            }
+        } else if name.eq_ignore_ascii_case("x-linked-etag") {
+            let tag = value.trim_start_matches("W/").trim_matches('"');
+            if tag.len() == 64 && tag.bytes().all(|b| b.is_ascii_hexdigit()) {
+                linked.sha256 = Some(tag.to_ascii_lowercase());
+            }
+        }
+    }
+    linked
+}
+
 /// The name a repository path is stored under: its last part, split on
 /// either separator so a `\` in a listing cannot reach outside the models
 /// directory. [`safe_name`] says whether what is left is a plain file name.
@@ -402,6 +436,24 @@ pub fn section(name: &str, repo: &Repo, quant: &Quant, projector: Option<&File>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_linked_headers_are_the_last_hops() {
+        let sha = "42739874CC2CCFDB8523B23FBE52E29B2A7555C8176737CA9CA0B5D59859D41F";
+        let headers = format!(
+            "HTTP/2 302\r\nx-linked-size: 100\r\nx-linked-etag: \"{}\"\r\nlocation: https://cdn\r\n\
+             HTTP/2 200\r\nX-Linked-Size: 200\r\nX-Linked-ETag: \"{sha}\"\r\netag: \"cdn\"\r\n\r\n",
+            "0".repeat(64)
+        );
+        let read = linked(&headers);
+        assert_eq!(read.size, Some(200), "the redirect's is not the one");
+        assert_eq!(read.sha256.as_deref(), Some(sha.to_ascii_lowercase().as_str()));
+        assert_eq!(linked("HTTP/2 200\r\ncontent-length: 5\r\n"), Linked::default());
+        // A git blob's SHA-1 is not the file's hash.
+        let small = linked("HTTP/2 200\r\nx-linked-etag: \"3f786850e387550fdab836ed7e6dc881de23001b\"\r\n");
+        assert_eq!(small.sha256, None);
+        assert_eq!(linked("x-linked-etag: W/\"abc\"\r\n").sha256, None);
+    }
 
     /// The shape of the Hub's answer, trimmed from unsloth/Qwen3.5-9B-GGUF
     /// (2026-10-25) and given the BF16 shards unsloth's 35B repo has.
