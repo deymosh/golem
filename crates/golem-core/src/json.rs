@@ -310,9 +310,18 @@ impl<'a> Parser<'a> {
             self.pos += 1;
             return Ok(Value::Object(members));
         }
+        // A key given twice is refused rather than read one way: the engine
+        // keeps the last and `get` would find the first, so the front would
+        // act on one value while the engine served another. A body that does
+        // not parse passes the front unchanged, and the engine decides.
+        let mut seen = std::collections::HashSet::new();
         loop {
             self.skip_ws();
+            let at = self.pos;
             let key = self.string()?;
+            if !seen.insert(key.clone()) {
+                return Err(ParseError { message: format!("duplicate key \"{key}\""), at });
+            }
             self.skip_ws();
             self.expect(b':', "expected ':' after the key")?;
             self.skip_ws();
@@ -456,12 +465,56 @@ impl<'a> Parser<'a> {
         let text = std::str::from_utf8(&self.bytes[start..self.pos])
             .map_err(|_| ParseError { message: "invalid number".into(), at: start })?
             .to_string();
-        let value: f64 = text.parse().map_err(|_| ParseError {
-            message: format!("not a number: {text}"),
-            at: start,
-        })?;
+        // JSON's own grammar, which Rust's float parser is looser than
+        // (`01`, `1.`, `.5`, `+1`), and a value that fits a double: `1e999`
+        // would read as infinity and print back as something else.
+        let value: f64 = text
+            .parse()
+            .ok()
+            .filter(|v: &f64| v.is_finite() && is_json_number(&text))
+            .ok_or_else(|| ParseError { message: format!("not a number: {text}"), at: start })?;
         Ok(Value::Number { text, value })
     }
+}
+
+/// Whether `text` is a number by JSON's grammar:
+/// `-? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?`.
+fn is_json_number(text: &str) -> bool {
+    let b = text.as_bytes();
+    let mut i = 0;
+    let digits = |i: &mut usize| {
+        let from = *i;
+        while *i < b.len() && b[*i].is_ascii_digit() {
+            *i += 1;
+        }
+        *i - from
+    };
+    if b.get(i) == Some(&b'-') {
+        i += 1;
+    }
+    match b.get(i) {
+        Some(b'0') => i += 1,
+        Some(b'1'..=b'9') => {
+            digits(&mut i);
+        }
+        _ => return false,
+    }
+    if b.get(i) == Some(&b'.') {
+        i += 1;
+        if digits(&mut i) == 0 {
+            return false;
+        }
+    }
+    if matches!(b.get(i), Some(b'e') | Some(b'E')) {
+        i += 1;
+        if matches!(b.get(i), Some(b'+') | Some(b'-')) {
+            i += 1;
+        }
+        if digits(&mut i) == 0 {
+            return false;
+        }
+    }
+    i == b.len()
 }
 
 fn utf8_len(lead: u8) -> Option<usize> {
@@ -587,6 +640,25 @@ mod tests {
         assert!(parse(r#"{"a": 1} {"b": 2}"#).is_err());
         assert!(parse(r#"{"a": 1"#).is_err());
         assert!(parse("").is_err());
+    }
+
+    #[test]
+    fn numbers_follow_the_json_grammar_and_fit_a_double() {
+        for good in ["0", "-0", "7", "-12", "0.5", "1.25e-3", "6E+2", "236544", "1e308"] {
+            assert!(parse(good).is_ok(), "{good}");
+        }
+        for bad in ["01", "-01", "1.", ".5", "+1", "1e", "1e+", "--1", "1-2", "1e999", "-1e999"] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_key_given_twice_is_refused() {
+        // The engine keeps the last of two; reading the first would make the
+        // front act on a value the engine does not serve.
+        let err = parse(r#"{"model": "a", "stream": true, "model": "b"}"#).expect_err("duplicate");
+        assert!(err.to_string().contains("duplicate key \"model\""), "{err}");
+        assert!(parse(r#"{"a": {"k": 1}, "b": {"k": 2}}"#).is_ok(), "the same key in two objects is fine");
     }
 
     #[test]
