@@ -213,9 +213,13 @@ around 26200 for any wry or Tauri host; no WebView2 option changes it
 
 Why a long-lived owner rather than an `up` that spawns and exits:
 
-- **A killed command must not orphan the engine.** The engine is the service's child, so
-  it goes when the service goes; an orphaned engine holds the card's VRAM where `down`
-  cannot see it.
+- **A killed command must not orphan the engine.** The engine is the service's child, and
+  the service stops it on its way out (`golem service stop`, the window's Quit, the
+  shutdown verb). A *killed* service - Task Manager's End task, a crash - takes nothing
+  with it: nothing ties a child's life to its parent's on Windows short of a job object,
+  which `std` cannot set. The engine then runs on, but not unseen: its pid file
+  (`.local/llama-server.pid`, the pid and the image name) is on disk, so `golem down` stops
+  it and the next service's `up` finds it healthy on its port and serves it.
 - **A container needs a PID 1** that owns the engine and stays up. `golem service --up`
   is that process; `up` returns as soon as the engine is healthy and would end the
   container with it.
@@ -378,6 +382,8 @@ repository root uses the checkout's own files.
 | `.local/devices.txt`, `.local/rocm-unavailable.txt` | the engine's `--list-devices` at its last start; why the ROCm runtime could not be fetched |
 | `results/results.jsonl` | every measurement, append-only ([results/README.md](../results/README.md)) |
 | `logs/llama-server.log`, `logs/web-job.log` | the engine's log; the console's job log |
+| `logs/api.log`, `logs/web.log` | the chat requests the API front refused or saw broken off; golem's own web searches and fetches |
+| `logs/download-model-*.log`, `logs/agent/` | one log per `pull`; the agent suite's transcripts, one per model, API and task |
 | `.local/` | installed engine builds, the pid file, the service endpoint, the dev toolchain |
 
 ## The container
