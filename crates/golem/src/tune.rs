@@ -451,6 +451,8 @@ struct Measured {
     ctx: u64,
     /// The `ubatch-size` it ran with, 0 for the engine's default.
     ubatch: u32,
+    /// `tune::probe_of` its overrides.
+    probe: String,
     overrides: Vec<Entry>,
     n_cpu_moe: String,
     passed_gate: Option<bool>,
@@ -475,6 +477,7 @@ impl Measured {
             prefill: self.prefill,
             ctx: self.ctx,
             ubatch: self.ubatch,
+            probe: self.probe.clone(),
             vram_mib: self.vram_mib,
             passed_gate: self.passed_gate,
             depth_decode: self.depth_decode,
@@ -1389,6 +1392,7 @@ impl<'a> Tuner<'a> {
             vram_mib: vram,
             ctx,
             ubatch,
+            probe: tune::probe_of(overrides),
             overrides: overrides.to_vec(),
             n_cpu_moe,
             passed_gate: None,
@@ -1436,6 +1440,7 @@ impl<'a> Tuner<'a> {
             vram_mib: kept.vram_mib,
             ctx: value("ctx-size").and_then(|v| v.parse().ok()).unwrap_or(self.ctx_seed),
             ubatch: value("ubatch-size").unwrap_or_else(|| self.ubatch.clone()).parse().unwrap_or(0),
+            probe: tune::probe_of(overrides),
             overrides: overrides.to_vec(),
             n_cpu_moe: value("n-cpu-moe").unwrap_or_default(),
             passed_gate: None,

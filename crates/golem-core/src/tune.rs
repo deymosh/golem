@@ -8,8 +8,9 @@
 //! * the **wall** is the card's size less the desktop's headroom, and a point
 //!   whose whole-card reading is over it does not fit, however fast it ran;
 //! * the **spill** check is *relative* - a point's prefill against the best
-//!   prefill its own engine reached at the same `ubatch-size` - and catches
-//!   the Windows driver silently spilling VRAM to system memory;
+//!   prefill its own engine reached with the same `ubatch-size`, threads and
+//!   speculation - and catches the Windows driver silently spilling VRAM to
+//!   system memory;
 //! * the **floors** are *absolute* - a fixed tokens/s bar - and catch a setup
 //!   that is merely slow without spilling;
 //! * the **depth floor** is applied only to a point that already passed the
@@ -131,6 +132,10 @@ pub struct Point {
     /// The `ubatch-size` it ran with, 0 for the engine's default. Prefill
     /// moves with it by design, so the spill check compares within it.
     pub ubatch: u32,
+    /// The refine probe's other settings that move prefill by design
+    /// ([`probe_of`]), empty for a split or a context point: the spill check
+    /// compares within them too.
+    pub probe: String,
     /// The bench's whole-card VRAM reading, MiB.
     pub vram_mib: f64,
     /// Result of the eval gate for this point, when it was gated.
@@ -156,11 +161,17 @@ pub enum Exclusion {
 /// Why a point is out of the ranking, or `None` when it is in.
 ///
 /// `engine_best_prefill` is the best prefill the point's *own* engine
-/// reached at the point's own `ubatch-size`, not the best across engines or
-/// batch sizes: both move prefill by design (ik_llama.cpp runs ~480 t/s where
-/// llama.cpp runs ~830 on the reference box; ub1024 prefills ~560 where
-/// ub2048 prefills ~870), so comparing across them would call an honestly
-/// slower setup "spilling". `rank` computes that best and passes it in.
+/// reached with the point's own `ubatch-size` and probe settings, not the
+/// best across engines, batch sizes, thread counts or speculation: each moves
+/// prefill by design (ik_llama.cpp runs ~480 t/s where llama.cpp runs ~830 on
+/// the reference box; ub1024 prefills ~560 where ub2048 prefills ~870; MTP
+/// off prefilled 449 where the drafting splits reached 218-393 on an RX 7800
+/// XT), so comparing across them would call an honestly slower setup
+/// "spilling". `rank` computes that best and passes it in.
+///
+/// A refine probe is alone with its settings, so it is its own best and is
+/// never read as spilling. It needs no reference: it runs at a split that
+/// fit, and none of the probes holds more on the card than that split did.
 ///
 /// `wall_mib` is the whole-card ceiling (`Machine::wall_mib` in the binary).
 /// The split search already refuses a split over it, but the refine probes
@@ -233,28 +244,41 @@ pub fn spread(p: &Point) -> f64 {
     }
 }
 
-/// The best prefill each engine reached at each `ubatch-size`, in the order
-/// they first appear.
-fn best_prefill(points: &[Point]) -> Vec<(&str, u32, f64)> {
-    let mut best: Vec<(&str, u32, f64)> = Vec::new();
+/// The overrides that move prefill by design, other than `ubatch-size`
+/// ([`Point::ubatch`]), as one comparable text: the refine probes' thread
+/// count and speculation. Empty for a split or a context point.
+pub fn probe_of(overrides: &[crate::ini::Entry]) -> String {
+    const KEYS: [&str; 2] = ["threads", "spec-type"];
+    KEYS.iter()
+        .filter_map(|key| overrides.iter().rev().find(|e| e.key == *key).map(|e| format!("{key}={}", e.value)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Whether two points ran with the settings that move prefill by design.
+fn same_regime(a: &Point, b: &Point) -> bool {
+    a.engine == b.engine && a.ubatch == b.ubatch && a.probe == b.probe
+}
+
+/// The best prefill of each regime ([`same_regime`]), one representative
+/// point and its best, in the order the regimes first appear.
+fn best_prefill(points: &[Point]) -> Vec<(&Point, f64)> {
+    let mut best: Vec<(&Point, f64)> = Vec::new();
     for p in points {
-        match best.iter_mut().find(|(e, u, _)| *e == p.engine && *u == p.ubatch) {
-            Some((_, _, b)) => {
+        match best.iter_mut().find(|(q, _)| same_regime(q, p)) {
+            Some((_, b)) => {
                 if p.prefill > *b {
                     *b = p.prefill;
                 }
             }
-            None => best.push((p.engine.as_str(), p.ubatch, p.prefill)),
+            None => best.push((p, p.prefill)),
         }
     }
     best
 }
 
-fn best_of(best: &[(&str, u32, f64)], point: &Point) -> f64 {
-    best.iter()
-        .find(|(e, u, _)| *e == point.engine && *u == point.ubatch)
-        .map(|(_, _, b)| *b)
-        .unwrap_or(0.0)
+fn best_of(best: &[(&Point, f64)], point: &Point) -> f64 {
+    best.iter().find(|(q, _)| same_regime(q, point)).map(|(_, b)| *b).unwrap_or(0.0)
 }
 
 /// Point indices, best first, with excluded points dropped.
@@ -1042,10 +1066,33 @@ mod tests {
             prefill,
             ctx,
             ubatch: 0,
+            probe: String::new(),
             vram_mib: 10000.0,
             passed_gate: None,
             depth_decode: None,
         }
+    }
+
+    #[test]
+    fn a_probe_is_not_the_splits_spill_reference() {
+        // The RX 7800 XT tune of 2026-10-29: MTP off prefilled 449, and the
+        // drafting splits at 218-393 read as spilling against it.
+        let floor = Floor { decode: 20.0, prefill: 200.0, ..Floor::default() };
+        let mut nospec = point("llama.cpp", "nospec", 12.7, 449.0, 236544);
+        nospec.probe = probe_of(&[crate::ini::Entry::new("n-cpu-moe", "22"), crate::ini::Entry::new("spec-type", "none")]);
+        assert_eq!(nospec.probe, "spec-type=none");
+        let points = vec![
+            point("llama.cpp", "n22", 25.5, 393.0, 236544),
+            point("llama.cpp", "n21", 26.7, 218.0, 236544),
+            nospec,
+        ];
+        // n21 still spills against n22's 393 - but not because of the probe.
+        assert_eq!(
+            excluded(&points, 1, &floor, WALL),
+            Some(Exclusion::Spilling { prefill: 218.0, engine_best: 393.0 })
+        );
+        assert_eq!(excluded(&points, 0, &floor, WALL), None);
+        assert_eq!(probe_of(&[crate::ini::Entry::new("n-cpu-moe", "22")]), "");
     }
 
     fn at_ubatch(mut p: Point, ubatch: u32) -> Point {

@@ -63,9 +63,12 @@ fits when that reading is at most **the card's size less `TUNE_VRAM_HEADROOM_MIB
 (1024 by default, `--vram-headroom` per run). The headroom is the desktop's room to grow:
 its own use drifts between half a gigabyte and one and a half over a day, and past the
 card's size the Windows driver spills into system memory silently. A spill also shows as a
-prefill collapse against the best the same engine reached at the same `ubatch-size`, which
-the ranking excludes (`golem_core::tune::exclusion`) - so the reading and the measured speed both have to agree
-that a point fits.
+prefill collapse against the best the same engine reached with the same `ubatch-size`,
+thread count and speculation, which the ranking excludes (`golem_core::tune::exclusion`) -
+so the reading and the measured speed both have to agree that a point fits. Each of those
+settings moves prefill by design (MTP off prefills more than a drafting split), so the
+splits are judged against each other and a refine probe against nothing: it runs at a
+split that fit and holds no more on the card than that split did.
 
 The engine is stopped before the card is probed (a loaded model would read as "desktop"),
 and put back after the run on the configuration as it then stands.
@@ -87,7 +90,7 @@ and put back after the run on the configuration as it then stands.
    loads locate the frontier to one layer where a walk took nine. A split that will not
    load is an upper bound, not a lost point. (`--candidates a,b,c` measures exactly those.)
 3. **Refine - one probe per knob that can still matter.** `ubatch-size 1024` (prefill's
-   lever; the collapse test catches a bad one). A thread count only when decode is within
+   lever; the tie rule weighs what it costs in prefill). A thread count only when decode is within
    25% of the floor - the knob moves decode by a few percent and costs a whole load. When
    the file carries an MTP head, the other side of the preset's `spec-type`: MTP off for a
    preset that drafts, MTP on for one that does not (`golem pull` switches it on for such
