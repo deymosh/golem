@@ -45,6 +45,9 @@ pub mod rank;
 /// The router's `/models` listing: which models failed to load.
 pub mod router;
 
+/// The Windows exit codes an engine stops with, in words.
+pub mod exitcode;
+
 /// A model file's quant, from its name or its GGUF header: part of a
 /// result's identity.
 pub mod quant;

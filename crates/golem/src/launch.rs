@@ -711,7 +711,10 @@ fn tail(path: &Path, lines: usize) -> String {
 /// signal has no code, and `unwrap()` on `code()` would be the bug.
 fn code_text(status: std::process::ExitStatus) -> String {
     match status.code() {
-        Some(code) => format!("exit code {code}"),
+        Some(code) => match golem_core::exitcode::meaning(i64::from(code)) {
+            Some(meaning) => format!("exit code {code}: {meaning}"),
+            None => format!("exit code {code}"),
+        },
         None => "killed by a signal".to_string(),
     }
 }

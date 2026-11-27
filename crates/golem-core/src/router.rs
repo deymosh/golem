@@ -115,7 +115,17 @@ pub fn stop_reason(failed: &[FailedLoad], cause: &Cause) -> String {
             None => f.model.clone(),
         })
         .collect();
-    let why = cause.words();
+    // A cause the log does not name may still be in the first load's exit
+    // code: a DLL the loader refused leaves no line at all.
+    let why = match cause.words() {
+        words if words.is_empty() => failed
+            .first()
+            .and_then(|f| f.exit_code)
+            .and_then(crate::exitcode::meaning)
+            .unwrap_or_default()
+            .to_string(),
+        words => words,
+    };
     let why = if why.is_empty() { String::new() } else { format!(" ({why})") };
     let hint = match cause {
         Cause::Abort(Some(line)) if line.contains("llama-mmap.cpp") => {
@@ -137,12 +147,19 @@ mod tests {
     #[test]
     fn the_stop_reason_names_each_model_and_its_code() {
         let failed = vec![
-            FailedLoad { model: "a".into(), exit_code: Some(-1073740791) },
+            FailedLoad { model: "a".into(), exit_code: Some(1) },
             FailedLoad { model: "b".into(), exit_code: None },
         ];
         let reason = stop_reason(&failed, &Cause::Other);
-        assert!(reason.contains("a (exit code -1073740791), b failed to load,"), "{reason}");
+        assert!(reason.contains("a (exit code 1), b failed to load,"), "{reason}");
         assert!(reason.contains("logs/llama-server.log"));
+    }
+
+    #[test]
+    fn a_cause_the_log_does_not_name_is_read_from_the_exit_code() {
+        let blocked = [FailedLoad { model: "a".into(), exit_code: Some(-1058471934) }];
+        let reason = stop_reason(&blocked, &Cause::Other);
+        assert!(reason.contains("failed to load (Windows refused to load an engine file"), "{reason}");
     }
 
     #[test]
