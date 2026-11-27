@@ -385,7 +385,7 @@ repository root uses the checkout's own files.
 | `logs/api.log`, `logs/web.log` | the chat requests the API front refused or saw broken off; golem's own web searches and fetches |
 | `logs/download-model-*.log`, `logs/agent/` | one log per `pull`, the newest ten kept; the agent suite's transcripts, one per model, API and task |
 | `logs/*.log.1` | a log golem appends to, set aside past 8 MiB (the engine truncates its own at each start) |
-| `.local/` | installed engine builds, the pid file, the service endpoint, the dev toolchain |
+| `.local/` | installed engine builds, the pid file, the service endpoint, the dev toolchain, and `golem.lock` while a `bench`, `eval`, `tune` or `install` runs (`up` and `restart` refuse meanwhile) |
 
 ## The container
 

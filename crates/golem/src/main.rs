@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use golem::config::Overrides;
 use golem::desktop::{self, FrontEnd, Launch};
 use golem::{
-    auto_tune, client, install, launch, logs, measure, paths, pull, runner, service, setup, tui,
+    auto_tune, client, install, launch, lock, logs, measure, paths, pull, runner, service, setup, tui,
     tune, update, web,
 };
 
@@ -106,12 +106,12 @@ async fn main() -> ExitCode {
         Some("app") => cmd_open_console().await,
         Some("status") => cmd_status(),
         Some("profile") => cmd_profile(&args[1..]),
-        Some("bench") => code(measure::bench(&prepare_home(), &args[1..])),
-        Some("eval") => code(measure::eval(&prepare_home(), &args[1..])),
+        Some("bench") => locked("bench", |home| measure::bench(home, &args[1..])),
+        Some("eval") => locked("eval", |home| measure::eval(home, &args[1..])),
         Some("logs") => code(logs::run(&prepare_home(), &args[1..])),
         Some("pull") => code(pull::run(&prepare_home(), &args[1..])),
         Some("setup") => code(setup::run(&prepare_home(), &args[1..])),
-        Some("install") => code(install::run(&prepare_home(), &args[1..])),
+        Some("install") => locked("install", |home| install::run(home, &args[1..])),
         Some("update") => code(update::run(&prepare_home(), &args[1..])),
         Some("service") => code(service::run(&prepare_home(), &args[1..])),
         Some("env") => {
@@ -122,9 +122,9 @@ async fn main() -> ExitCode {
         // `tune --auto` is the driver, not the sweep: it picks the model and
         // then hands each candidate to `tune::run`.
         Some("tune") if args[1..].iter().any(|a| a == "--auto") => {
-            code(auto_tune::run(&prepare_home(), &args[1..]))
+            locked("tune", |home| auto_tune::run(home, &args[1..]))
         }
-        Some("tune") => cmd_tune(&args[1..]),
+        Some("tune") => locked("tune", |home| tune::run(home, &args[1..])),
         Some(action @ ("up" | "down" | "start" | "stop" | "restart")) => {
             cmd_driver(action, &args[1..])
         }
@@ -157,13 +157,16 @@ fn cmd_status() -> ExitCode {
     code(exit)
 }
 
-/// `golem tune [preset]`: search, decide and gate. 0 when a setup was found,
-/// 1 when none was, 2 for flags it could not read.
-fn cmd_tune(args: &[String]) -> ExitCode {
+/// Run an engine-touching verb holding the home's lock (`lock`): one such
+/// command at a time, the next refused with the holder named.
+fn locked(verb: &str, run: impl FnOnce(&Path) -> i32) -> ExitCode {
     let home = prepare_home();
-    match tune::run(&home, args) {
-        0 => ExitCode::SUCCESS,
-        code => ExitCode::from(code as u8),
+    match lock::acquire(&home, verb) {
+        Ok(_guard) => code(run(&home)),
+        Err(message) => {
+            eprintln!("[FAIL] {message}");
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -186,6 +189,16 @@ fn cmd_driver(action: &str, rest: &[String]) -> ExitCode {
                 ExitCode::from(1)
             }
         };
+    }
+
+    // An engine started or restarted under a running measurement swaps the
+    // setup it measures; a stop is left free - it makes the measurement fail
+    // loudly, and is what frees the card in a hurry.
+    if matches!(action, "up" | "start" | "restart") {
+        if let Err(message) = lock::check(&home) {
+            eprintln!("[FAIL] {message}");
+            return ExitCode::from(1);
+        }
     }
 
     if matches!(action, "up" | "start") {

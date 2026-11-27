@@ -774,8 +774,9 @@ fn image_of_row(row: &str) -> Option<String> {
 /// hands a pid out again once its process has gone, so after a reboot or a
 /// killed service the pid file's number is soon some other program's, and
 /// stopping it by number would end that program's whole tree. A pid file
-/// with no name is taken at its pid.
-fn is_engine(pid: u32, image: Option<&str>) -> bool {
+/// with no name is taken at its pid. The home's lock (`lock`) is read the
+/// same way.
+pub(crate) fn is_engine(pid: u32, image: Option<&str>) -> bool {
     if pid == 0 {
         return false;
     }

@@ -21,6 +21,7 @@ pub mod eval;
 pub mod facts;
 pub mod install;
 pub mod launch;
+pub mod lock;
 pub mod logs;
 pub mod machine;
 pub mod measure;

@@ -48,6 +48,11 @@ pub fn watch_progress(
 pub fn golem(home: &Path, args: &[String]) -> std::io::Result<Command> {
     let mut command = Command::new(std::env::current_exe()?);
     command.args(args).env("GOLEM_HOME", home);
+    // A command holding the home's lock hands it to the golem it starts
+    // (the tuner's benches and gate), which would otherwise wait on it.
+    if let Some(pid) = crate::lock::held() {
+        command.env(crate::lock::HOLDER_ENV, pid.to_string());
+    }
     Ok(command)
 }
 
