@@ -54,7 +54,14 @@ const backendOf = (r) => {
 // The build as a row names it, with the backend when the row recorded one.
 const buildOf = (r) => (r.backend ? `${r.engine_build} ${r.backend}` : r.engine_build || "");
 const quantTag = (q) => (q ? ` <span class="quant">${esc(q)}</span>` : "");
-const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+// Every request has a deadline: a service that stops answering mid-request
+// would otherwise leave a poll awaiting forever - the page frozen on its
+// last state - and a button disabled. A fetch past it throws, as a refused
+// one does, and the next poll tries again. A POST gets longer: api/fit
+// reads a GGUF header over the network.
+const GET_MS = 20000, POST_MS = 120000;
+const get = (path) => fetch(path, { cache: "no-store", signal: AbortSignal.timeout(GET_MS) });
+const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body, signal: AbortSignal.timeout(POST_MS) });
 
 // ---- the window (golem app) -------------------------------------------
 // The app opens the page with ?app; the title bar then moves, resizes and
@@ -497,7 +504,7 @@ $("cx-key-copy").onclick = () => CHAT && copyText(CHAT.key, $("cx-key-copy"), "C
 document.querySelectorAll("[data-copy]").forEach((b) => b.onclick = () => copyText($(b.dataset.copy).textContent, b, "Copy"));
 async function loadChat() {
   if (CHAT) return CHAT;
-  try { CHAT = await (await fetch("api/chat", { cache: "no-store" })).json(); } catch (e) { return null; }
+  try { CHAT = await (await get("api/chat")).json(); } catch (e) { return null; }
   return CHAT;
 }
 
@@ -719,7 +726,7 @@ function renderJobLog(pre, text) {
 async function pollOnce() {
   let live = false;
   try {
-    const r = await fetch("results.jsonl", { cache: "no-store" });
+    const r = await get("results.jsonl");
     if (r.ok) {
       const rows = parseRows(await r.text());
       if (rows.length !== ROWS.length || (rows.length && rows[rows.length - 1].ts !== ROWS[ROWS.length - 1]?.ts)) {
@@ -740,12 +747,12 @@ async function pollOnce() {
   }
   if (!live) return;
   let state = null;
-  try { state = await (await fetch("api/state", { cache: "no-store" })).json(); renderState(state); }
+  try { state = await (await get("api/state")).json(); renderState(state); }
   catch (e) { $("c-state-text").textContent = "No state"; }
   ENGINE_UP = !!state?.up;
   if (!$("tab-chat").hidden) showChat();
   try {
-    const models = await (await fetch("api/models", { cache: "no-store" })).json();
+    const models = await (await get("api/models")).json();
     renderServing(models, state);
     renderModels(models, state);
   }
@@ -755,7 +762,7 @@ async function pollOnce() {
   // After the strip, which reads the default model's quant for Connect.
   if (await loadChat()) renderConnect(state);
   try {
-    const l = await (await fetch("api/logs", { cache: "no-store" })).json();
+    const l = await (await get("api/logs")).json();
     $("log-file").textContent = l.file ? l.file : "No engine log yet. It starts with the engine.";
     renderEngineLog($("engine-log"), l);
   } catch (e) { /* no log */ }
@@ -810,7 +817,7 @@ const APPLIES = {
 async function loadSettings() {
   const box = $("set-groups");
   let list;
-  try { list = await (await fetch("api/settings", { cache: "no-store" })).json(); }
+  try { list = await (await get("api/settings")).json(); }
   catch (e) { box.innerHTML = `<div class="surface empty">This service has no settings to offer: update Golem.</div>`; return; }
   const groups = [];
   list.forEach((s) => { let g = groups.find((x) => x.name === s.group); if (!g) groups.push(g = { name: s.group, items: [] }); g.items.push(s); });
