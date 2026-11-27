@@ -514,6 +514,11 @@ fn ensure_models(home: &Path, plan: &Startup, out: &mut dyn Write) -> Result<(),
 
 /// Spawn the server, record its pid, and wait for it to answer.
 fn start(home: &Path, plan: &Startup, endpoint: &engine::Endpoint, out: &mut dyn Write) -> Result<(), String> {
+    // The server truncates its log when it opens it; one that dies before
+    // that (a DLL refused at load) would leave the last run's log behind,
+    // and its tail would read as this start's failure. Emptied here, the
+    // log is this start's whatever happens.
+    let _ = std::fs::write(&plan.log, "");
     let program = engine_program(plan);
     let image = program.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     let mut command = Command::new(&program);
@@ -1685,12 +1690,16 @@ mod tests {
         // reason - which is the server's own last words and its exit code.
         let dir = home("up-dies");
         std::fs::create_dir_all(dir.join("logs")).expect("logs");
-        std::fs::write(dir.join("logs/server.log"), "boom: bad flag\n").expect("log");
+        // The last run's log: a server that dies before opening its own
+        // does not get it shown as its failure.
+        std::fs::write(dir.join("logs/server.log"), "an earlier run's last line\n").expect("log");
         let args = if cfg!(windows) { vec!["/c", "exit", "3"] } else { vec!["-c", "exit 3"] };
         let plan = fake_plan(&dir, args);
         let endpoint = engine::Endpoint { port: 1, api_key: String::new() };
-        let err = start(&dir, &plan, &endpoint, &mut std::io::sink()).expect_err("the child exited at once");
+        let mut out = Vec::new();
+        let err = start(&dir, &plan, &endpoint, &mut out).expect_err("the child exited at once");
         assert!(err.contains("exit code 3"), "{err}");
+        assert!(!String::from_utf8_lossy(&out).contains("an earlier run"));
         // The pid file was written before the wait and goes with the server.
         assert!(!dir.join(".local/llama-server.pid").exists());
         std::fs::remove_dir_all(&dir).ok();
