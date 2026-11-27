@@ -19,6 +19,8 @@ pub mod discover;
 pub mod engine;
 pub mod eval;
 pub mod facts;
+#[cfg(test)]
+pub(crate) mod fake_engine;
 pub mod install;
 pub mod launch;
 pub mod lock;
